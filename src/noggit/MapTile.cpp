@@ -588,6 +588,9 @@ void MapTile::saveTile(World* world)
 
 void MapTile::save(World* world, bool save_using_mclq_liquids)
 {
+  // TODO: Saving
+  return;
+
   Log << "Saving ADT \"" << _file_key.stringRepr() << "\"." << std::endl;
 
   int lID;  // This is a global counting variable. Do not store something in here you need later.

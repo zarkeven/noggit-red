@@ -93,6 +93,7 @@ public:
   std::unique_ptr<TextureSet> texture_set;
 
   int holes;
+  uint64_t holes_highres;
   bool currently_paintable = true;
 
   unsigned int areaID;

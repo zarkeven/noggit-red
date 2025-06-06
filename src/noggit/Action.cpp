@@ -167,6 +167,7 @@ void Noggit::Action::undo(bool redo)
   }
   if (_flags & ActionFlags::eCHUNKS_HOLES)
   {
+    // TODO: high res holes
     for (auto& pair : redo ? _chunk_holes_post : _chunk_holes_pre)
     {
       pair.first->holes = pair.second;

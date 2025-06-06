@@ -337,6 +337,7 @@ void map_horizon::update_horizon_tile(MapTile* mTile)
         }
     }
     // Holes
+    // TODO: high res holes
     for (int i = 0; i < 16; ++i)
     {
         std::bitset<16>wdlHoleMask(0);

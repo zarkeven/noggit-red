@@ -124,14 +124,14 @@ struct ENTRY_MODF
   uint16_t  scale;
 };
 
+#pragma pack(push, 1)
 struct MapChunkHeader {
   mcnk_flags flags;
   uint32_t ix = 0;
   uint32_t iy = 0;
   uint32_t nLayers = 0;
   uint32_t nDoodadRefs = 0;
-  uint32_t ofsHeight = 0;
-  uint32_t ofsNormal = 0;
+  uint64_t holesHighRes = 0;
   uint32_t ofsLayer = 0;
   uint32_t ofsRefs = 0;
   uint32_t ofsAlpha = 0;
@@ -154,6 +154,7 @@ struct MapChunkHeader {
   uint32_t unused1 = 0;
   uint32_t unused2 = 0;
 };
+#pragma pack(pop)
 
 struct MCLYFlags
 {

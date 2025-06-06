@@ -139,6 +139,7 @@ void MapChunk::parseRootMCNK(BlizzardArchive::ClientFile* f, bool bigAlpha, tile
     py = header.iy;
 
     holes = header.holes;
+    holes_highres = header.holesHighRes;
 
     zbase = zbase * -1.0f + ZEROPOINT;
     xbase = xbase * -1.0f + ZEROPOINT;
@@ -400,6 +401,7 @@ void MapChunk::parseObj0MCNK(BlizzardArchive::ClientFile* f, bool bigAlpha, tile
 
 auto MapChunk::getHoleMask(void) const -> unsigned
 {
+  // TODO: high res holes
   return static_cast<unsigned>(holes);
 }
 
@@ -1459,6 +1461,7 @@ bool MapChunk::isHole(int i, int j)
 
 void MapChunk::setHole(glm::vec3 const& pos, float radius, bool big, bool add)
 {
+  // TODO: high res holes
   if (big)
   {
     holes = add ? 0xFFFFFFFF : 0x0;
@@ -1543,8 +1546,7 @@ void MapChunk::save(util::sExtendableArray& lADTFile
 
   lMCNK_header->nLayers = 0;
   lMCNK_header->nDoodadRefs = 0;
-  lMCNK_header->ofsHeight = 0;
-  lMCNK_header->ofsNormal = 0;
+  lMCNK_header->holesHighRes = 0;
   lMCNK_header->ofsLayer = 0;
   lMCNK_header->ofsRefs = 0;
   lMCNK_header->ofsAlpha = 0;
@@ -1593,7 +1595,7 @@ void MapChunk::save(util::sExtendableArray& lADTFile
 
   auto header_ptr = lADTFile.GetPointer<MapChunkHeader>(lMCNK_Position + 8);
 
-  header_ptr->ofsHeight = lCurrentPosition - lMCNK_Position;
+ // header_ptr->ofsHeight = lCurrentPosition - lMCNK_Position;
 
   auto const lHeightmap = lADTFile.GetPointer<float>(lCurrentPosition + 8);
 
@@ -1635,7 +1637,7 @@ void MapChunk::save(util::sExtendableArray& lADTFile
   lADTFile.Extend(8 + lMCNR_Size);
   SetChunkHeader(lADTFile, lCurrentPosition, 'MCNR', lMCNR_Size);
 
-  header_ptr->ofsNormal = lCurrentPosition - lMCNK_Position;
+ //header_ptr->ofsNormal = lCurrentPosition - lMCNK_Position;
 
   auto const lNormals = lADTFile.GetPointer<char>(lCurrentPosition + 8);
 

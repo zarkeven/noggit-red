@@ -672,6 +672,7 @@ void TileRender::initChunkData(MapChunk* chunk)
 {
   auto& chunk_render_instance = _chunk_instance_data[chunk->px * 16 + chunk->py];
 
+  // TODO: high res holes, we have no space for that in this uniform block tho
   chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[0] = chunk->holes;
   chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[1] = chunk->header_flags.flags.impass;
   chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[2] = static_cast<int>(chunk->texture_set->num());
