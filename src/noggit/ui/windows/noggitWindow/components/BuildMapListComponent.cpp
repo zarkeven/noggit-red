@@ -36,20 +36,27 @@ void BuildMapListComponent::buildMapList(Noggit::Ui::Windows::NoggitWindow* pare
 
     Widget::MapListData map_list_data{};
 
-    for (auto const& value: record.Columns["MapName_lang"].Values)
-    {
-      if (value.empty())
-        continue;
-
-      map_list_data.map_name = QString::fromUtf8(value.c_str());
-      break;
+    if (record.Columns["MapName_lang"].Values.size() == 0 && record.Columns["MapName_lang"].Value != "") {
+        map_list_data.map_name = QString::fromUtf8(record.Columns["MapName_lang"].Value.c_str());
     }
+    else {
+        for (auto const& value : record.Columns["MapName_lang"].Values)
+        {
+            if (value.empty())
+                continue;
+
+            map_list_data.map_name = QString::fromUtf8(value.c_str());
+            break;
+        }
+    }
+
+
 
     map_list_data.map_id = record.RecordId;
     map_list_data.map_type_id = std::stoi(record.Columns["InstanceType"].Value);
     map_list_data.expansion_id = std::stoi(record.Columns["ExpansionID"].Value);
 
-    if (map_list_data.map_type_id < 0 || map_list_data.map_type_id > 5 || !World::IsEditableWorld(record))
+    if (map_list_data.map_type_id < 0 || map_list_data.map_type_id > 5  || !World::IsEditableWorld(record))
       continue;
 
     map_list_data.wmo_map = (World::IsWMOWorld(record));
