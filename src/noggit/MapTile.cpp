@@ -112,25 +112,23 @@ void MapTile::waitForChildrenLoaded()
 
 void MapTile::finishLoading()
 {
-  
   if (finished)
     return;
 
-  BlizzardArchive::ClientFile theFile(_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
+  BlizzardArchive::ClientFile rootADTFile(_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
 
-  Log << "Opening tile " << index.x << ", " << index.z << " (\"" << _file_key.stringRepr() << "\") from " << (theFile.isExternal() ? "disk" : "MPQ") << "." << std::endl;
+  Log << "Opening root ADT tile " << index.x << ", " << index.z << " (\"" << _file_key.stringRepr() << "\") from " << (rootADTFile.isExternal() ? "disk" : "game storage") << "." << std::endl;
 
   // - Parsing the file itself. --------------------------
 
-  // We store this data to load it at the end.
-  uint32_t lMCNKOffsets[256];
   std::vector<ENTRY_MDDF> lModelInstances;
   std::vector<ENTRY_MODF> lWMOInstances;
 
   std::vector<std::string> mModelFilenames;
   std::vector<std::string> mWMOFilenames;
 
-  // std::map<std::string, mtxf_entry> _mtxf_entries;
+  const float xPositions[] = { this->xbase, this->xbase + 266.0f, this->xbase + 533.0f };
+  const float yPositions[] = { this->zbase, this->zbase + 266.0f, this->zbase + 533.0f };
 
   uint32_t fourcc;
   uint32_t size;
@@ -138,254 +136,259 @@ void MapTile::finishLoading()
   MHDR Header;
 
   // - MVER ----------------------------------------------
-
   uint32_t version;
-
-  theFile.read(&fourcc, 4);
-  theFile.seekRelative(4);
-  theFile.read(&version, 4);
-
+  rootADTFile.read(&fourcc, 4);
+  rootADTFile.seekRelative(4);
+  rootADTFile.read(&version, 4);
   assert(fourcc == 'MVER' && version == 18);
 
   // - MHDR ----------------------------------------------
-
-  theFile.read(&fourcc, 4);
-  theFile.seekRelative(4);
-
+  rootADTFile.read(&fourcc, 4);
+  rootADTFile.seekRelative(4);
   assert(fourcc == 'MHDR');
-
-  theFile.read(&Header, sizeof(MHDR));
-
+  rootADTFile.read(&Header, sizeof(MHDR));
   mFlags = Header.flags;
 
-  // - MCIN ----------------------------------------------
+  bool loaded_chunks[256] = {false};
+  int loaded_root_chunk_count = 0, loaded_obj0_chunk_count = 0, loaded_tex0_chunk_count = 0;
 
-  theFile.seek(Header.mcin + 0x14);
-  theFile.read(&fourcc, 4);
-  theFile.seekRelative(4);
+  while (!rootADTFile.isEof()) {
+    if (!rootADTFile.read(&fourcc, 4)) break;
+    if (!rootADTFile.read(&size, 4)) break;
 
-  assert(fourcc == 'MCIN');
+    switch (fourcc) {
+      //case 'MH2O':
+      //  if (Header.mh2o != 0) {
+      //    int ofsW = static_cast<int>(theFile.getPos());
+      //    Water.readFromFile(theFile, ofsW);
+      //  }
+      //  skip_chunk(size);
+      //  break;
+      case 'MFBO':
+        int16_t mMaximum[9], mMinimum[9];
+        rootADTFile.read(mMaximum, sizeof(mMaximum));
+        rootADTFile.read(mMinimum, sizeof(mMinimum));
+        for (int y = 0; y < 3; y++) {
+            for (int x = 0; x < 3; x++) {
+                int pos = x + y * 3;
+                auto&& z{ std::minmax (mMinimum[pos], mMaximum[pos]) };
+                mMinimumValues[pos] = { xPositions[x], static_cast<float>(z.first), yPositions[y] };
+                mMaximumValues[pos] = { xPositions[x], static_cast<float>(z.second), yPositions[y] };
+            }
+        }
+        break;
+      case 'MCNK': {
+		  auto prevPos = rootADTFile.getPos();
+          int chunkIndex = loaded_root_chunk_count;
+          unsigned x = chunkIndex / 16;
+          unsigned z = chunkIndex % 16;
+          mChunks[x][z] = std::make_unique<MapChunk>(this, mBigAlpha, _mode, _context, false, 0, _load_textures);
 
-  for (int i = 0; i < 256; ++i)
-  {
-    theFile.read(&lMCNKOffsets[i], 4);
-    theFile.seekRelative(0xC);
-  }
+          auto& chunk = mChunks[x][z];
+          chunk->parseRootMCNK(&rootADTFile, mBigAlpha, _mode, _context, false);
+          loaded_root_chunk_count++;
 
-  // - MTEX ----------------------------------------------
-
-  if (_load_textures)
-  {
-    theFile.seek(Header.mtex + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MTEX');
-
-    {
-      char const* lCurPos = reinterpret_cast<char const*>(theFile.getPointer());
-      char const* lEnd = lCurPos + size;
-
-      while (lCurPos < lEnd)
+		  // Ensure the chunk is fully parsed
+		  rootADTFile.seek(prevPos + size);
+          break;
+      }
+      default:
       {
-        mTextureFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(std::string(lCurPos)));
-        lCurPos += strlen(lCurPos) + 1;
+          rootADTFile.seekRelative(size);
+          break;
       }
     }
   }
+
+  rootADTFile.close();
+
+  // Load OBJ0
+  BlizzardArchive::Listfile::FileKey _obj_file_key;
+  _obj_file_key.setFilepath(_file_key.filepath().substr(0, _file_key.filepath().size() - 4) + "_obj0.adt");
+  BlizzardArchive::ClientFile obj0ADTFile(_obj_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
+
+  Log << "Opening OBJ0 ADT tile " << index.x << ", " << index.z << " (\"" << _obj_file_key.stringRepr() << "\") from " << (obj0ADTFile.isExternal() ? "disk" : "game storage") << "." << std::endl;
+  
+  auto client_data = Noggit::Application::NoggitApplication::instance()->clientData();
+
+  while (!obj0ADTFile.isEof()) {
+      if (!obj0ADTFile.read(&fourcc, 4)) break;
+      if (!obj0ADTFile.read(&size, 4)) break;
+      auto prevPos = obj0ADTFile.getPos();
+      switch (fourcc) {
+      case 'MCNK': 
+            {
+              int chunkIndex = loaded_obj0_chunk_count;
+              unsigned x = chunkIndex / 16;
+              unsigned z = chunkIndex % 16;
+
+              auto& chunk = mChunks[x][z];
+              chunk->parseObj0MCNK(&obj0ADTFile, mBigAlpha, _mode, _context);
+              loaded_obj0_chunk_count++;
+
+              // Ensure the chunk is fully parsed
+              obj0ADTFile.seek(prevPos + size);
+              break;
+          }
+            case 'MDDF':
+              if (_load_models) {
+                ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(obj0ADTFile.getPointer());
+                for (unsigned int i = 0; i < size / sizeof(ENTRY_MDDF); ++i) {
+                  lModelInstances.push_back(mddf_ptr[i]);
+                }
+              }
+
+              obj0ADTFile.seek(prevPos + size);
+              break;
+            case 'MODF':
+              if (_load_models) {
+                ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(obj0ADTFile.getPointer());
+                for (unsigned int i = 0; i < size / sizeof(ENTRY_MODF); ++i) {
+                  lWMOInstances.push_back(modf_ptr[i]);
+                  if(lWMOInstances[i].scale == 0.0f)
+                    lWMOInstances[i].scale = 1024.0f;
+                }
+              }
+
+              obj0ADTFile.seek(prevPos + size);
+              break;
+          default: {
+              obj0ADTFile.seekRelative(size);
+              break;
+          }
+      }
+  }
+
+  obj0ADTFile.close();
+
+  // Load TEX0
+  BlizzardArchive::Listfile::FileKey _tex_file_key;
+  _tex_file_key.setFilepath(_file_key.filepath().substr(0, _file_key.filepath().size() - 4) + "_tex0.adt");
+
+  BlizzardArchive::ClientFile tex0ADTFile(_tex_file_key, client_data);
+
+  Log << "Opening TEX0 ADT tile " << index.x << ", " << index.z << " (\"" << _tex_file_key.stringRepr() << "\") from " << (tex0ADTFile.isExternal() ? "disk" : "game storage") << "." << std::endl;
+
+  while (!tex0ADTFile.isEof()) {
+      if (!tex0ADTFile.read(&fourcc, 4)) break;
+      if (!tex0ADTFile.read(&size, 4)) break;
+
+      switch (fourcc) {
+          case 'MCNK':
+          {
+              auto prevPos = tex0ADTFile.getPos();
+              int chunkIndex = loaded_tex0_chunk_count;
+              unsigned x = chunkIndex / 16;
+              unsigned z = chunkIndex % 16;
+
+              auto& chunk = mChunks[x][z];
+              chunk->parseTex0MCNK(&tex0ADTFile, mBigAlpha, _mode, _context, false);
+              loaded_tex0_chunk_count++;
+
+              // Ensure the chunk is fully parsed
+              tex0ADTFile.seek(prevPos + size);
+              break;
+          }
+          case 'MTXF': {
+              int count = size / 0x4;
+              std::vector<mtxf_entry> mtxf_data(count);
+              rootADTFile.read(mtxf_data.data(), size);
+              for (int i = 0; i < count; ++i) {
+                  if (mtxf_data[i].use_cubemap)
+                      _mtxf_entries[mTextureFilenames[i]] = mtxf_data[i];
+              }
+              break;
+          }
+          case 'MDID': {
+              int count = size / 0x4;
+              for (int i = 0; i < count; ++i) {
+                  uint32_t fileDataID;
+				  tex0ADTFile.read(&fileDataID, 4);
+
+                  auto filename = client_data->listfile()->getPath(fileDataID);
+                  mTextureFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(filename));
+              }
+              break;
+          }
+          case 'MHID': {
+              int count = size / 0x4;
+              for (int i = 0; i < count; ++i) {
+                  uint32_t fileDataID;
+                  tex0ADTFile.read(&fileDataID, 4);
+
+                  auto filename = client_data->listfile()->getPath(fileDataID);
+                  mHeightTextureFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(filename));
+              }
+              break;
+          }
+          case 'MTXP':
+          {
+              int count = size / 0x10;
+              for (size_t i = 0; i < count; i++) {
+                  texture_heightmapping_data heightMappingDataEntry;
+                  uint flags;
+                  tex0ADTFile.read(&flags, 4);
+                  heightMappingDataEntry.uvScale = flags >> 4;
+                  tex0ADTFile.read(&heightMappingDataEntry.heightScale, 4);
+                  tex0ADTFile.read(&heightMappingDataEntry.heightOffset, 4);
+                  tex0ADTFile.seekRelative(4); // skip 4 bytes
+                  mHeightMappingData.emplace_back(heightMappingDataEntry);
+              }
+              break;
+          }
+          default: 
+          {
+              tex0ADTFile.seekRelative(size);
+              break;
+          }
+      }
+  }
+
+  for(int i = 0; i < mHeightTextureFilenames.size(); i++)
+	  LogDebug << "MapTile::load: Height texture filename[" << i << "] = " << mHeightTextureFilenames[i] << std::endl;
+
+  tex0ADTFile.close();
+
+  // loop over 16x16 chunks and load them
+  for (int x = 0; x < 16; ++x)
+  {
+    for (int z = 0; z < 16; ++z)
+    {
+        if (!mChunks[x][z]) {
+            LogError << "MapTile::load: Chunk at " << x << "," << z << " is null!" << std::endl;
+			continue;
+        }
+        
+        auto& chunk = mChunks[x][z];
+        if(!chunk->root_parsed || !chunk->tex0_parsed || !chunk->obj0_parsed)
+        {
+          LogError << "MapTile::load: Chunk at " << x << "," << z << " is not fully parsed!" << std::endl;
+          continue;
+		}
+
+        _renderer.initChunkData(chunk.get());
+        loaded_chunks[x * 16 + z] = true;
+    }
+  }
+
+  // can be cleared after texture sets are loaded in chunks.
+  _mtxf_entries.clear();
+  //mHeightTextureFilenames.clear();
+  //mTextureFilenames.clear();
+
+  // - Load models -----------------------------------------
   if (_load_models)
   {
-    // - MMDX ----------------------------------------------
-
-    theFile.seek(Header.mmdx + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MMDX');
-
-    {
-      char const* lCurPos = reinterpret_cast<char const*>(theFile.getPointer());
-      char const* lEnd = lCurPos + size;
-
-      while (lCurPos < lEnd)
-      {
-        mModelFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(std::string(lCurPos)));
-        lCurPos += strlen(lCurPos) + 1;
-      }
-    }
-
-    // - MWMO ----------------------------------------------
-
-    theFile.seek(Header.mwmo + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MWMO');
-
-    {
-      char const* lCurPos = reinterpret_cast<char const*>(theFile.getPointer());
-      char const* lEnd = lCurPos + size;
-
-      while (lCurPos < lEnd)
-      {
-        mWMOFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(std::string(lCurPos)));
-        lCurPos += strlen(lCurPos) + 1;
-      }
-    }
-
-    // - MDDF ----------------------------------------------
-
-    theFile.seek(Header.mddf + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MDDF');
-
-    ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(theFile.getPointer());
-    for (unsigned int i = 0; i < size / sizeof(ENTRY_MDDF); ++i)
-    {
-      lModelInstances.push_back(mddf_ptr[i]);
-    }
-
-    // - MODF ----------------------------------------------
-
-    theFile.seek(Header.modf + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MODF');
-
-    ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(theFile.getPointer());
-    for (unsigned int i = 0; i < size / sizeof(ENTRY_MODF); ++i)
-    {
-      lWMOInstances.push_back(modf_ptr[i]);
-      if(lWMOInstances[i].scale == 0.0f)
-        lWMOInstances[i].scale = 1024.0f;
-    }
-  }
-
-  // - MISC ----------------------------------------------
-
-  //! \todo  Parse all chunks in the new style!
-
-  // - MH2O ----------------------------------------------
-  if (Header.mh2o != 0) {
-    theFile.seek(Header.mh2o + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    int ofsW = Header.mh2o + 0x14 + 0x8;
-    assert(fourcc == 'MH2O');
-
-    Water.readFromFile(theFile, ofsW);
-
-    // Water.update_underground_vertices_depth();
-  }
-
-  // - MFBO ----------------------------------------------
-
-  if (mFlags & 1)
-  {
-    theFile.seek(Header.mfbo + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MFBO');
-
-    int16_t mMaximum[9], mMinimum[9];
-    theFile.read(mMaximum, sizeof(mMaximum));
-    theFile.read(mMinimum, sizeof(mMinimum));
-
-    const float xPositions[] = { this->xbase, this->xbase + 266.0f, this->xbase + 533.0f };
-    const float yPositions[] = { this->zbase, this->zbase + 266.0f, this->zbase + 533.0f };
-
-    for (int y = 0; y < 3; y++)
-    {
-      for (int x = 0; x < 3; x++)
-      {
-        int pos = x + y * 3;
-        // fix bug with old noggit version inverting values
-        auto&& z{ std::minmax (mMinimum[pos], mMaximum[pos]) };
-
-        mMinimumValues[pos] = { xPositions[x], static_cast<float>(z.first), yPositions[y] };
-        mMaximumValues[pos] = { xPositions[x], static_cast<float>(z.second), yPositions[y] };
-      }
-    }
-  }
-
-  // - MTXF ----------------------------------------------
-  if (Header.mtxf != 0)
-  {
-      theFile.seek(Header.mtxf + 0x14);
-
-      theFile.read(&fourcc, 4);
-      theFile.read(&size, 4);
-
-      assert(fourcc == 'MTXF');
-
-      int count = size / 0x4;
-
-      std::vector<mtxf_entry> mtxf_data(count);
-
-      theFile.read(mtxf_data.data(), size);
-
-      for (int i = 0; i < count; ++i)
-      {
-          // _mtxf_entries[mTextureFilenames[i]] = mtxf_data[i];
-          // only save those with flags set
-          if (mtxf_data[i].use_cubemap)
-              _mtxf_entries[mTextureFilenames[i]] = mtxf_data[i];
-      }
-  }
-
-  // - Done. ---------------------------------------------
-
-  // - Load textures -------------------------------------
-
-  //! \note We no longer pre load textures but the chunks themselves do.
-
-  if (_load_models)
-  {
-    // - Load WMOs -----------------------------------------
-
     for (auto const& object : lWMOInstances)
     {
-      add_model(_world->add_wmo_instance(WMOInstance(mWMOFilenames[object.nameID],
-                                                     &object, _context), _tile_is_being_reloaded, false));
+      add_model(_world->add_wmo_instance(WMOInstance(client_data->listfile()->getPath(object.nameID), &object, _context), _tile_is_being_reloaded, false));
     }
-
-    // - Load M2s ------------------------------------------
-
     for (auto const& model : lModelInstances)
     {
-      add_model(_world->add_model_instance(ModelInstance(mModelFilenames[model.nameID],
-                                                         &model, _context), _tile_is_being_reloaded, false));
+      add_model(_world->add_model_instance(ModelInstance(client_data->listfile()->getPath(model.nameID), &model, _context), _tile_is_being_reloaded, false));
     }
-
     _world->need_model_updates = true;
   }
-
-  // - Load chunks ---------------------------------------
-
-  for (int nextChunk = 0; nextChunk < 256; ++nextChunk)
-  {
-    theFile.seek(lMCNKOffsets[nextChunk]);
-
-    unsigned x = nextChunk / 16;
-    unsigned z = nextChunk % 16;
-
-    mChunks[x][z] = std::make_unique<MapChunk> (this, &theFile, mBigAlpha, _mode, _context, false, 0, _load_textures);
-
-    auto& chunk = mChunks[x][z];
-    _renderer.initChunkData(chunk.get());
-  }
-  // can be cleared after texture sets are loaded in chunks.
-  mTextureFilenames.clear();
-  _mtxf_entries.clear();
-
-  theFile.close();
-
-  // - Really done. --------------------------------------
 
   LogDebug << "Done loading tile " << index.x << "," << index.z << "." << std::endl;
   finished = true;
@@ -421,6 +424,24 @@ float MapTile::getMaxHeight()
 float MapTile::getMinHeight()
 {
   return getExtents()[0].y;
+}
+
+texture_heightmapping_data& MapTile::getTextureHeightMappingData(const std::string& filename)
+{
+    auto it = std::find(mTextureFilenames.begin(), mTextureFilenames.end(), filename);
+    uint index = 0;
+
+    if (it != mTextureFilenames.end()) {
+        index = std::distance(mTextureFilenames.begin(), it);
+    }
+
+    if(index >= mHeightMappingData.size())
+    {
+		static texture_heightmapping_data defaultData = { 1, 0, 1 };
+        return defaultData;
+	}
+
+	return mHeightMappingData[index];
 }
 
 void MapTile::forceRecalcExtents()
@@ -1120,7 +1141,7 @@ void MapTile::initEmptyChunks()
 {
   for (int nextChunk = 0; nextChunk < 256; ++nextChunk)
   {
-    mChunks[nextChunk / 16][nextChunk % 16] = std::make_unique<MapChunk> (this, nullptr, mBigAlpha, _mode, _context, true, nextChunk);
+    mChunks[nextChunk / 16][nextChunk % 16] = std::make_unique<MapChunk> (this, mBigAlpha, _mode, _context, true, nextChunk);
   }
 }
 
@@ -1847,11 +1868,6 @@ Noggit::Rendering::TileRender* MapTile::renderer()
 Noggit::Rendering::FlightBoundsRender* MapTile::flightBoundsRenderer()
 {
   return &_fl_bounds_render;
-}
-
-const texture_heightmapping_data& MapTile::GetTextureHeightMappingData(const std::string& name) const
-{
-    return Noggit::Project::CurrentProject::get()->ExtraMapData.GetTextureHeightDataForADT(_world->mapIndex._map_id, index,name);
 }
 
 void MapTile::forceAlphaUpdate()

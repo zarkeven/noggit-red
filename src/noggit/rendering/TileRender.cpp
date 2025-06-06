@@ -550,6 +550,8 @@ bool TileRender::fillSamplers(MapChunk* chunk, unsigned chunk_index,  unsigned d
 
 
   auto& chunk_textures = (*chunk->texture_set->getTextures());
+  auto& chunk_height_textures = (*chunk->texture_set->getHeightTextures());
+
   bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
 
   for (int k = 0; k < chunk->texture_set->num(); ++k)
@@ -562,21 +564,23 @@ bool TileRender::fillSamplers(MapChunk* chunk, unsigned chunk_index,  unsigned d
       continue;
     }
 
-    auto heightRef = chunk_textures[k]->getHeightMap();
-    if (chunk_textures[k]->hasHeightMap() && heightRef)
+    auto hasHeightTexture = false;
+    if (chunk_height_textures.size() > k)
     {
-        heightRef->upload();
+        chunk_height_textures[k]->upload();
 
-        if(!heightRef->is_uploaded())
+        if(!chunk_height_textures[k]->is_uploaded())
         {
             _texture_not_loaded = true;
             continue;
         }
+
+		hasHeightTexture = true;
     }
 
     if (modern_features) {
         // Mists Heightmapping
-        auto hData = chunk->mt->GetTextureHeightMappingData(chunk_textures[k]->file_key().filepath());
+		auto hData = chunk->mt->getTextureHeightMappingData(chunk_textures[k]->file_key().filepath());
         _chunk_instance_data[chunk_index].ChunkTextureUVScale[k] = hData.uvScale;
         _chunk_instance_data[chunk_index].ChunkTextureHeightScale[k] = hData.heightScale;
         _chunk_instance_data[chunk_index].ChunkTextureHeightOffset[k] = hData.heightOffset;
@@ -613,9 +617,9 @@ bool TileRender::fillSamplers(MapChunk* chunk, unsigned chunk_index,  unsigned d
     _chunk_instance_data[chunk_index].ChunkTextureSamplers[k] = sampler_id;
     _chunk_instance_data[chunk_index].ChunkTextureArrayIDs[k] = (*chunk->texture_set->getTextures())[k]->is_specular() ? tex_index : -tex_index;
     
-    if(modern_features && heightRef)
+    if(modern_features && hasHeightTexture)
     {
-        GLuint hTex_array = (*chunk->texture_set->getTextures())[k]->getHeightMap()->texture_array();
+        GLuint hTex_array = (*chunk->texture_set->getHeightTextures())[k]->texture_array();
 
         sampler_id = -1;
         for (int n = 0; n < draw_call.samplers.size(); ++n)

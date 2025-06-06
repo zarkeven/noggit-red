@@ -68,15 +68,15 @@ namespace Noggit::Project
   public:
       //Mists Heightmapping
       // Valid for every map that doesn't override its specific data
-      tsl::robin_map< std::string, texture_heightmapping_data > TextureHeightData_Global;
+      //tsl::robin_map< std::string, texture_heightmapping_data > TextureHeightData_Global;
       // MapID,TileX,TileY, SMTextureParams for this specific ADT, fallback to global otherwise.
-      tsl::robin_map<int, 
-            tsl::robin_map< int, tsl::robin_map<int , tsl::robin_map<std::string, texture_heightmapping_data> >>> TextureHeightData_ADT;
+      //tsl::robin_map<int, 
+      //      tsl::robin_map< int, tsl::robin_map<int , tsl::robin_map<std::string, texture_heightmapping_data> >>> TextureHeightData_ADT;
       
-      void SetTextureHeightData_Global(const std::string& texture, texture_heightmapping_data data, World* worldToUpdate = nullptr); 
-      void SetTextureHeightDataForADT(int mapID, const TileIndex& ti, const std::string& texture, texture_heightmapping_data data, World* worldToUpdate = nullptr);
+      //void SetTextureHeightData_Global(const std::string& texture, texture_heightmapping_data data, World* worldToUpdate = nullptr); 
+      //void SetTextureHeightDataForADT(int mapID, const TileIndex& ti, const std::string& texture, texture_heightmapping_data data, World* worldToUpdate = nullptr);
 
-      const texture_heightmapping_data GetTextureHeightDataForADT(int mapID, const TileIndex& ti, const std::string& texture) const;
+      //const texture_heightmapping_data GetTextureHeightDataForADT(int mapID, const TileIndex& ti, const std::string& texture) const;
   };
   
   struct NoggitProjectObjectPalette
@@ -144,6 +144,6 @@ namespace Noggit::Project
 
     std::shared_ptr<NoggitProject> loadProject(std::filesystem::path const& project_path);
 
-    void loadExtraData(NoggitProject& project);
+    //void loadExtraData(NoggitProject& project);
   };
 }

@@ -5,7 +5,7 @@
 #include <noggit/Alphamap.hpp>
 #include <noggit/ContextObject.hpp>
 #include <noggit/TextureManager.h>
-
+#include <noggit/MapHeaders.h>
 #include <cstdint>
 #include <array>
 
@@ -43,7 +43,7 @@ class TextureSet
 {
 public:
   TextureSet() = delete;
-  TextureSet(MapChunk* chunk, BlizzardArchive::ClientFile* f, size_t base
+  TextureSet(MapChunk* chunk, size_t base
              , bool use_big_alphamaps, bool do_not_fix_alpha_map, bool do_not_convert_alphamaps
              , Noggit::NoggitRenderContext context, MapChunkHeader const& header);
 
@@ -66,6 +66,9 @@ public:
                       , bool entire_chunk = false
                       );
   bool canPaintTexture(scoped_blp_texture_reference const& texture);
+
+  void load_MCLY(BlizzardArchive::ClientFile* f, uint size);
+  void load_MCAL(BlizzardArchive::ClientFile* f, uint size);
 
   const std::string& filename(size_t id);
 
@@ -121,6 +124,7 @@ public:
   layer_info* getMCLYEntries();;
   void setNTextures(size_t n);;
   std::vector<scoped_blp_texture_reference>* getTextures();;
+  std::vector<scoped_blp_texture_reference>* getHeightTextures();;
 
   // get the weight of each texture in a chunk unit
   std::array<float, 4> get_textures_weight_for_unit(unsigned int unit_x, unsigned int unit_y);
@@ -137,8 +141,12 @@ private:
   void update_lod_texture_map(); // todo: remove. WHAT?
 
   MapChunk* _chunk;
+  ENTRY_MCLY entry_mcly[4];
+  bool _use_big_alphamaps;
+  bool _do_not_fix_alpha_map;
 
   std::vector<scoped_blp_texture_reference> textures;
+
   std::array<std::unique_ptr<Alphamap>, MAX_ALPHAMAPS> alphamaps;
 
   // Mists Heightmapping

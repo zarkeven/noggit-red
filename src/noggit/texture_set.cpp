@@ -15,7 +15,7 @@
 #include <algorithm>    // std::min
 #include <sstream>
 
-TextureSet::TextureSet (MapChunk* chunk, BlizzardArchive::ClientFile* f, size_t base
+TextureSet::TextureSet (MapChunk* chunk, size_t base
                         , bool use_big_alphamaps, bool do_not_fix_alpha_map, bool do_not_convert_alphamaps
                         , Noggit::NoggitRenderContext context, MapChunkHeader const& header)
   : nTextures(header.nLayers)
@@ -23,52 +23,57 @@ TextureSet::TextureSet (MapChunk* chunk, BlizzardArchive::ClientFile* f, size_t 
   , _context(context)
   , _chunk(chunk)
 {
-
   std::copy(header.doodadMapping, header.doodadMapping + 8, _doodadMapping.begin());
   std::copy(header.doodadStencil, header.doodadStencil + 8, _doodadStencil.begin());
 
-  if (nTextures)
-  {
-    f->seek(base + header.ofsLayer + 8);
+  _use_big_alphamaps = use_big_alphamaps;
+  _do_not_fix_alpha_map = do_not_fix_alpha_map;
+}
 
-    ENTRY_MCLY tmp_entry_mcly[4];
-
-    for (size_t i = 0; i<nTextures; ++i)
-    {
-      f->read (&tmp_entry_mcly[i], sizeof(ENTRY_MCLY)); // f->read (&_layers_info[i], sizeof(ENTRY_MCLY));
-
-      std::string const& texturefilename = chunk->mt->mTextureFilenames[tmp_entry_mcly[i].textureID];
-      textures.emplace_back (texturefilename, _context);
-
-      if (chunk->mt->_mtxf_entries.contains(texturefilename))
-      {
-          if (chunk->mt->_mtxf_entries[texturefilename].use_cubemap)
-              textures.back().use_cubemap = true;
-      }
-
-      _layers_info[i].effectID = tmp_entry_mcly[i].effectID;
-      _layers_info[i].flags = tmp_entry_mcly[i].flags;
-    }
-
-    size_t alpha_base = base + header.ofsAlpha + 8;
+void TextureSet::load_MCAL(BlizzardArchive::ClientFile* f, uint size) {
+    auto alpha_base = f->getPos();
 
     for (unsigned int layer = 0; layer < nTextures; ++layer)
     {
-      if (_layers_info[layer].flags & FLAG_USE_ALPHA)
-      {
-        f->seek (alpha_base + tmp_entry_mcly[layer].ofsAlpha);
-        alphamaps[layer - 1] = std::make_unique<Alphamap>(f, _layers_info[layer].flags, use_big_alphamaps, do_not_fix_alpha_map);
-      }
+        if (_layers_info[layer].flags & FLAG_USE_ALPHA)
+        {
+            f->seek(alpha_base + entry_mcly[layer].ofsAlpha);
+            alphamaps[layer - 1] = std::make_unique<Alphamap>(f, _layers_info[layer].flags, _use_big_alphamaps, _do_not_fix_alpha_map);
+        }
     }
 
     // always use big alpha for editing / rendering
-    if (!use_big_alphamaps && !_do_not_convert_alphamaps)
+    if (!_use_big_alphamaps && !_do_not_convert_alphamaps)
     {
-      convertToBigAlpha();
+        convertToBigAlpha();
     }
 
-    _chunk->registerChunkUpdate(ChunkUpdateFlags::ALPHAMAP); 
-  }
+    _chunk->registerChunkUpdate(ChunkUpdateFlags::ALPHAMAP);
+}
+
+void TextureSet::load_MCLY(BlizzardArchive::ClientFile* f, uint size) {
+    nTextures = size / sizeof(ENTRY_MCLY);
+
+    //LogDebug << "Loading " << nTextures << " MCLY layers @ " << f->getPos() << std::endl;
+
+    for (size_t i = 0; i < nTextures; ++i)
+    {
+        f->read(&entry_mcly[i], sizeof(ENTRY_MCLY));
+        //LogDebug << "Layer " << i << " has textureID " << entry_mcly[i].textureID << "(" << _chunk->mt->mTextureFilenames[entry_mcly[i].textureID] << "), at " << f->getPos() << " after reading " << std::endl;
+        
+        std::string const& texturefilename = _chunk->mt->mTextureFilenames[entry_mcly[i].textureID];
+        textures.emplace_back(texturefilename, _context);
+        if (_chunk->mt->_mtxf_entries.contains(texturefilename))
+        {
+            if (_chunk->mt->_mtxf_entries[texturefilename].use_cubemap)
+                textures.back().use_cubemap = true;
+        }
+
+		heightTextures.emplace_back(_chunk->mt->mHeightTextureFilenames[entry_mcly[i].textureID], _context);
+
+        _layers_info[i].effectID = entry_mcly[i].effectID;
+        _layers_info[i].flags = entry_mcly[i].flags;
+    }
 }
 
 int TextureSet::addTexture (scoped_blp_texture_reference texture)
@@ -506,6 +511,11 @@ void TextureSet::setNTextures(size_t n)
 std::vector<scoped_blp_texture_reference>* TextureSet::getTextures()
 {
   return &textures;
+}
+
+std::vector<scoped_blp_texture_reference>* TextureSet::getHeightTextures()
+{
+    return &heightTextures;
 }
 
 bool TextureSet::stampTexture(float xbase, float zbase, float x, float z, Brush* brush, float strength, float pressure, scoped_blp_texture_reference texture, QImage* image, bool paint)

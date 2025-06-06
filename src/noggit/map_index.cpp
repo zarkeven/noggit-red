@@ -131,7 +131,7 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
   theFile.read(&mphd, sizeof(MPHD));
 
   mHasAGlobalWMO = mphd.flags & FLAG_GLOBAL_OBJECT;
-  mBigAlpha = mphd.flags & FLAG_BIG_ALPHA;
+  mBigAlpha = mphd.flags & FLAG_BIG_ALPHA || mphd.flags & FLAG_HEIGHT_TEXTURING;
   _sort_models_by_size_class = mphd.flags & FLAG_DOODADS_SORT;
 
   if (!(mphd.flags & FLAG_SHADING))
@@ -687,70 +687,63 @@ void MapIndex::set_sort_models_by_size_class(bool state)
   _sort_models_by_size_class = state;
 }
 
-
 uint32_t MapIndex::getHighestGUIDFromFile(const std::string& pFilename) const
 {
-	uint32_t highGUID = 0;
+
+
+    uint32_t highGUID = 0;
 
     BlizzardArchive::ClientFile theFile(pFilename, Noggit::Application::NoggitApplication::instance()->clientData());
     if (theFile.isEof())
     {
-      return highGUID;
+        return highGUID;
     }
 
-    uint32_t fourcc;
-    uint32_t size;
+    uint32_t fourcc = 0;
+    uint32_t size = 0;
+    MHDR Header{};
 
-    MHDR Header;
+    // Read chunks in any order
+    while (!theFile.isEof()) {
+        if (!theFile.read(&fourcc, 4)) break;
+        if (!theFile.read(&size, 4)) break;
 
-    // - MVER ----------------------------------------------
-
-    uint32_t version;
-
-    theFile.read(&fourcc, 4);
-    theFile.seekRelative(4);
-    theFile.read(&version, 4);
-
-    assert(fourcc == 'MVER' && version == 18);
-
-    // - MHDR ----------------------------------------------
-
-    theFile.read(&fourcc, 4);
-    theFile.seekRelative(4);
-
-    assert(fourcc == 'MHDR');
-
-    theFile.read(&Header, sizeof(MHDR));
-
-    // - MDDF ----------------------------------------------
-
-    theFile.seek(Header.mddf + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MDDF');
-
-    ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(theFile.getPointer());
-    for (unsigned int i = 0; i < size / sizeof(ENTRY_MDDF); ++i)
-    {
-        highGUID = std::max(highGUID, mddf_ptr[i].uniqueID);
+        switch (fourcc) {
+            case 'MVER': {
+                uint32_t version = 0;
+                theFile.read(&version, 4);
+                theFile.seekRelative(size - 4);
+                break;
+            }
+            case 'MHDR': {
+                theFile.read(&Header, sizeof(MHDR));
+                theFile.seekRelative(size - sizeof(MHDR));
+                break;
+            }
+            case 'MDDF': {
+                ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(theFile.getPointer());
+                for (unsigned int i = 0; i < size / sizeof(ENTRY_MDDF); ++i) {
+                    highGUID = std::max(highGUID, mddf_ptr[i].uniqueID);
+                }
+                theFile.seekRelative(size);
+                break;
+            }
+            case 'MODF': {
+                ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(theFile.getPointer());
+                for (unsigned int i = 0; i < size / sizeof(ENTRY_MODF); ++i) {
+                    highGUID = std::max(highGUID, modf_ptr[i].uniqueID);
+                }
+                theFile.seekRelative(size);
+                break;
+            }
+            default: {
+                theFile.seekRelative(size);
+                break;
+            }
+        }
     }
 
-    // - MODF ----------------------------------------------
-
-    theFile.seek(Header.modf + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MODF');
-
-    ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(theFile.getPointer());
-    for (unsigned int i = 0; i < size / sizeof(ENTRY_MODF); ++i)
-    {
-        highGUID = std::max(highGUID, modf_ptr[i].uniqueID);
-    }
     theFile.close();
-
     return highGUID;
 }
 
@@ -817,21 +810,13 @@ uid_fix_status MapIndex::fixUIDs (World* world, bool cancel_on_model_loading_err
 
   auto models = std::make_unique<std::forward_list<ModelInstance>>();
   auto wmos = std::make_unique<std::forward_list<WMOInstance>>();
+  auto client_data = Noggit::Application::NoggitApplication::instance()->clientData();
 
   for (int z = 0; z < 64; ++z)
   {
     for (int x = 0; x < 64; ++x)
     {
       if (!(mTiles[z][x].flags & 1))
-      {
-        continue;
-      }
-
-      std::stringstream filename;
-      filename << "World\\Maps\\" << basename << "\\" << basename << "_" << x << "_" << z << ".adt";
-      BlizzardArchive::ClientFile file(filename.str(), Noggit::Application::NoggitApplication::instance()->clientData());
-
-      if (file.isEof())
       {
         continue;
       }
@@ -851,145 +836,128 @@ uid_fix_status MapIndex::fixUIDs (World* world, bool cancel_on_model_loading_err
 
       MHDR Header;
 
-      // - MVER ----------------------------------------------
-      uint32_t version;
-      file.read(&fourcc, 4);
-      file.seekRelative(4);
-      file.read(&version, 4);
-      assert(fourcc == 'MVER' && version == 18);
+      // OBJ0 ADT
+      std::stringstream filename;
+      filename << "World\\Maps\\" << basename << "\\" << basename << "_" << x << "_" << z << "_obj0.adt";
+      BlizzardArchive::ClientFile obj0ADTFile(filename.str(), Noggit::Application::NoggitApplication::instance()->clientData());
 
-      // - MHDR ----------------------------------------------
-      file.read(&fourcc, 4);
-      file.seekRelative(4);
-      assert(fourcc == 'MHDR');
-      file.read(&Header, sizeof(MHDR));
-
-      // - MDDF ----------------------------------------------
-      file.seek(Header.mddf + 0x14);
-      file.read(&fourcc, 4);
-      file.read(&size, 4);
-      assert(fourcc == 'MDDF');
-
-      ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(file.getPointer());
-
-      for (unsigned int i = 0; i < size / sizeof(ENTRY_MDDF); ++i)
+      if (obj0ADTFile.isEof())
       {
-        bool add = true;
-        ENTRY_MDDF const& mddf = mddf_ptr[i];
-
-        if (!misc::pointInside({ mddf.pos[0], 0, mddf.pos[2] }, tileExtents))
-        {
           continue;
-        }
-
-        // check for duplicates
-        for (ENTRY_MDDF& entry : modelEntries)
-        {
-          if ( mddf.nameID == entry.nameID
-            && misc::float_equals(mddf.pos[0], entry.pos[0])
-            && misc::float_equals(mddf.pos[1], entry.pos[1])
-            && misc::float_equals(mddf.pos[2], entry.pos[2])
-            && misc::float_equals(mddf.rot[0], entry.rot[0])
-            && misc::float_equals(mddf.rot[1], entry.rot[1])
-            && misc::float_equals(mddf.rot[2], entry.rot[2])
-            && mddf.scale == entry.scale
-            )
-          {
-            add = false;
-            break;
-          }
-        }
-
-        if (add)
-        {
-          modelEntries.emplace_front(mddf);
-        }
       }
 
-      // - MODF ----------------------------------------------
-      file.seek(Header.modf + 0x14);
-      file.read(&fourcc, 4);
-      file.read(&size, 4);
-      assert(fourcc == 'MODF');
+      while (!obj0ADTFile.isEof()) {
+          if (!obj0ADTFile.read(&fourcc, 4)) break;
+          if (!obj0ADTFile.read(&size, 4)) break;
 
-      ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(file.getPointer());
+          LogDebug << "Reading ADT chunk at " << obj0ADTFile.getPos() << ": " << fourcc << " ('" << fourcc_to_str(fourcc) << "'), (" << size << " bytes)" << std::endl;
 
-      for (unsigned int i = 0; i < size / sizeof(ENTRY_MODF); ++i)
-      {
-        bool add = true;
-        ENTRY_MODF const& modf = modf_ptr[i];
+          switch(fourcc) {
+              case 'MVER': {
+                  uint32_t version = 0;
+                  obj0ADTFile.read(&version, 4);
+                  assert(version == 18);
+                  break;
+              }
+              case 'MDDF': {
+                  ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(obj0ADTFile.getPointer());
 
-        if (!misc::pointInside({ modf.pos[0], 0, modf.pos[2] }, tileExtents))
-        {
-          continue;
-        }
+                  for (unsigned int i = 0; i < size / sizeof(ENTRY_MDDF); ++i)
+                  {
+                      bool add = true;
+                      ENTRY_MDDF const& mddf = mddf_ptr[i];
 
-        // check for duplicates
-        for (ENTRY_MODF& entry : wmoEntries)
-        {
-          if (modf.nameID == entry.nameID
-            && misc::float_equals(modf.pos[0], entry.pos[0])
-            && misc::float_equals(modf.pos[1], entry.pos[1])
-            && misc::float_equals(modf.pos[2], entry.pos[2])
-            && misc::float_equals(modf.rot[0], entry.rot[0])
-            && misc::float_equals(modf.rot[1], entry.rot[1])
-            && misc::float_equals(modf.rot[2], entry.rot[2])
-            )
-          {
-            add = false;
-            break;
-          }
-        }
+                      if (!misc::pointInside({ mddf.pos[0], 0, mddf.pos[2] }, tileExtents))
+                      {
+                          continue;
+                      }
 
-        if (add)
-        {
-          wmoEntries.emplace_front(modf);
-        }
+                      // check for duplicates
+                      for (ENTRY_MDDF& entry : modelEntries)
+                      {
+                          if (mddf.nameID == entry.nameID
+                              && misc::float_equals(mddf.pos[0], entry.pos[0])
+                              && misc::float_equals(mddf.pos[1], entry.pos[1])
+                              && misc::float_equals(mddf.pos[2], entry.pos[2])
+                              && misc::float_equals(mddf.rot[0], entry.rot[0])
+                              && misc::float_equals(mddf.rot[1], entry.rot[1])
+                              && misc::float_equals(mddf.rot[2], entry.rot[2])
+                              && mddf.scale == entry.scale
+                              )
+                          {
+                              add = false;
+                              break;
+                          }
+                      }
+
+                      if (add)
+                      {
+                          modelEntries.emplace_front(mddf);
+                      }
+                  }
+                  break;
+              }
+              case 'MODF': {
+                  ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(obj0ADTFile.getPointer());
+
+                  for (unsigned int i = 0; i < size / sizeof(ENTRY_MODF); ++i)
+                  {
+                      bool add = true;
+                      ENTRY_MODF const& modf = modf_ptr[i];
+
+                      if (!misc::pointInside({ modf.pos[0], 0, modf.pos[2] }, tileExtents))
+                      {
+                          continue;
+                      }
+
+                      // check for duplicates
+                      for (ENTRY_MODF& entry : wmoEntries)
+                      {
+                          if (modf.nameID == entry.nameID
+                              && misc::float_equals(modf.pos[0], entry.pos[0])
+                              && misc::float_equals(modf.pos[1], entry.pos[1])
+                              && misc::float_equals(modf.pos[2], entry.pos[2])
+                              && misc::float_equals(modf.rot[0], entry.rot[0])
+                              && misc::float_equals(modf.rot[1], entry.rot[1])
+                              && misc::float_equals(modf.rot[2], entry.rot[2])
+                              )
+                          {
+                              add = false;
+                              break;
+                          }
+                      }
+
+                      if (add)
+                      {
+                          wmoEntries.emplace_front(modf);
+                      }
+                  }
+                  break;
+              }
+              default: {
+                  obj0ADTFile.seekRelative(size);
+                  break;
+              }
+		  }
       }
 
-      // - MMDX ----------------------------------------------
-      file.seek(Header.mmdx + 0x14);
-      file.read(&fourcc, 4);
-      file.read(&size, 4);
-      assert(fourcc == 'MMDX');
-
-      {
-        char const* lCurPos = reinterpret_cast<char const*>(file.getPointer());
-        char const* lEnd = lCurPos + size;
-
-        while (lCurPos < lEnd)
-        {
-          modelFilenames.push_back(std::string(lCurPos));
-          lCurPos += strlen(lCurPos) + 1;
-        }
-      }
-
-      // - MWMO ----------------------------------------------
-      file.seek(Header.mwmo + 0x14);
-      file.read(&fourcc, 4);
-      file.read(&size, 4);
-      assert(fourcc == 'MWMO');
-
-      {
-        char const* lCurPos = reinterpret_cast<char const*>(file.getPointer());
-        char const* lEnd = lCurPos + size;
-
-        while (lCurPos < lEnd)
-        {
-          wmoFilenames.push_back(std::string(lCurPos));
-          lCurPos += strlen(lCurPos) + 1;
-        }
-      }
-
-      file.close();
+      obj0ADTFile.close();
 
       for (ENTRY_MDDF& entry : modelEntries)
       {
-        models->emplace_front(modelFilenames[entry.nameID], &entry, _context);
+        BlizzardArchive::Listfile::FileKey doodad_key;
+        doodad_key.setFileDataID(entry.nameID);
+        doodad_key.deduceOtherComponent(client_data->listfile());
+        BlizzardArchive::ClientFile doodadFile(doodad_key, client_data);
+        models->emplace_front(doodad_key.filepath(), &entry, _context);
       }
       for (ENTRY_MODF& entry : wmoEntries)
       {
-        wmos->emplace_front(wmoFilenames[entry.nameID], &entry, _context);
+        BlizzardArchive::Listfile::FileKey doodad_key;
+        doodad_key.setFileDataID(entry.nameID);
+        doodad_key.deduceOtherComponent(client_data->listfile());
+        BlizzardArchive::ClientFile doodadFile(doodad_key, client_data);
+        wmos->emplace_front(doodad_key.filepath(), &entry, _context);
       }
     }
   }

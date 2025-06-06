@@ -79,10 +79,6 @@ struct blp_texture : public AsyncObject
 
   [[nodiscard]]
   async_priority loading_priority() const override;
-  // Mists HeightMapping
-  bool hasHeightMap() const;;
-
-  blp_texture* getHeightMap();;
 private:
   bool _uploaded = false;
 
@@ -93,7 +89,6 @@ private:
 
   bool _is_specular = false;
   bool _is_tileset = false;
-  bool _has_heightmap = false;
 
 private:
   std::map<int, std::vector<uint32_t>> _data;
@@ -101,8 +96,6 @@ private:
   std::optional<GLint> _compression_format;
   int _array_index = -1;
   GLuint _texture_array = 0;
-
-  std::unique_ptr<blp_texture> heightMap;
 };
 
 struct TexArrayParams

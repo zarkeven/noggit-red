@@ -105,6 +105,20 @@ void AsyncLoader::process()
 
       _currently_loading.remove(object);
     }
+    catch (const std::exception& e)
+    {
+      std::lock_guard<std::mutex> const lock(_guard);
+
+      object->error_on_loading();
+      LogError << "Caught std::exception: " << e.what() << std::endl;
+
+      if (object->is_required_when_saving())
+      {
+        _important_object_failed_loading = true;
+      }
+
+      _currently_loading.remove(object);
+    }
     catch (...)
     {
       std::lock_guard<std::mutex> const lock(_guard);

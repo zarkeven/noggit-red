@@ -64,16 +64,16 @@ class MapChunk
 private:
   tile_mode _mode;
 
-  bool hasMCCV;
+  bool hasMCCV, hasMCSH;
+  MapChunkHeader header;
 
   std::vector<uint8_t> compressed_shadow_map() const;
   bool has_shadows() const;
 
   void update_intersect_points();
 
-
 public:
-  MapChunk(MapTile* mt, BlizzardArchive::ClientFile* f, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context
+  MapChunk(MapTile* mt, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context
            , bool init_empty = false, int chunk_idx = 0, bool load_textures = true);
 
   auto getHoleMask(void) const -> unsigned;
@@ -85,6 +85,7 @@ public:
   // uint32_t nLayers = 0;
 
   float xbase, ybase, zbase; // global coords
+  bool root_parsed = false, obj0_parsed = false, tex0_parsed = false;
 
   mcnk_flags header_flags;
   bool use_big_alphamap;
@@ -107,6 +108,10 @@ public:
   void update_shadows();
 
   void unload();
+
+  void parseRootMCNK(BlizzardArchive::ClientFile* f, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context, bool load_textures);
+  void parseTex0MCNK(BlizzardArchive::ClientFile* f, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context, bool load_textures);
+  void parseObj0MCNK(BlizzardArchive::ClientFile* f, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context);
 
   static int indexNoLoD(int x, int y);
   static int indexLoD(int x, int y);

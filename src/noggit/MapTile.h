@@ -151,7 +151,7 @@ public:
   void recalcCombinedExtents();
   std::array<glm::vec3, 2>& getExtents();;
   std::array<glm::vec3, 2>& getCombinedExtents();;
-
+  texture_heightmapping_data& getTextureHeightMappingData(const std::string& filename);
   World* getWorld();;
 
   [[nodiscard]]
@@ -164,8 +164,6 @@ public:
 
   Noggit::Rendering::TileRender* renderer();;
   Noggit::Rendering::FlightBoundsRender* flightBoundsRenderer();;
-
-  const texture_heightmapping_data& GetTextureHeightMappingData(const std::string& name) const;
 
   void forceAlphaUpdate();
   bool childrenFinishedLoading();
@@ -180,8 +178,6 @@ private:
   bool _extents_dirty = true;
   bool _combined_extents_dirty = true;
   bool _requires_object_extents_recalc = true;
-
-
 
   std::array<glm::vec3, 2> _extents;
   std::array<glm::vec3, 2> _object_instance_extents;
@@ -204,6 +200,8 @@ private:
 
   // Data to be loaded and later unloaded.
   std::vector<std::string> mTextureFilenames;
+  std::vector<std::string> mHeightTextureFilenames;
+  std::vector<texture_heightmapping_data> mHeightMappingData;
   // std::vector<std::string> mModelFilenames;
   // std::vector<std::string> mWMOFilenames;
   std::map<std::string, mtxf_entry> _mtxf_entries;

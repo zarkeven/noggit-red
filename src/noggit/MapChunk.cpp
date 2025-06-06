@@ -24,7 +24,7 @@
 #include <map>
 #include <QImage>
 
-MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAlpha,tile_mode mode
+MapChunk::MapChunk(MapTile* maintile, bool bigAlpha,tile_mode mode
                     , Noggit::NoggitRenderContext context, bool init_empty, int chunk_idx, bool load_textures)
   : _mode(mode)
   , mt(maintile)
@@ -113,234 +113,289 @@ MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAl
 
     return;
   }
+}
 
+void MapChunk::parseRootMCNK(BlizzardArchive::ClientFile* f, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context, bool load_textures)
+{
+    uint32_t fourcc;
+    uint32_t size;
+    uint32_t mcnkSize;
+    f->seekRelative(-8);
+    f->read(&fourcc, 4);
+    assert(fourcc == 'MCNK');
+    f->read(&mcnkSize, 4);
+    size_t base = f->getPos();
 
-  uint32_t fourcc;
-  uint32_t size;
+    f->read(&header, sizeof(MapChunkHeader));
 
-  size_t base = f->getPos();
+    header_flags.value = header.flags.value;
+    areaID = header.areaid;
+
+    zbase = header.zpos;
+    xbase = header.xpos;
+    ybase = header.ypos;
+
+    px = header.ix;
+    py = header.iy;
+
+    holes = header.holes;
+
+    zbase = zbase * -1.0f + ZEROPOINT;
+    xbase = xbase * -1.0f + ZEROPOINT;
 
   hasMCCV = false;
 
-  MapChunkHeader tmp_chunk_header;
+  while (!f->isEof()) {
+      if (f->getPos() >= base + mcnkSize) break;
+      if (!f->read(&fourcc, 4)) break;
+      if (!f->read(&size, 4)) break;
 
-  // - MCNK ----------------------------------------------
-  {
-    f->read(&fourcc, 4);
-    f->read(&size, 4);
+      //LogDebug << "Reading root ADT MCNK subchunk at " << f->getPos() << ": " << fourcc << " ('" << fourcc_to_str(fourcc) << "'), (" << size << " bytes)" << std::endl;
+      auto startPos = f->getPos();
 
-    assert(fourcc == 'MCNK');
+      switch (fourcc) {
+          case 'MCVT':
+          {
+              glm::vec3* ttv = mVertices;
 
+              // vertices
+              for (int j = 0; j < 17; ++j) {
+                  for (int i = 0; i < ((j % 2) ? 8 : 9); ++i) {
+                      float h, xpos, zpos;
+                      f->read(&h, 4);
+                      xpos = i * UNITSIZE;
+                      zpos = j * 0.5f * UNITSIZE;
+                      if (j % 2) {
+                          xpos += UNITSIZE * 0.5f;
+                      }
+                      glm::vec3 v = glm::vec3(xbase + xpos, ybase + h, zbase + zpos);
+                      *ttv++ = v;
+                      vmin.y = std::min(vmin.y, v.y);
+                      vmax.y = std::max(vmax.y, v.y);
+                  }
+              }
 
+              vmin.x = xbase;
+              vmin.z = zbase;
+              vmax.x = xbase + 8 * UNITSIZE;
+              vmax.z = zbase + 8 * UNITSIZE;
 
-    f->read(&tmp_chunk_header, sizeof(MapChunkHeader));
+              update_intersect_points();
 
-    header_flags.value = tmp_chunk_header.flags.value;
-    areaID = tmp_chunk_header.areaid;
+              // use absolute y pos in vertices
+              ybase = 0.0f;
+              header.ypos = 0.0f;
 
-    zbase = tmp_chunk_header.zpos;
-    xbase = tmp_chunk_header.xpos;
-    ybase = tmp_chunk_header.ypos;
+              break;
+          }
+          case 'MCNR':
+          {
+              auto& tile_buffer = mt->getChunkHeightmapBuffer();
+              int chunk_start = (px * 16 + py) * mapbufsize * 4;
 
-    px = tmp_chunk_header.ix;
-    py = tmp_chunk_header.iy;
+              char nor[3];
+              for (int i = 0; i < mapbufsize; ++i)
+              {
+                  f->read(nor, 3);
+                  int pixel_start = chunk_start + i * 4;
+                  tile_buffer[pixel_start] = nor[0] / 127.0f;
+                  tile_buffer[pixel_start + 1] = nor[2] / 127.0f;
+                  tile_buffer[pixel_start + 2] = nor[1] / 127.0f;
+              }
+              break;
+          }
+          case 'MCCV':
+          {
+              if (!(header_flags.flags.has_mccv))
+              {
+                  header_flags.flags.has_mccv = 1;
+              }
 
-    holes = tmp_chunk_header.holes;
+              hasMCCV = true;
 
-    // correct the x and z values ^_^
-    zbase = zbase*-1.0f + ZEROPOINT;
-    xbase = xbase*-1.0f + ZEROPOINT;
+              unsigned char t[4];
+              for (int i = 0; i < mapbufsize; ++i)
+              {
+                  f->read(t, 4);
+                  mccv[i] = glm::vec3((float)t[2] / 127.0f, (float)t[1] / 127.0f, (float)t[0] / 127.0f);
+              }
 
+              break;
+          }
+          case 'MCSE': {
+              for (unsigned int i = 0; i < header.nSndEmitters; i++)
+              {
+                  ENTRY_MCSE sound_emitter;
+                  f->read(&sound_emitter, sizeof(ENTRY_MCSE));
 
-  }
+                  float pos_x = sound_emitter.pos[1] * -1.0f + ZEROPOINT;
+                  float pos_y = sound_emitter.pos[2];
+                  float pos_z = sound_emitter.pos[0] * -1.0f + ZEROPOINT;
 
-  if (!load_textures)
-  {
-      tmp_chunk_header.nLayers = 0;
-  }
+                  sound_emitter.pos[0] = pos_x;
+                  sound_emitter.pos[1] = pos_y;
+                  sound_emitter.pos[2] = pos_z;
 
-  texture_set = std::make_unique<TextureSet>(this, f, base, bigAlpha,
-     !!header_flags.flags.do_not_fix_alpha_map, mode == tile_mode::uid_fix_all, _context, tmp_chunk_header);
-
-  // - MCVT ----------------------------------------------
-  {
-    f->seek(base + tmp_chunk_header.ofsHeight);
-    f->read(&fourcc, 4);
-    f->read(&size, 4);
-
-    assert(fourcc == 'MCVT');
-
-    glm::vec3 *ttv = mVertices;
-
-    // vertices
-    for (int j = 0; j < 17; ++j) {
-      for (int i = 0; i < ((j % 2) ? 8 : 9); ++i) {
-        float h, xpos, zpos;
-        f->read(&h, 4);
-        xpos = i * UNITSIZE;
-        zpos = j * 0.5f * UNITSIZE;
-        if (j % 2) {
-          xpos += UNITSIZE*0.5f;
-        }
-        glm::vec3 v = glm::vec3(xbase + xpos, ybase + h, zbase + zpos);
-        *ttv++ = v;
-        vmin.y = std::min(vmin.y, v.y);
-        vmax.y = std::max(vmax.y, v.y);
+                  sound_emitters.emplace_back(sound_emitter);
+              }
+              break;
+          }
+          default:
+          {
+              //LogDebug << "Unknown root ADT MCNK subchunk found: " << fourcc << " ('" << fourcc_to_str(fourcc) << "'), (" << size << " bytes)" << std::endl;
+              break;
+          }
       }
-    }
 
-    vmin.x = xbase;
-    vmin.z = zbase;
-    vmax.x = xbase + 8 * UNITSIZE;
-    vmax.z = zbase + 8 * UNITSIZE;
-
-    update_intersect_points();
-
-    // use absolute y pos in vertices
-    ybase = 0.0f;
-    tmp_chunk_header.ypos = 0.0f;
+      if (f->getPos() != (startPos + size)) {
+          //LogDebug << "Did not read complete " << fourcc_to_str(fourcc) << " chunk at " << f->getPos() << ": expected " << (startPos + size) << ", got " << f->getPos() << std::endl;
+		  f->seek(startPos + size); // skip to the end of the chunk
+      }
   }
-  // - MCNR ----------------------------------------------
-  {
-    f->seek(base + tmp_chunk_header.ofsNormal);
-    f->read(&fourcc, 4);
-    f->read(&size, 4);
 
-    assert(fourcc == 'MCNR');
-
-    auto& tile_buffer = mt->getChunkHeightmapBuffer();
-    int chunk_start = (px * 16 + py) * mapbufsize * 4;
-
-    char nor[3];
-    for (int i = 0; i < mapbufsize; ++i)
-    {
-      f->read(nor, 3);
-      int pixel_start = chunk_start + i * 4;
-      tile_buffer[pixel_start] = nor[0] / 127.0f;
-      tile_buffer[pixel_start + 1] = nor[2] / 127.0f;
-      tile_buffer[pixel_start + 2] = nor[1] / 127.0f;
-    }
-  }
-  // - MCSH ----------------------------------------------
-  if((header_flags.flags.has_mcsh) && tmp_chunk_header.ofsShadow && tmp_chunk_header.sizeShadow)
-  {
-    f->seek(base + tmp_chunk_header.ofsShadow);
-    f->read(&fourcc, 4);
-    f->read(&size, 4);
-
-    assert(fourcc == 'MCSH');
-
-    char compressed_shadow_map[64 * 64 / 8];
-
-    // shadow map 64 x 64
-    f->read(&compressed_shadow_map, 0x200);
-    f->seekRelative(-0x200);
-
-    uint8_t *p;
-    char *c;
-    p = _shadow_map;
-    c = compressed_shadow_map;
-    for (int i = 0; i<64 * 8; ++i)
-    {
-      for (int b = 0x01; b != 0x100; b <<= 1)
+  if (!hasMCCV) {
+      glm::vec3 mccv_default(1.f, 1.f, 1.f);
+      for (int i = 0; i < mapbufsize; ++i)
       {
-        *p++ = ((*c) & b) ? 85 : 0;
+          mccv[i] = mccv_default;
       }
-      c++;
-    }
-
-    if (!header_flags.flags.do_not_fix_alpha_map)
-    {
-      for (std::size_t i(0); i < 64; ++i)
-      {
-        _shadow_map[i * 64 + 63] = _shadow_map[i * 64 + 62];
-        _shadow_map[63 * 64 + i] = _shadow_map[62 * 64 + i];
-      }
-      _shadow_map[63 * 64 + 63] = _shadow_map[62 * 64 + 62];
-    }
-  }
-  else
-  {
-    /** We have no shadow map (MCSH), so we got no shadows at all!  **
-    ** This results in everything being black.. Yay. Lets fake it! **/
-    memset(_shadow_map, 0, 64 * 64);
-  }
-  // - MCCV ----------------------------------------------
-  if(tmp_chunk_header.ofsMCCV)
-  {
-    f->seek(base + tmp_chunk_header.ofsMCCV);
-    f->read(&fourcc, 4);
-    f->read(&size, 4);
-
-    assert(fourcc == 'MCCV');
-
-    if (!(header_flags.flags.has_mccv))
-    {
-      header_flags.flags.has_mccv = 1;
-    }
-
-    hasMCCV = true;
-
-    unsigned char t[4];
-    for (int i = 0; i < mapbufsize; ++i)
-    {
-      f->read(t, 4);
-      mccv[i] = glm::vec3((float)t[2] / 127.0f, (float)t[1] / 127.0f, (float)t[0] / 127.0f);
-    }
-  }
-  else
-  {
-    glm::vec3 mccv_default(1.f, 1.f, 1.f);
-    for (int i = 0; i < mapbufsize; ++i)
-    {
-      mccv[i] = mccv_default;
-    }
   }
 
-  if (tmp_chunk_header.sizeLiquid > 8)
-  {
-    f->seek(base + tmp_chunk_header.ofsLiquid);
-
-    f->read(&fourcc, 4);
-    f->seekRelative(4); // ignore the size here, the valid size is in the header
-
-    assert(fourcc == 'MCLQ');
-
-    int layer_count = (tmp_chunk_header.sizeLiquid - 8) / sizeof(mclq);
-    std::vector<mclq> layers(layer_count);
-    f->read(layers.data(), sizeof(mclq)*layer_count);
-
-    mt->Water.getChunk(px, py)->from_mclq(layers);
-    // remove the liquid flags as it'll be saved as MH2O
-    header_flags.value &= ~(0xF << 2);
-  }
+  // TODO: MH2O
 
   vcenter = (vmin + vmax) * 0.5f;
 
-  if (tmp_chunk_header.nSndEmitters)
-  {
-      f->seek(base + tmp_chunk_header.ofsSndEmitters);
-      f->read(&fourcc, 4);
-      f->read(&size, 4);
+  root_parsed = true;
+}
 
-      assert(fourcc == 'MCSE');
+void MapChunk::parseTex0MCNK(BlizzardArchive::ClientFile* f, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context, bool load_textures)
+{
+    uint32_t fourcc;
+    uint32_t size;
+    uint32_t mcnkSize;
+	f->seekRelative(-8);
+	f->read(&fourcc, 4);
+    assert(fourcc == 'MCNK');
+	f->read(&mcnkSize, 4);
+    size_t base = f->getPos();
 
-      for (unsigned int i = 0; i < tmp_chunk_header.nSndEmitters; i++)
-      {
-          ENTRY_MCSE sound_emitter;
-          f->read(&sound_emitter, sizeof(ENTRY_MCSE));
+    texture_set = std::make_unique<TextureSet>(this, base, bigAlpha, !!header_flags.flags.do_not_fix_alpha_map, mode == tile_mode::uid_fix_all, _context, header);
 
-          float pos_x = sound_emitter.pos[1] * -1.0f + ZEROPOINT;
-          float pos_y = sound_emitter.pos[2];
-          float pos_z = sound_emitter.pos[0] * -1.0f + ZEROPOINT;
+    hasMCSH = false;
+    while (!f->isEof()) {
+        if (f->getPos() >= base + mcnkSize) break;
+        if (!f->read(&fourcc, 4)) break;
+        if (!f->read(&size, 4)) break;
+        auto start = f->getPos();
 
-          sound_emitter.pos[0] = pos_x;
-          sound_emitter.pos[1] = pos_y;
-          sound_emitter.pos[2] = pos_z;
+      //  LogDebug << "Reading Tex0 ADT chunk at " << f->getPos() << ": " << fourcc << " ('" << fourcc_to_str(fourcc) << "'), (" << size << " bytes)" << std::endl;
+        switch (fourcc) {
+        case 'MCSH':
+        {
+            char compressed_shadow_map[64 * 64 / 8];
 
-          sound_emitters.emplace_back(sound_emitter);
-      }
-  }
+            // shadow map 64 x 64
+            f->read(&compressed_shadow_map, 0x200);
+            f->seekRelative(-0x200);
+
+            uint8_t* p;
+            char* c;
+            p = _shadow_map;
+            c = compressed_shadow_map;
+            for (int i = 0; i < 64 * 8; ++i)
+            {
+                for (int b = 0x01; b != 0x100; b <<= 1)
+                {
+                    *p++ = ((*c) & b) ? 85 : 0;
+                }
+                c++;
+            }
+
+            if (!header_flags.flags.do_not_fix_alpha_map)
+            {
+                for (std::size_t i(0); i < 64; ++i)
+                {
+                    _shadow_map[i * 64 + 63] = _shadow_map[i * 64 + 62];
+                    _shadow_map[63 * 64 + i] = _shadow_map[62 * 64 + i];
+                }
+                _shadow_map[63 * 64 + 63] = _shadow_map[62 * 64 + 62];
+            }
+
+            hasMCSH = true;
+            break;
+        }
+        case 'MCLY':
+        {
+            texture_set->load_MCLY(f, size);
+            break;
+        }
+        case 'MCAL':
+        {
+            texture_set->load_MCAL(f, size);
+            break;
+        }
+        default:
+        {
+          //  LogDebug << "Unknown Tex0 ADT chunk found: " << fourcc << " ('" << fourcc_to_str(fourcc) << "'), (" << size << " bytes)" << std::endl;
+            f->seekRelative(size);
+            break;
+        }
+        }
+
+        if(f->getPos() != (start + size)) {
+           // LogDebug << "Did not read complete " << fourcc_to_str(fourcc) << " chunk at " << f->getPos() << ": expected " << (start + size) << ", got " << f->getPos() << std::endl;
+            f->seek(start + size); // skip to the end of the chunk
+		}
+    }
+
+    if (!hasMCSH) {
+        /** We have no shadow map (MCSH), so we got no shadows at all!  **
+          ** This results in everything being black.. Yay. Lets fake it! **/
+        memset(_shadow_map, 0, 64 * 64);
+    }
+
+    tex0_parsed = true;
+}
+
+void MapChunk::parseObj0MCNK(BlizzardArchive::ClientFile* f, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context)
+{
+    uint32_t fourcc;
+    uint32_t size;
+    uint32_t mcnkSize;
+    f->seekRelative(-8);
+    f->read(&fourcc, 4);
+    assert(fourcc == 'MCNK');
+    f->read(&mcnkSize, 4);
+    size_t base = f->getPos();
+
+    while (!f->isEof()) {
+        if (f->getPos() >= base + mcnkSize) break;
+        if (!f->read(&fourcc, 4)) break;
+        if (!f->read(&size, 4)) break;
+
+        //LogDebug << "Reading Obj0 ADT chunk at " << f->getPos() << ": " << fourcc << " ('" << fourcc_to_str(fourcc) << "'), (" << size << " bytes)" << std::endl;
+        switch (fourcc) {
+        case 'MCNK': {
+            // Do nothing
+            break;
+        }
+        case 'MCRD':
+        case 'MCRW': 
+        {
+            // todo
+            f->seekRelative(size);
+            break;
+        }
+        default:
+        {
+            LogDebug << "Unknown ADT chunk found: " << fourcc << " ('" << fourcc_to_str(fourcc) << "'), (" << size << " bytes)" << std::endl;
+            f->seekRelative(size);
+            break;
+        }
+        }
+    }
+
+    obj0_parsed = true;
 }
 
 auto MapChunk::getHoleMask(void) const -> unsigned

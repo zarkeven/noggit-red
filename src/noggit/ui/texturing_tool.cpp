@@ -481,14 +481,16 @@ namespace Noggit
           connect(_current_texture, &Noggit::Ui::current_texture::texture_updated
               , [=]()
               {
-                  auto proj = Noggit::Project::CurrentProject::get();
+				  // TODO: Get the texture heightmapping data from the current ADT
+
+             /*     auto proj = Noggit::Project::CurrentProject::get();
                   auto foundTexture = proj->ExtraMapData.TextureHeightData_Global.find(_current_texture->filename());
                   if (foundTexture != proj->ExtraMapData.TextureHeightData_Global.end())
                   {
                       heightmapping_scale_spin->setValue(foundTexture->second.uvScale);
                       heightmapping_heightscale_spin->setValue(foundTexture->second.heightScale);
                       heightmapping_heightoffset_spin->setValue(foundTexture->second.heightOffset);
-                  }
+                  }*/
 
               }
           );
