@@ -148,7 +148,7 @@ DBCFile::Record DBCFile::getByID(unsigned int id, size_t field)
     if (i->getUInt(field) == id)
       return (*i);
   }
-  LogDebug << "Tried to get a not existing row in " << filename << " (ID = " << id << ")!" << std::endl;
+  //LogDebug << "Tried to get a not existing row in " << filename << " (ID = " << id << ")!" << std::endl;
   throw NotFound();
 }
 
@@ -172,7 +172,7 @@ int DBCFile::getRecordRowId(unsigned int id, size_t field)
 
     row_id++;
   }
-  LogError << "Tried to get a not existing row in " << filename << " (ID = " << id << ")!" << std::endl;
+  //LogError << "Tried to get a not existing row in " << filename << " (ID = " << id << ")!" << std::endl;
   throw NotFound();
 }
 

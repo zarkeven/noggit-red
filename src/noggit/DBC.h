@@ -10,7 +10,7 @@ class AreaDB : public DBCFile
 {
 public:
   AreaDB() :
-    DBCFile("DBFilesClient\\AreaTable.dbc")
+    DBCFile("DBFilesClient\\AreaTable.db2")
   { }
 
   /// Fields
@@ -41,7 +41,7 @@ class AreaTriggerDB : public DBCFile
 {
 public:
     AreaTriggerDB() :
-        DBCFile{ "DBFilesClient\\AreaTrigger.dbc" }
+        DBCFile{ "DBFilesClient\\AreaTrigger.db2" }
     {
     }
 
@@ -63,7 +63,7 @@ class MapDB : public DBCFile
 {
 public:
   MapDB() :
-    DBCFile("DBFilesClient\\Map.dbc")
+	  DBCFile("DBFilesClient\\Map.db2")
   { }
 
   /// Fields
@@ -94,7 +94,7 @@ class LoadingScreensDB : public DBCFile
 {
 public:
   LoadingScreensDB() :
-    DBCFile("DBFilesClient\\LoadingScreens.dbc")
+    DBCFile("DBFilesClient\\LoadingScreens.db2")
   { }
 
   /// Fields
@@ -107,7 +107,7 @@ class LightDB : public DBCFile
 {
 public:
   LightDB() :
-    DBCFile("DBFilesClient\\Light.dbc")
+    DBCFile("DBFilesClient\\Light.db2")
   { }
 
   /// Fields
@@ -124,7 +124,7 @@ public:
 class LightParamsDB : public DBCFile{
 public:
   LightParamsDB() :
-    DBCFile("DBFilesClient\\LightParams.dbc")
+    DBCFile("DBFilesClient\\LightParams.db2")
   { }
 
   /// Fields
@@ -144,7 +144,7 @@ class LightSkyboxDB : public DBCFile
 {
 public:
   LightSkyboxDB() :
-    DBCFile("DBFilesClient\\LightSkybox.dbc")
+    DBCFile("DBFilesClient\\LightSkybox.db2")
   { }
 
   /// Fields
@@ -157,7 +157,7 @@ class LightIntBandDB : public DBCFile
 {
 public:
   LightIntBandDB() :
-    DBCFile("DBFilesClient\\LightIntBand.dbc")
+    DBCFile("DBFilesClient\\LightIntBand.db2")
   { }
 
   /// Fields
@@ -171,7 +171,7 @@ class LightFloatBandDB : public DBCFile
 {
 public:
   LightFloatBandDB() :
-    DBCFile("DBFilesClient\\LightFloatBand.dbc")
+    DBCFile("DBFilesClient\\LightFloatBand.db2")
   { }
 
   /// Fields
@@ -185,7 +185,7 @@ class GroundEffectTextureDB : public DBCFile
 {
 public:
   GroundEffectTextureDB() :
-    DBCFile("DBFilesClient\\GroundEffectTexture.dbc")
+    DBCFile("DBFilesClient\\GroundEffectTexture.db2")
   { }
 
   /// Fields
@@ -200,7 +200,7 @@ class GroundEffectDoodadDB : public DBCFile
 {
 public:
   GroundEffectDoodadDB() :
-    DBCFile("DBFilesClient\\GroundEffectDoodad.dbc")
+    DBCFile("DBFilesClient\\GroundEffectDoodad.db2")
   { }
 
   /// Fields
@@ -213,7 +213,7 @@ class TerrainTypeDB : public DBCFile
 {
 public:
     TerrainTypeDB() :
-        DBCFile("DBFilesClient\\TerrainType.dbc")
+        DBCFile("DBFilesClient\\TerrainType.db2")
     { }
 
     /// Fields
@@ -234,7 +234,7 @@ class LiquidTypeDB : public DBCFile
 {
 public:
   LiquidTypeDB() :
-    DBCFile("DBFilesClient\\LiquidType.dbc")
+    DBCFile("DBFilesClient\\LiquidType.db2")
   { }
 
   /// Fields
@@ -256,7 +256,7 @@ class SoundProviderPreferencesDB : public DBCFile
 {
 public:
     SoundProviderPreferencesDB() :
-        DBCFile("DBFilesClient\\SoundProviderPreferences.dbc")
+        DBCFile("DBFilesClient\\SoundProviderPreferences.db2")
     { }
 
     /// Fields
@@ -268,7 +268,7 @@ class SoundAmbienceDB : public DBCFile
 {
 public:
     SoundAmbienceDB() :
-        DBCFile("DBFilesClient\\SoundAmbience.dbc")
+        DBCFile("DBFilesClient\\SoundAmbience.db2")
     { }
 
     /// Fields
@@ -281,7 +281,7 @@ class ZoneMusicDB : public DBCFile
 {
 public:
     ZoneMusicDB() :
-        DBCFile("DBFilesClient\\ZoneMusic.dbc")
+        DBCFile("DBFilesClient\\ZoneMusic.db2")
     { }
 
     /// Fields
@@ -299,7 +299,7 @@ class ZoneIntroMusicTableDB : public DBCFile
 {
 public:
     ZoneIntroMusicTableDB() :
-        DBCFile("DBFilesClient\\ZoneIntroMusicTable.dbc")
+        DBCFile("DBFilesClient\\ZoneIntroMusicTable.db2")
     { }
 
     /// Fields
@@ -314,7 +314,7 @@ class SoundEntriesDB : public DBCFile
 {
 public:
     SoundEntriesDB() :
-        DBCFile("DBFilesClient\\SoundEntries.dbc")
+        DBCFile("DBFilesClient\\SoundEntries.db2")
     { }
 
     /// Fields
@@ -336,7 +336,7 @@ class WMOAreaTableDB : public DBCFile
 {
 public:
     WMOAreaTableDB() :
-        DBCFile("DBFilesClient\\WMOAreaTable.dbc")
+        DBCFile("DBFilesClient\\WMOAreaTable.db2")
     { }
 
     /// Fields
@@ -361,7 +361,7 @@ class GameObjectDisplayInfoDB : public DBCFile
 {
 public:
     GameObjectDisplayInfoDB() :
-        DBCFile("DBFilesClient\\GameObjectDisplayInfo.dbc")
+        DBCFile("DBFilesClient\\GameObjectDisplayInfo.db2")
     { }
 
     /// Fields
