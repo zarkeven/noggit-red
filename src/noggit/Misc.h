@@ -124,3 +124,4 @@ struct sChunkHeader
 
 void SetChunkHeader(util::sExtendableArray& pArray, int pPosition, int pMagix, int pSize = 0);
 
+std::string fourcc_to_str(uint32_t fourcc);

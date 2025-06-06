@@ -336,3 +336,13 @@ void SetChunkHeader(util::sExtendableArray& pArray, int pPosition, int pMagix, i
   Header->mSize = pSize;
 }
 
+std::string fourcc_to_str(uint32_t fourcc)
+{
+    char s[5]{};
+    s[0] = static_cast<char>(fourcc & 0xFF);
+    s[1] = static_cast<char>((fourcc >> 8) & 0xFF);
+    s[2] = static_cast<char>((fourcc >> 16) & 0xFF);
+    s[3] = static_cast<char>((fourcc >> 24) & 0xFF);
+    s[4] = 0;
+    return std::string(s);
+};
