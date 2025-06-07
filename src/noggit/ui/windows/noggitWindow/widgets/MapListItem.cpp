@@ -26,6 +26,8 @@ namespace Noggit::Ui::Widget
       case 6: icon = QIcon(":/icon-legion"); break;
       case 7: icon = QIcon(":/icon-battle"); break;
       case 8: icon = QIcon(":/icon-shadow"); break;
+      case 9: icon = QIcon(":/icon-dragon"); break;
+      case 10: icon = QIcon(":/icon-warwithin"); break;
       default: break;
     }
 

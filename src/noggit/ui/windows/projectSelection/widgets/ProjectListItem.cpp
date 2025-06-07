@@ -17,6 +17,8 @@ namespace Noggit::Ui::Widget
       icon = QIcon(":/icon-wrath");
     if (data.project_version == Project::ProjectVersion::SL)
       icon = QIcon(":/icon-shadow");
+    if(data.project_version == Project::ProjectVersion::TWW)
+      icon = QIcon(":/icon-warwithin");
     _project_version_icon = new QLabel("", parent);
     _project_version_icon->setPixmap(icon.pixmap(QSize(48, 48)));
     _project_version_icon->setGeometry(0, 5, 64, 48);

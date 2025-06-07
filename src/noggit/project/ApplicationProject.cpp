@@ -246,7 +246,7 @@ namespace Noggit::Project
       if (projectVersion == "Shadowlands")
         return ProjectVersion::SL;
       if (projectVersion == "TheWarWithin")
-        return ProjectVersion::TWW;
+          return ProjectVersion::TWW;
 
       assert(false);
     }

@@ -380,6 +380,8 @@ namespace Noggit::Ui::Windows
         _combo_exp_search->addItem(QIcon(":/icon-legion"), tr("Legion"));
         _combo_exp_search->addItem(QIcon(":/icon-battle"), tr("Battle for Azeroth"));
         _combo_exp_search->addItem(QIcon(":/icon-shadow"), tr("Shadowlands"));
+        _combo_exp_search->addItem(QIcon(":/icon-dragon"), tr("Dragonflight"));
+        _combo_exp_search->addItem(QIcon(":/icon-warwithin"), tr("The War Within"));
         _combo_exp_search->setCurrentIndex(0);
 
         QCheckBox* _wmo_maps_search = new QCheckBox("Display WMO maps (No terrain)", this);
