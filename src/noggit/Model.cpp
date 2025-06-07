@@ -53,6 +53,7 @@ void Model::finishLoading()
     if (packed_version == m2_version_wrath)
       valid_version = true;
     break;
+  case Noggit::Project::ProjectVersion::TWW:
   case Noggit::Project::ProjectVersion::SL:
     if (packed_version == m2_version_legion_bfa_sl)
       valid_version = true;

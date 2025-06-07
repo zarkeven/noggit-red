@@ -38,7 +38,9 @@ namespace Noggit::Project
     WOD,
     LEGION,
     BFA,
-    SL
+    SL,
+    DF,
+    TWW
   };
 
   struct ClientVersionFactory

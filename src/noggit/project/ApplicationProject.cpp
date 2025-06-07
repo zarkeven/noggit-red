@@ -65,13 +65,18 @@ namespace Noggit::Project
     BlizzardDatabaseLib::Structures::Build client_build("3.3.5.12340");
     auto client_archive_version = BlizzardArchive::ClientVersion::WOTLK;
     auto client_archive_locale = BlizzardArchive::Locale::AUTO;
-    if (project->projectVersion == ProjectVersion::SL)
+    if (project->projectVersion == ProjectVersion::TWW)
+    {
+        client_archive_version = BlizzardArchive::ClientVersion::TWW;
+        client_build = BlizzardDatabaseLib::Structures::Build("11.1.5.61265");
+        client_archive_locale = BlizzardArchive::Locale::enUS;
+    }
+    else if (project->projectVersion == ProjectVersion::SL)
     {
       client_archive_version = BlizzardArchive::ClientVersion::SL;
       client_build = BlizzardDatabaseLib::Structures::Build("9.2.7.45745");
       client_archive_locale = BlizzardArchive::Locale::enUS;
     }
-
     else if (project->projectVersion == ProjectVersion::WOTLK)
     {
       client_archive_version = BlizzardArchive::ClientVersion::WOTLK;
@@ -240,12 +245,16 @@ namespace Noggit::Project
         return ProjectVersion::WOTLK;
       if (projectVersion == "Shadowlands")
         return ProjectVersion::SL;
+      if (projectVersion == "TheWarWithin")
+        return ProjectVersion::TWW;
 
       assert(false);
     }
 
     std::string ClientVersionFactory::MapToStringVersion(ProjectVersion const& projectVersion)
     {
+      if (projectVersion == ProjectVersion::TWW)
+		return std::string("TheWarWithin");
       if (projectVersion == ProjectVersion::WOTLK)
         return std::string("Wrath Of The Lich King");
       if (projectVersion == ProjectVersion::SL)
