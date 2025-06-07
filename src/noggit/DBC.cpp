@@ -27,9 +27,9 @@ ZoneIntroMusicTableDB gZoneIntroMusicTableDB;
 SoundEntriesDB gSoundEntriesDB;
 WMOAreaTableDB gWMOAreaTableDB;
 
-void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData)
+void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData, Noggit::Project::ProjectVersion projectVersion)
 {
-  Log << "Opening client DBCs..." << std::endl;
+  Log << "Opening client DBs..." << std::endl;
 
   try
   {
@@ -63,7 +63,6 @@ void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData)
   }
 
 }
-
 
 // includes the parent zone name as a prefix
 std::string AreaDB::getAreaFullName(int pAreaID)

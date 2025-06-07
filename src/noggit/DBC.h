@@ -5,12 +5,13 @@
 #include <noggit/DBCFile.h>
 
 #include <string>
+#include "project/ApplicationProject.h"
 
 class AreaDB : public DBCFile
 {
 public:
   AreaDB() :
-    DBCFile("DBFilesClient\\AreaTable.db2")
+    DBCFile("AreaTable")
   { }
 
   /// Fields
@@ -41,7 +42,7 @@ class AreaTriggerDB : public DBCFile
 {
 public:
     AreaTriggerDB() :
-        DBCFile{ "DBFilesClient\\AreaTrigger.db2" }
+        DBCFile{ "AreaTrigger" }
     {
     }
 
@@ -63,7 +64,7 @@ class MapDB : public DBCFile
 {
 public:
   MapDB() :
-	  DBCFile("DBFilesClient\\Map.db2")
+	  DBCFile("Map")
   { }
 
   /// Fields
@@ -94,7 +95,7 @@ class LoadingScreensDB : public DBCFile
 {
 public:
   LoadingScreensDB() :
-    DBCFile("DBFilesClient\\LoadingScreens.db2")
+    DBCFile("LoadingScreens")
   { }
 
   /// Fields
@@ -107,7 +108,7 @@ class LightDB : public DBCFile
 {
 public:
   LightDB() :
-    DBCFile("DBFilesClient\\Light.db2")
+    DBCFile("Light")
   { }
 
   /// Fields
@@ -124,7 +125,7 @@ public:
 class LightParamsDB : public DBCFile{
 public:
   LightParamsDB() :
-    DBCFile("DBFilesClient\\LightParams.db2")
+    DBCFile("LightParams")
   { }
 
   /// Fields
@@ -144,7 +145,7 @@ class LightSkyboxDB : public DBCFile
 {
 public:
   LightSkyboxDB() :
-    DBCFile("DBFilesClient\\LightSkybox.db2")
+    DBCFile("LightSkybox")
   { }
 
   /// Fields
@@ -157,7 +158,7 @@ class LightIntBandDB : public DBCFile
 {
 public:
   LightIntBandDB() :
-    DBCFile("DBFilesClient\\LightIntBand.db2")
+    DBCFile("LightIntBand")
   { }
 
   /// Fields
@@ -171,7 +172,7 @@ class LightFloatBandDB : public DBCFile
 {
 public:
   LightFloatBandDB() :
-    DBCFile("DBFilesClient\\LightFloatBand.db2")
+    DBCFile("LightFloatBand")
   { }
 
   /// Fields
@@ -185,7 +186,7 @@ class GroundEffectTextureDB : public DBCFile
 {
 public:
   GroundEffectTextureDB() :
-    DBCFile("DBFilesClient\\GroundEffectTexture.db2")
+    DBCFile("GroundEffectTexture")
   { }
 
   /// Fields
@@ -200,7 +201,7 @@ class GroundEffectDoodadDB : public DBCFile
 {
 public:
   GroundEffectDoodadDB() :
-    DBCFile("DBFilesClient\\GroundEffectDoodad.db2")
+    DBCFile("GroundEffectDoodad")
   { }
 
   /// Fields
@@ -213,7 +214,7 @@ class TerrainTypeDB : public DBCFile
 {
 public:
     TerrainTypeDB() :
-        DBCFile("DBFilesClient\\TerrainType.db2")
+        DBCFile("TerrainType")
     { }
 
     /// Fields
@@ -234,7 +235,7 @@ class LiquidTypeDB : public DBCFile
 {
 public:
   LiquidTypeDB() :
-    DBCFile("DBFilesClient\\LiquidType.db2")
+    DBCFile("LiquidType")
   { }
 
   /// Fields
@@ -256,7 +257,7 @@ class SoundProviderPreferencesDB : public DBCFile
 {
 public:
     SoundProviderPreferencesDB() :
-        DBCFile("DBFilesClient\\SoundProviderPreferences.db2")
+        DBCFile("SoundProviderPreferences")
     { }
 
     /// Fields
@@ -268,7 +269,7 @@ class SoundAmbienceDB : public DBCFile
 {
 public:
     SoundAmbienceDB() :
-        DBCFile("DBFilesClient\\SoundAmbience.db2")
+        DBCFile("SoundAmbience")
     { }
 
     /// Fields
@@ -281,7 +282,7 @@ class ZoneMusicDB : public DBCFile
 {
 public:
     ZoneMusicDB() :
-        DBCFile("DBFilesClient\\ZoneMusic.db2")
+        DBCFile("ZoneMusic")
     { }
 
     /// Fields
@@ -299,7 +300,7 @@ class ZoneIntroMusicTableDB : public DBCFile
 {
 public:
     ZoneIntroMusicTableDB() :
-        DBCFile("DBFilesClient\\ZoneIntroMusicTable.db2")
+        DBCFile("ZoneIntroMusicTable")
     { }
 
     /// Fields
@@ -314,7 +315,7 @@ class SoundEntriesDB : public DBCFile
 {
 public:
     SoundEntriesDB() :
-        DBCFile("DBFilesClient\\SoundEntries.db2")
+        DBCFile("SoundEntries")
     { }
 
     /// Fields
@@ -336,7 +337,7 @@ class WMOAreaTableDB : public DBCFile
 {
 public:
     WMOAreaTableDB() :
-        DBCFile("DBFilesClient\\WMOAreaTable.db2")
+        DBCFile("WMOAreaTable")
     { }
 
     /// Fields
@@ -361,7 +362,7 @@ class GameObjectDisplayInfoDB : public DBCFile
 {
 public:
     GameObjectDisplayInfoDB() :
-        DBCFile("DBFilesClient\\GameObjectDisplayInfo.db2")
+        DBCFile("GameObjectDisplayInfo")
     { }
 
     /// Fields
@@ -377,7 +378,7 @@ public:
     static const size_t ObjectEffectPackageID = 18;        // int
 };
 
-void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData);
+void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData, Noggit::Project::ProjectVersion projectVersion);
 
 const char * getGroundEffectDoodad(unsigned int effectID, int DoodadNum);
 

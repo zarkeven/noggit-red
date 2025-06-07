@@ -77,7 +77,7 @@ namespace Noggit::Ui::Windows
 
     if (project->projectVersion == Project::ProjectVersion::WOTLK)
     {
-      OpenDBs(project->ClientData);
+      OpenDBs(project->ClientData, project->projectVersion);
     }
     else
     {
