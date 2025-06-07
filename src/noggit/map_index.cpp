@@ -63,7 +63,7 @@ MapIndex::TileRange<true> MapIndex::tiles_in_rect(glm::vec3 const& pos, float ra
 }
 
 MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
-                    Noggit::NoggitRenderContext context, bool create_empty)
+                    Noggit::NoggitRenderContext context, bool create_empty, uint32_t fileDataID)
   : basename(pBasename)
   , _map_id (map_id)
   , _last_unload_time((clock() / CLOCKS_PER_SEC)) // to not try to unload right away
@@ -102,110 +102,92 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
     return;
   }
 
+  BlizzardArchive::Listfile::FileKey wdtFileKey;
   std::stringstream filename;
   filename << "World\\Maps\\" << basename << "\\" << basename << ".wdt";
+  wdtFileKey.setFilepath(filename.str());
 
-  BlizzardArchive::ClientFile theFile(filename.str(), Noggit::Application::NoggitApplication::instance()->clientData());
+  BlizzardArchive::ClientFile theFile(wdtFileKey, Noggit::Application::NoggitApplication::instance()->clientData());
 
-  uint32_t fourcc;
-  uint32_t size;
+  uint32_t fourcc = 0;
+  uint32_t size = 0;
 
-  // - MVER ----------------------------------------------
+  while (!theFile.isEof()) {
+      if (!theFile.read(&fourcc, 4)) break;
+      if (!theFile.read(&size, 4)) break;
 
-  uint32_t version;
+      switch (fourcc) 
+      {
+          case 'MVER':
+          {
+              uint32_t version;
+              theFile.read(&version, 4);
+              break;
+          }
+          case 'MPHD':
+          {
+              theFile.read(&mphd, sizeof(MPHD));
+              mHasAGlobalWMO = mphd.flags & FLAG_GLOBAL_OBJECT;
+              mBigAlpha = mphd.flags & FLAG_BIG_ALPHA || mphd.flags & FLAG_HEIGHT_TEXTURING;
+              _sort_models_by_size_class = mphd.flags & FLAG_DOODADS_SORT;
 
-  theFile.read(&fourcc, 4);
-  theFile.read(&size, 4);
-  theFile.read(&version, 4);
+              if (!(mphd.flags & FLAG_SHADING))
+              {
+                  mphd.flags |= FLAG_SHADING;
+                  changed = true;
+              }
 
-  //! \todo find the correct version of WDT files.
-  assert(fourcc == 'MVER' && version == 18);
+              break;
+          }
+          case 'MAIN':
+          {
+              for (int j = 0; j < 64; ++j)
+              {
+                  for (int i = 0; i < 64; ++i)
+                  {
+                      theFile.read(&mTiles[j][i].flags, 4);
+                      theFile.seekRelative(4);
 
-  // - MHDR ----------------------------------------------
+                      mTiles[j][i].tile = nullptr;
 
-  theFile.read(&fourcc, 4);
-  theFile.read(&size, 4);
+                      if (!(mTiles[j][i].flags & 1))
+                          continue;
 
-  assert(fourcc == 'MPHD');
+                      std::stringstream adt_filename;
+                      adt_filename << "World\\Maps\\" << basename << "\\" << basename << "_" << i << "_" << j << ".adt";
 
-  theFile.read(&mphd, sizeof(MPHD));
+                      mTiles[j][i].onDisc = Noggit::Application::NoggitApplication::instance()->clientData()->existsOnDisk(adt_filename.str());
 
-  mHasAGlobalWMO = mphd.flags & FLAG_GLOBAL_OBJECT;
-  mBigAlpha = mphd.flags & FLAG_BIG_ALPHA || mphd.flags & FLAG_HEIGHT_TEXTURING;
-  _sort_models_by_size_class = mphd.flags & FLAG_DOODADS_SORT;
+                      if (mTiles[j][i].onDisc)
+                      {
+                          mTiles[j][i].flags |= 1;
+                          changed = true;
+                      }
+                  }
+              }
+              break;
+          }
+          case 'MAID':
+          {
+              auto count = size / 32;
+			  _maid_entries.reserve(count);
 
-  if (!(mphd.flags & FLAG_SHADING))
-  {
-    mphd.flags |= FLAG_SHADING;
-    changed = true;
+              for (int i = 0; i < count; i++)
+              {
+				  MAIDEntry maidEntry;
+				  theFile.read(&maidEntry, sizeof(MAIDEntry));
+				  _maid_entries.emplace_back(maidEntry);
+              }
+              break;
+          }
+          case 'MODF':
+          {
+              theFile.read(&wmoEntry, sizeof(ENTRY_MODF));
+              math::to_client(wmoEntry.pos);
+              break;
+          }
+      }
   }
-
-  // - MAIN ----------------------------------------------
-
-  theFile.read(&fourcc, 4);
-  theFile.seekRelative(4);
-
-  assert(fourcc == 'MAIN');
-
-  /// this is the theory. Sadly, we are also compiling on 64 bit machines with size_t being 8 byte, not 4. Therefore, we can't do the same thing, Blizzard does in its 32bit executable.
-  //theFile.read( &(mTiles[0][0]), sizeof( 8 * 64 * 64 ) );
-
-  // We could skip for WMO only maps
-  for (int j = 0; j < 64; ++j)
-  {
-    for (int i = 0; i < 64; ++i)
-    {
-      theFile.read(&mTiles[j][i].flags, 4);
-      theFile.seekRelative(4);
-
-      mTiles[j][i].tile = nullptr;
-
-      if (!(mTiles[j][i].flags & 1))
-        continue;
-
-      std::stringstream adt_filename;
-      adt_filename << "World\\Maps\\" << basename << "\\" << basename << "_" << i << "_" << j << ".adt";
-
-      mTiles[j][i].onDisc = Noggit::Application::NoggitApplication::instance()->clientData()->existsOnDisk(adt_filename.str());
-
-			if (mTiles[j][i].onDisc)
-			{
-				mTiles[j][i].flags |= 1;
-				changed = true;
-			}
-		}
-	}
-
-  if (!theFile.isEof() && mHasAGlobalWMO)
-  {
-    //! \note We actually don't load WMO only worlds, so we just stop reading here, k?
-    //! \bug MODF reads wrong. The assertion fails every time. Somehow, it keeps being MWMO. Or are there two blocks?
-    //! \nofuckingbug  on eof read returns just without doing sth to the var and some wdts have a MWMO without having a MODF so only checking for eof above is not enough
-
-    // mHasAGlobalWMO = false;
-
-    // - MWMO ----------------------------------------------
-
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MWMO');
-
-    globalWMOName = std::string(theFile.getPointer(), size);
-    theFile.seekRelative(size);
-
-    // - MODF ----------------------------------------------
-
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MODF');
-
-    theFile.read(&wmoEntry, sizeof(ENTRY_MODF));
-    math::to_client(wmoEntry.pos);
-  }
-
-  // -----------------------------------------------------
 
   theFile.close();
 
@@ -420,6 +402,9 @@ MapTile* MapIndex::loadTile(const TileIndex& tile, bool reloading, bool load_mod
     return mTiles[tile.z][tile.x].tile.get();
   }
 
+  auto maidEntry = _maid_entries[(tile.z * 64) + tile.x];
+  BlizzardArchive::Listfile::FileKey adtFileKey;
+  adtFileKey.setFileDataID(maidEntry.rootADT);
   std::stringstream filename;
   filename << "World\\Maps\\" << basename << "\\" << basename << "_" << tile.x << "_" << tile.z << ".adt";
 
@@ -429,7 +414,7 @@ MapTile* MapIndex::loadTile(const TileIndex& tile, bool reloading, bool load_mod
     return nullptr;
   }
 
-  mTiles[tile.z][tile.x].tile = std::make_unique<MapTile> (static_cast<int>(tile.x), static_cast<int>(tile.z), filename.str(),
+  mTiles[tile.z][tile.x].tile = std::make_unique<MapTile> (static_cast<int>(tile.x), static_cast<int>(tile.z), maidEntry,
      mBigAlpha, load_models, use_mclq_green_lava(), reloading, _world, _context, tile_mode::edit, load_textures);
 
   MapTile* adt = mTiles[tile.z][tile.x].tile.get();

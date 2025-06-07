@@ -71,6 +71,58 @@ MapTile::MapTile( int pX
   , _object_instance_extents{glm::vec3{std::numeric_limits<float>::max()}, glm::vec3{std::numeric_limits<float>::lowest()}}
   , _center{pX * TILESIZE + TILESIZE / 2.f, 0.f, pZ * TILESIZE + TILESIZE / 2.f}
 {
+    // TODO: When we have editing support we need to either assign filedataIDs ourselves or have them in listfile pre-assigned.
+
+	MAIDEntry adtFileDataIDs;
+	adtFileDataIDs.rootADT = Noggit::Application::NoggitApplication::instance()->clientData()->listfile()->getFileDataID(pFilename);
+
+	std::string adtBasename = pFilename.substr(0, pFilename.size() - 4);
+	adtFileDataIDs.obj0ADT = Noggit::Application::NoggitApplication::instance()->clientData()->listfile()->getFileDataID(adtBasename + "_obj0.adt");
+	adtFileDataIDs.tex0ADT = Noggit::Application::NoggitApplication::instance()->clientData()->listfile()->getFileDataID(adtBasename + "_tex0.adt");
+
+	_adt_file_data_ids = adtFileDataIDs;
+}
+
+MapTile::MapTile(int pX
+    , int pZ
+    , MAIDEntry const& adtFileDataIDs
+    , bool pBigAlpha
+    , bool pLoadModels
+    , bool use_mclq_green_lava
+    , bool reloading_tile
+    , World* world
+    , Noggit::NoggitRenderContext context
+    , tile_mode mode
+    , bool pLoadTextures
+)
+    : AsyncObject(Noggit::Application::NoggitApplication::instance()->clientData()->listfile()->getPath(adtFileDataIDs.rootADT))
+    , _renderer(this)
+    , _fl_bounds_render(this)
+    , index(TileIndex(pX, pZ))
+	, _adt_file_data_ids(adtFileDataIDs)
+    , xbase(pX* TILESIZE)
+    , zbase(pZ* TILESIZE)
+    , changed(false)
+    , Water(this, xbase, zbase, use_mclq_green_lava)
+    , _mode(mode)
+    , _tile_is_being_reloaded(reloading_tile)
+    , mBigAlpha(pBigAlpha)
+    , _load_models(pLoadModels)
+    , _load_textures(pLoadTextures)
+    , _world(world)
+    , _context(context)
+    , _chunk_update_flags(ChunkUpdateFlags::VERTEX | ChunkUpdateFlags::ALPHAMAP
+        | ChunkUpdateFlags::SHADOW | ChunkUpdateFlags::MCCV
+        | ChunkUpdateFlags::NORMALS | ChunkUpdateFlags::HOLES
+        | ChunkUpdateFlags::AREA_ID | ChunkUpdateFlags::FLAGS
+        | ChunkUpdateFlags::GROUND_EFFECT | ChunkUpdateFlags::DETAILDOODADS_EXCLUSION)
+    , _extents{ glm::vec3{pX * TILESIZE, std::numeric_limits<float>::max(), pZ * TILESIZE},
+               glm::vec3{pX * TILESIZE + TILESIZE, std::numeric_limits<float>::lowest(), pZ * TILESIZE + TILESIZE} }
+    , _combined_extents{ glm::vec3{pX * TILESIZE, std::numeric_limits<float>::max(), pZ * TILESIZE},
+               glm::vec3{pX * TILESIZE + TILESIZE, std::numeric_limits<float>::lowest(), pZ * TILESIZE + TILESIZE} }
+    , _object_instance_extents{ glm::vec3{std::numeric_limits<float>::max()}, glm::vec3{std::numeric_limits<float>::lowest()} }
+    , _center{ pX * TILESIZE + TILESIZE / 2.f, 0.f, pZ * TILESIZE + TILESIZE / 2.f }
+{
 }
 
 MapTile::~MapTile()
@@ -115,9 +167,13 @@ void MapTile::finishLoading()
   if (finished)
     return;
 
-  BlizzardArchive::ClientFile rootADTFile(_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
+  BlizzardArchive::Listfile::FileKey _rootadt_file_key;
+  _rootadt_file_key.setFileDataID(_adt_file_data_ids.rootADT);
+  //_rootadt_file_key.setFilepath(Noggit::Application::NoggitApplication::instance()->clientData()->listfile()->getPath(_adt_file_data_ids.rootADT));
 
-  Log << "Opening root ADT tile " << index.x << ", " << index.z << " (\"" << _file_key.stringRepr() << "\") from " << (rootADTFile.isExternal() ? "disk" : "game storage") << "." << std::endl;
+  BlizzardArchive::ClientFile rootADTFile(_rootadt_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
+
+  Log << "Opening root ADT tile " << index.x << ", " << index.z << " (\"" << _rootadt_file_key.stringRepr() << "\") from " << (rootADTFile.isExternal() ? "disk" : "game storage") << "." << std::endl;
 
   // - Parsing the file itself. --------------------------
 
@@ -135,20 +191,6 @@ void MapTile::finishLoading()
 
   MHDR Header;
 
-  // - MVER ----------------------------------------------
-  uint32_t version;
-  rootADTFile.read(&fourcc, 4);
-  rootADTFile.seekRelative(4);
-  rootADTFile.read(&version, 4);
-  assert(fourcc == 'MVER' && version == 18);
-
-  // - MHDR ----------------------------------------------
-  rootADTFile.read(&fourcc, 4);
-  rootADTFile.seekRelative(4);
-  assert(fourcc == 'MHDR');
-  rootADTFile.read(&Header, sizeof(MHDR));
-  mFlags = Header.flags;
-
   bool loaded_chunks[256] = {false};
   int loaded_root_chunk_count = 0, loaded_obj0_chunk_count = 0, loaded_tex0_chunk_count = 0;
 
@@ -164,6 +206,18 @@ void MapTile::finishLoading()
       //  }
       //  skip_chunk(size);
       //  break;
+      case 'MVER':
+      {
+          uint32_t version;
+          rootADTFile.read(&version, 4);
+          break;
+      }
+      case 'MHDR':
+      {
+          rootADTFile.read(&Header, sizeof(MHDR));
+          mFlags = Header.flags;
+          break;
+      }
       case 'MFBO':
         int16_t mMaximum[9], mMinimum[9];
         rootADTFile.read(mMaximum, sizeof(mMaximum));
@@ -204,7 +258,8 @@ void MapTile::finishLoading()
 
   // Load OBJ0
   BlizzardArchive::Listfile::FileKey _obj_file_key;
-  _obj_file_key.setFilepath(_file_key.filepath().substr(0, _file_key.filepath().size() - 4) + "_obj0.adt");
+  _obj_file_key.setFileDataID(_adt_file_data_ids.obj0ADT);
+  //_obj_file_key.setFilepath(_file_key.filepath().substr(0, _file_key.filepath().size() - 4) + "_obj0.adt");
   BlizzardArchive::ClientFile obj0ADTFile(_obj_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
 
   Log << "Opening OBJ0 ADT tile " << index.x << ", " << index.z << " (\"" << _obj_file_key.stringRepr() << "\") from " << (obj0ADTFile.isExternal() ? "disk" : "game storage") << "." << std::endl;
@@ -263,7 +318,8 @@ void MapTile::finishLoading()
 
   // Load TEX0
   BlizzardArchive::Listfile::FileKey _tex_file_key;
-  _tex_file_key.setFilepath(_file_key.filepath().substr(0, _file_key.filepath().size() - 4) + "_tex0.adt");
+  _tex_file_key.setFileDataID(_adt_file_data_ids.tex0ADT);
+  //_tex_file_key.setFilepath(_file_key.filepath().substr(0, _file_key.filepath().size() - 4) + "_tex0.adt");
 
   BlizzardArchive::ClientFile tex0ADTFile(_tex_file_key, client_data);
 

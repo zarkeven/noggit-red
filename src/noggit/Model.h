@@ -127,6 +127,11 @@ struct ModelTransparency {
   ModelTransparency(const BlizzardArchive::ClientFile& f, const ModelTransDef &mtd, int *global);
 };
 
+struct AFIDEntry {
+    uint16_t animID;
+    uint16_t subAnimID;
+    uint32_t fileDataID;
+};
 
 struct FakeGeometry
 {
@@ -209,6 +214,16 @@ public:
   std::vector<bool> showGeosets;
 
   // ===============================
+  // FileDataIDs
+  // ===============================
+  std::vector<uint32_t> _skinFileDataIDs;
+  std::vector<uint32_t> _textureFileDataIDs;
+  uint32_t _physFileDataID = 0;
+  uint32_t _boneFileDataID = 0;
+  uint32_t _skelFileDataID = 0;
+  std::vector< AFIDEntry> _afid_entries;
+
+  // ===============================
   // Texture data
   // ===============================
   std::vector<scoped_blp_texture_reference> _textures;
@@ -268,6 +283,7 @@ private:
   int _current_anim_seq;
   int _anim_time;
   int _global_animtime;
+  size_t _md20_offset = 0;
 
   Noggit::NoggitRenderContext _context;
 
@@ -277,7 +293,7 @@ private:
 
   void animate(glm::mat4x4 const& model_view, int anim_id, int anim_time);
   void calcBones(glm::mat4x4 const& model_view, int anim, int time, int animation_time);
-
+  void loadMD20(const BlizzardArchive::ClientFile& f, BlizzardArchive::Listfile::FileKey file_key);
   std::vector<ModelVertex> getTransformVertices() const;
 
   // size of vertex box compared to global bounds
@@ -285,8 +301,6 @@ private:
 
   void lightsOn(OpenGL::light lbase);
   void lightsOff(OpenGL::light lbase);
-
-
 
   // ===============================
   // Animation

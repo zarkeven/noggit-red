@@ -15,6 +15,7 @@
 #include <glm/gtx/quaternion.hpp>
 #include <map>
 #include <string>
+#include "Misc.h"
 
 Model::Model(const std::string& filename, Noggit::NoggitRenderContext context)
   : AsyncObject(filename)
@@ -35,92 +36,202 @@ void Model::finishLoading()
     throw std::runtime_error("Error loading file \"" + _file_key.stringRepr() + "\". Aborting to load model.");
   }
 
-  ModelHeader header;
+  // HACKFIX: Create a temporary ClientFile, we replace the buffer of this later with MD21 chunk contents
+  BlizzardArchive::ClientFile md21_file(_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
+  std::vector<char> md21_buffer;
 
-  memcpy(&header, f.getBuffer(), sizeof(ModelHeader));
+  uint32_t fourcc = 0;
+  uint32_t size = 0;
+  while (!f.isEof()) {
+      if (!f.read(&fourcc, 4)) break;
+      if (!f.read(&size, 4)) break;
 
+      switch (fourcc) // Note, M2 chunks are 'reversed' compared to other files
+      {
+      case '12DM': // MD21, contains MD20 (old M2 format)
+      {
+          _md20_offset = f.getPos();
+		  md21_buffer.resize(size);
 
+          if (!f.read(md21_buffer.data(), size)) {
+              throw std::runtime_error("Failed to read MD21 chunk for \"" + _file_key.stringRepr() + "\".");
+          }
 
-  uint32_t packed_version = 0;
-  std::memcpy(&packed_version, header.version, sizeof(packed_version));
-
-  bool valid_version = false;
-
-  // Noggit::Application::NoggitApplication::instance()->clientData()->version()// either should work
-  switch (Noggit::Project::CurrentProject::get()->projectVersion )
-  {
-  case Noggit::Project::ProjectVersion::WOTLK:
-    if (packed_version == m2_version_wrath)
-      valid_version = true;
-    break;
-  case Noggit::Project::ProjectVersion::TWW:
-  case Noggit::Project::ProjectVersion::SL:
-    if (packed_version == m2_version_legion_bfa_sl)
-      valid_version = true;
-    break;
-  default:
-    assert(false);
+          f.seek(_md20_offset + size);
+          break;
+      }
+      case 'DIFS': // SFID, skin file data IDs
+      {
+          for (int i = 0; i < size / 4; ++i) {
+              uint32_t id = 0;
+              f.read(&id, 4);
+              _skinFileDataIDs.push_back(id);
+          }
+          break;
+      }
+	  case 'DIXT': // TXID, texture file data IDs
+      {
+          for (int i = 0; i < size / 4; ++i) {
+              uint32_t id = 0;
+              f.read(&id, 4);
+              _textureFileDataIDs.push_back(id);
+          }
+          break;
+      }
+	  case 'DIFA': // AFID, animation file data IDs
+      {
+          for (int i = 0; i < size / 8; ++i) {
+              AFIDEntry afid;
+              f.read(&afid.animID, 2);
+              f.read(&afid.subAnimID, 2);
+              f.read(&afid.fileDataID, 4);
+              _afid_entries.push_back(afid);
+          }
+          break;
+      }
+	  case 'DIFB': // BFID, bone file data ID
+      {
+          uint32_t id = 0;
+          f.read(&id, 4);
+          _boneFileDataID = id;
+          break;
+      }
+      case 'DIFP': // PFID, phys file data ID
+      {
+          uint32_t id = 0;
+          f.read(&id, 4);
+          _physFileDataID = id;
+          break;
+      }
+	  case 'DIKS':  // SKID, skeleton file data ID
+      {
+          uint32_t id = 0;
+          f.read(&id, 4);
+          _skelFileDataID = id;
+          break;
+      }
+      case 'CAXT': // TXAC, texture transforms
+	  case 'TPXE': // EXPT, extended particle
+	  case '2PXE': // EXP2, extended particle 2
+	  case 'CBAP': // PABC, parent animation blacklist
+	  case 'CDEP': // PEDC, parent event data
+	  case 'CDFP': // PFDC, inline .phys data
+	  case '1DGP': // PGD1, particle geoset data
+	  case 'CBSP': // PSBC, parent sequence bounds
+      case '1VDL': // LDV1, LOD data
+	  case 'DIPR': // RPID, recursive particle file data IDs
+	  case 'DIPG': // GPID, geometry particle file data IDs
+	  case '1VFW': // WFV1, waterfall data 1
+	  case '2VFW': // WFV2, waterfall data 2
+	  case '3VFW': // WFV3, waterfall data 3    
+      case 'FGDE': // EDGF, edge fade
+      case 'FREN': // NERF ?
+      case 'LTED': // DETL ? 
+      case 'COBD': // DBOC ?
+      case 'ARFA': // AFRA ?
+	  case 'LOCP': // PCOL, player housing collision
+      case 'VIPD': // DPIV, pivot points??
+      {
+		  f.seekRelative(size);
+          break;
+      }
+      default:
+		  LogDebug << "Skipping unknown M2 chunk at " << f.getPos() << ": " << fourcc << " ('" << fourcc_to_str(fourcc) << "'), (" << size << " bytes)" << std::endl;
+          f.seekRelative(size);
+          break;
+      }
   }
 
-  if (!valid_version)
-  [[unlikely]]
-  {
-    LogError << "Error loading file \"" << _file_key.stringRepr() << "\". Wrong M2 version " << std::to_string(packed_version) << std::endl;
-    throw std::runtime_error("Error loading file \"" + _file_key.stringRepr() + "\". Wrong M2 version " + std::to_string(packed_version));
-  }
+  md21_file.setBuffer(md21_buffer);
 
-  // blend mode override
-  if (header.Flags & m2_flag_use_texture_combiner_combos)
-  {
-    // go to the end of the header (where the blend override data is)    
-    uint32_t const* blend_override_info = reinterpret_cast<uint32_t const*>(f.getBuffer() + sizeof(ModelHeader));
-    uint32_t n_blend_override = *blend_override_info++;
-    uint32_t ofs_blend_override = *blend_override_info;
-
-    blend_override = M2Array<uint16_t>(f, ofs_blend_override, n_blend_override);
-  }
-
-  animated = isAnimated(f, header);  // isAnimated will set animGeometry and animTextures
-
-  trans = 1.0f;
-  _current_anim_seq = 0;
-
-  bounding_box_min = header.bounding_box_min;
-  bounding_box_max = header.bounding_box_max;
-  bounding_box_radius = header.bounding_box_radius;
-
-  collision_box_min = header.collision_box_min;
-  collision_box_max = header.collision_box_max;
-  collision_box_radius = header.collision_box_radius;
-
-  Flags = header.Flags;
-
-
-  if (header.nGlobalSequences)
-  {
-    _global_sequences = M2Array<int>(f, header.ofsGlobalSequences, header.nGlobalSequences);
-  }
-
-  //! \todo  This takes a biiiiiit long. Have a look at this.
-  initCommon(f, header);
-
-  if (animated)
-  {
-    initAnimated(f, header);
-
-    mesh_bounds_ratio = calcMeshBoundsRatio();
-  }
+  loadMD20(md21_file, _file_key);
 
   f.close();
 
-  // add fake geometry for selection
-  if (_renderer.renderPasses().empty() || particles_only() /* || this->file_key().filepath() == "world/generic/passivedoodads/particleemitters/ashenvalewisps.m2"*/)
-  {
-    _fake_geometry.emplace(this);
-  }
-
   finished = true;
   _state_changed.notify_all();
+}
+
+void Model::loadMD20(const BlizzardArchive::ClientFile& f, BlizzardArchive::Listfile::FileKey file_key)
+{
+    ModelHeader header;
+
+    memcpy(&header, f.getBuffer(), sizeof(ModelHeader));
+
+    uint32_t packed_version = 0;
+    std::memcpy(&packed_version, header.version, sizeof(packed_version));
+
+    bool valid_version = true; // todo, figure out what changes in which versions
+
+    // Noggit::Application::NoggitApplication::instance()->clientData()->version()// either should work
+    switch (Noggit::Project::CurrentProject::get()->projectVersion)
+    {
+    case Noggit::Project::ProjectVersion::WOTLK:
+        if (packed_version == m2_version_wrath)
+            valid_version = true;
+        break;
+    case Noggit::Project::ProjectVersion::TWW:
+    case Noggit::Project::ProjectVersion::SL:
+        if (packed_version == m2_version_legion_bfa_sl)
+            valid_version = true;
+        break;
+    default:
+        assert(false);
+    }
+
+    if (!valid_version)
+        [[unlikely]]
+    {
+        LogError << "Error loading file \"" << _file_key.stringRepr() << "\". Wrong M2 version " << std::to_string(packed_version) << std::endl;
+        throw std::runtime_error("Error loading file \"" + _file_key.stringRepr() + "\". Wrong M2 version " + std::to_string(packed_version));
+    }
+
+    // blend mode override
+    if (header.Flags & m2_flag_use_texture_combiner_combos)
+    {
+        // go to the end of the header (where the blend override data is)    
+        uint32_t const* blend_override_info = reinterpret_cast<uint32_t const*>(f.getBuffer() + sizeof(ModelHeader));
+        uint32_t n_blend_override = *blend_override_info++;
+        uint32_t ofs_blend_override = *blend_override_info;
+
+        blend_override = M2Array<uint16_t>(f, ofs_blend_override, n_blend_override);
+    }
+
+    animated = isAnimated(f, header);  // isAnimated will set animGeometry and animTextures
+
+    trans = 1.0f;
+    _current_anim_seq = 0;
+
+    bounding_box_min = header.bounding_box_min;
+    bounding_box_max = header.bounding_box_max;
+    bounding_box_radius = header.bounding_box_radius;
+
+    collision_box_min = header.collision_box_min;
+    collision_box_max = header.collision_box_max;
+    collision_box_radius = header.collision_box_radius;
+
+    Flags = header.Flags;
+
+    if (header.nGlobalSequences)
+    {
+        _global_sequences = M2Array<int>(f, header.ofsGlobalSequences, header.nGlobalSequences);
+    }
+
+    //! \todo  This takes a biiiiiit long. Have a look at this.
+    initCommon(f, header);
+
+    if (animated)
+    {
+        initAnimated(f, header);
+
+        mesh_bounds_ratio = calcMeshBoundsRatio();
+    }
+
+    // add fake geometry for selection
+    if (_renderer.renderPasses().empty() || particles_only() /* || this->file_key().filepath() == "world/generic/passivedoodads/particleemitters/ashenvalewisps.m2"*/)
+    {
+        _fake_geometry.emplace(this);
+    }
 }
 
 void Model::waitForChildrenLoaded()
@@ -333,21 +444,18 @@ void Model::initCommon(const BlizzardArchive::ClientFile& f, ModelHeader& header
   _textureFilenames.resize(header.nTextures);
   _specialTextures.resize(header.nTextures);
 
+  auto client_data = Noggit::Application::NoggitApplication::instance()->clientData();
+
   for (size_t i = 0; i < header.nTextures; ++i)
   {
     if (texdef[i].type == 0)
     {
-      if (texdef[i].nameLen == 0)
-      {
-        LogDebug << "Texture " << i << " has a lenght of 0 for '" << _file_key.stringRepr() << std::endl;
-        continue;
-      }
+      auto filename = client_data->listfile()->getPath(_textureFileDataIDs[i]);
+      if (filename == "")
+          filename = "tileset/generic/black.blp";
 
       _specialTextures[i] = -1;
-      const char* blp_ptr = f.getBuffer() + texdef[i].nameOfs;
-      // some tools export the size without accounting for the \0
-      bool invalid_size = *(blp_ptr + texdef[i].nameLen-1) != '\0';
-      _textureFilenames[i] = std::string(blp_ptr, texdef[i].nameLen - (invalid_size ? 0 : 1));
+      _textureFilenames[i] = std::string(filename);
     }
     else
     {
@@ -517,10 +625,12 @@ void Model::initAnimated(const BlizzardArchive::ClientFile& f, ModelHeader& head
 
   
   // particle systems
-  if (header.nParticleEmitters)
+  // todo: lots of changes in modern i think, skip for now
+  //if (header.nParticleEmitters)
+  if(false)
   {
     _particles.reserve(header.nParticleEmitters);
-    ModelParticleEmitterDef const* pdefs = reinterpret_cast<ModelParticleEmitterDef const*>(f.getBuffer() + header.ofsParticleEmitters);
+    ModelParticleEmitterDef const* pdefs = reinterpret_cast<ModelParticleEmitterDef const*>(f.getBuffer()  + header.ofsParticleEmitters);
     for (size_t i = 0; i<header.nParticleEmitters; ++i) 
     {
       try

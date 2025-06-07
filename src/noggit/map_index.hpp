@@ -20,6 +20,17 @@ enum class uid_fix_status
   failed
 };
 
+struct MAIDEntry {
+    uint32_t rootADT; // reference to fdid of mapname_xx_yy.adt
+    uint32_t obj0ADT; // reference to fdid of mapname_xx_yy_obj0.adt
+    uint32_t obj1ADT; // reference to fdid of mapname_xx_yy_obj1.adt
+    uint32_t tex0ADT; // reference to fdid of mapname_xx_yy_tex0.adt
+    uint32_t lodADT;  // reference to fdid of mapname_xx_yy_lod.adt
+    uint32_t mapTexture; // reference to fdid of mapname_xx_yy.blp
+    uint32_t mapTextureN; // reference to fdid of mapname_xx_yy_n.blp
+    uint32_t minimapTexture; // reference to fdid of mapxx_yy.blp
+};
+
 class MapTile;
 
 /*!
@@ -151,7 +162,7 @@ public:
 
   TileRange<true> tiles_in_rect (glm::vec3 const& pos, float radius);
 
-  MapIndex(const std::string& pBasename, int map_id, World*, Noggit::NoggitRenderContext context, bool create_empty = false);
+  MapIndex(const std::string& pBasename, int map_id, World*, Noggit::NoggitRenderContext context, bool create_empty = false, uint32_t fileDataID = 0);
 
   void set_basename(const std::string& pBasename);
 
@@ -220,6 +231,7 @@ public:
 
   void loadMinimapMD5translate();
   void saveMinimapMD5translate();
+  std::vector<MAIDEntry> _maid_entries;
 
 private:
 	uint32_t getHighestGUIDFromFile(const std::string& pFilename) const;

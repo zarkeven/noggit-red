@@ -51,10 +51,16 @@
 bool World::IsEditableWorld(BlizzardDatabaseLib::Structures::BlizzardDatabaseRow& record)
 {
   ZoneScoped;
+  std::stringstream ssfilename;
   std::string lMapName = record.Columns["Directory"].Value;
 
-  std::stringstream ssfilename;
-  ssfilename << "World\\Maps\\" << lMapName << "\\" << lMapName << ".wdt";
+  if (record.Columns.contains("WDTFileDataID")) {
+      auto wdtFilename = Noggit::Application::NoggitApplication::instance()->clientData()->listfile()->getPath(std::stoul(record.Columns["WDTFileDataID"].Value));
+      ssfilename << wdtFilename;
+  }
+  else {
+      ssfilename << "World\\Maps\\" << lMapName << "\\" << lMapName << ".wdt";
+  }
 
   if (!Noggit::Application::NoggitApplication::instance()->clientData()->exists(ssfilename.str()))
   {
@@ -108,11 +114,11 @@ bool World::IsWMOWorld(BlizzardDatabaseLib::Structures::BlizzardDatabaseRow& rec
     return false;
 }
 
-World::World(const std::string& name, int map_id, Noggit::NoggitRenderContext context, bool create_empty)
+World::World(const std::string& name, int map_id, Noggit::NoggitRenderContext context, bool create_empty, uint32_t wdtFileDataID)
     : _renderer(Noggit::Rendering::WorldRender(this))
     , _model_instance_storage(this)
     , _tile_update_queue(this)
-    , mapIndex(name, map_id, this, context, create_empty)
+    , mapIndex(name, map_id, this, context, create_empty, wdtFileDataID)
     , horizon(name, &mapIndex)
     , mWmoFilename(mapIndex.globalWMOName)
     , mWmoEntry(mapIndex.wmoEntry)

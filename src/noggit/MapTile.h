@@ -11,7 +11,7 @@
 #include <noggit/Selection.h>
 #include <noggit/TileIndex.hpp>
 #include <noggit/TileWater.hpp>
-
+#include <noggit/map_index.hpp>
 #include <external/tsl/robin_map.h>
 
 #include <array>
@@ -51,6 +51,18 @@ public:
          , tile_mode mode = tile_mode::edit
          , bool pLoadTextures = true
          );
+    MapTile(int x0
+        , int z0
+        , MAIDEntry const& adtFileDataIDs
+        , bool pBigAlpha
+        , bool pLoadModels
+        , bool use_mclq_green_lava
+        , bool reloading_tile
+        , World*
+        , Noggit::NoggitRenderContext context
+        , tile_mode mode = tile_mode::edit
+        , bool pLoadTextures = true
+    );
   ~MapTile();
 
   void finishLoading() override;
@@ -193,6 +205,7 @@ private:
 
   bool _textures_finished_loading = false;
   bool _objects_finished_loading = false;
+  MAIDEntry _adt_file_data_ids = {};
 
   // MHDR:
   int mFlags = 0;

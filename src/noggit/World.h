@@ -70,7 +70,7 @@ public:
   //! \brief Name of this map.
   std::string basename;
 
-  explicit World(const std::string& name, int map_id, Noggit::NoggitRenderContext context, bool create_empty = false);
+  explicit World(const std::string& name, int map_id, Noggit::NoggitRenderContext context, bool create_empty = false, uint32_t wdtFileDataID = 0);
 
   void LoadSavedSelectionGroups();
 

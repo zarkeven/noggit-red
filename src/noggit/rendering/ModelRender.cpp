@@ -481,6 +481,13 @@ void ModelRender::fixShaderIDLayer()
         some_flags = (some_flags & 0xFF00);
       }
 
+      // TODO: Something is different here for modern WoW....
+      if(pass.texture_coord_combo_index >= _model->_texture_unit_lookup.size())
+      {
+        LogDebug << "TODO: wrong texture coord combo index on model: " << _model->_file_key.stringRepr() << std::endl;
+        continue;
+      }
+
       int16_t texture_unit_lookup = _model->_texture_unit_lookup[pass.texture_coord_combo_index];
 
       if ((some_flags & 0xFF) < 2)
