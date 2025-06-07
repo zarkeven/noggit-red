@@ -68,7 +68,7 @@ namespace Noggit::Project
     if (project->projectVersion == ProjectVersion::SL)
     {
       client_archive_version = BlizzardArchive::ClientVersion::SL;
-      client_build = BlizzardDatabaseLib::Structures::Build("9.1.0.39584");
+      client_build = BlizzardDatabaseLib::Structures::Build("9.2.7.45745");
       client_archive_locale = BlizzardArchive::Locale::enUS;
     }
 
