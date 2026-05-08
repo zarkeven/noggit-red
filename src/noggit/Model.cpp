@@ -11,10 +11,186 @@
 #include <noggit/TextureManager.h> // TextureManager, Texture
 
 #include <cassert>
+#include <cstdint>
+#include <cstring>
 #include <glm/gtx/euler_angles.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <map>
 #include <string>
+
+namespace
+{
+  // https://wowdev.wiki/M2/.skin — modern profiles start with FourCC 'SKIN' (LE 0x4E4B4953).
+  constexpr std::uint32_t kM2SkinProfileMagicLe = 0x4E4B4953u;
+
+  struct M2ArrayU32
+  {
+    std::uint32_t count;
+    std::uint32_t ofs;
+  };
+
+  bool try_load_m2_skin_profile(BlizzardArchive::ClientFile const& g
+    , std::vector<std::uint16_t>& indices_out
+    , std::vector<ModelGeoset>& geosets_out
+    , ModelView* synthetic_view_out
+    , ModelTexUnit const** tex_units_out
+  )
+  {
+    indices_out.clear();
+    geosets_out.clear();
+    *tex_units_out = nullptr;
+
+    std::uint8_t const* const base = reinterpret_cast<std::uint8_t const*>(g.getBuffer());
+    std::size_t const size = g.getSize();
+
+    if (size < 4u + 5u * sizeof(M2ArrayU32) + sizeof(std::uint32_t))
+    {
+      return false;
+    }
+
+    std::uint32_t const magic = *reinterpret_cast<std::uint32_t const*>(base);
+    if (magic != kM2SkinProfileMagicLe)
+    {
+      return false;
+    }
+
+    M2ArrayU32 const* const arrays = reinterpret_cast<M2ArrayU32 const*>(base + 4);
+    M2ArrayU32 const aVert = arrays[0];
+    M2ArrayU32 const aIdx = arrays[1];
+    M2ArrayU32 const aBone = arrays[2];
+    M2ArrayU32 const aSub = arrays[3];
+    M2ArrayU32 const aBatch = arrays[4];
+
+    auto in_range = [&](std::uint32_t ofs, std::uint64_t byte_len) -> bool
+    {
+      if (ofs > size)
+      {
+        return false;
+      }
+      if (byte_len > size)
+      {
+        return false;
+      }
+      if (ofs + byte_len > size)
+      {
+        return false;
+      }
+      return true;
+    };
+
+    if (aIdx.count % 3u != 0)
+    {
+      return false;
+    }
+
+    if (!in_range(aVert.ofs, static_cast<std::uint64_t>(aVert.count) * sizeof(std::uint16_t)))
+    {
+      return false;
+    }
+    if (!in_range(aIdx.ofs, static_cast<std::uint64_t>(aIdx.count) * sizeof(std::uint16_t)))
+    {
+      return false;
+    }
+    if (!in_range(aBone.ofs, static_cast<std::uint64_t>(aBone.count) * 4u))
+    {
+      return false;
+    }
+    if (aSub.count == 0 || aBatch.ofs < aSub.ofs)
+    {
+      return false;
+    }
+
+    std::uint64_t const submesh_span = static_cast<std::uint64_t>(aBatch.ofs) - static_cast<std::uint64_t>(aSub.ofs);
+    if (submesh_span % aSub.count != 0)
+    {
+      return false;
+    }
+    std::size_t const skin_stride = static_cast<std::size_t>(submesh_span / aSub.count);
+    if (skin_stride < 24 || skin_stride > 128)
+    {
+      return false;
+    }
+    if (!in_range(aSub.ofs, skin_stride * static_cast<std::uint64_t>(aSub.count)))
+    {
+      return false;
+    }
+    if (!in_range(aBatch.ofs, static_cast<std::uint64_t>(aBatch.count) * sizeof(ModelTexUnit)))
+    {
+      return false;
+    }
+
+    ModelTexUnit const* const batches = reinterpret_cast<ModelTexUnit const*>(base + aBatch.ofs);
+    for (std::uint32_t bi = 0; bi < aBatch.count; ++bi)
+    {
+      if (batches[bi].texture_count > 4)
+      {
+        return false;
+      }
+    }
+
+    std::uint16_t const* const skin_vert = reinterpret_cast<std::uint16_t const*>(base + aVert.ofs);
+    std::uint16_t const* const tri = reinterpret_cast<std::uint16_t const*>(base + aIdx.ofs);
+
+    indices_out.resize(aIdx.count);
+    for (std::uint32_t i = 0; i < aIdx.count; ++i)
+    {
+      std::uint32_t const local = tri[i];
+      if (local >= aVert.count)
+      {
+        indices_out.clear();
+        return false;
+      }
+      indices_out[i] = skin_vert[local];
+    }
+
+    geosets_out.resize(aSub.count);
+    for (std::uint32_t si = 0; si < aSub.count; ++si)
+    {
+      std::uint8_t const* p = base + aSub.ofs + si * skin_stride;
+      auto u16 = [&](std::size_t off) -> std::uint16_t
+      {
+        return *reinterpret_cast<std::uint16_t const*>(p + off);
+      };
+
+      ModelGeoset& dst = geosets_out[si];
+      dst.id = u16(0);
+      dst.d2 = u16(2);
+      dst.vstart = u16(4);
+      dst.vcount = u16(6);
+      dst.istart = u16(8);
+      dst.icount = u16(10);
+      dst.d3 = u16(12);
+      dst.d4 = u16(14);
+      dst.d5 = u16(16);
+      dst.d6 = u16(18);
+      if (skin_stride >= 32)
+      {
+        std::memcpy(&dst.BoundingBox[0], p + 20, sizeof(glm::vec3));
+        dst.BoundingBox[1] = dst.BoundingBox[0];
+      }
+      else
+      {
+        dst.BoundingBox[0] = {};
+        dst.BoundingBox[1] = {};
+      }
+      if (skin_stride >= 48)
+      {
+        dst.radius = *reinterpret_cast<float const*>(p + 44);
+      }
+      else
+      {
+        dst.radius = 1.f;
+      }
+    }
+
+    *synthetic_view_out = ModelView{};
+    synthetic_view_out->n_texture_unit = aBatch.count;
+    synthetic_view_out->n_submesh = aSub.count;
+
+    *tex_units_out = reinterpret_cast<ModelTexUnit const*>(base + aBatch.ofs);
+    return true;
+  }
+}
 
 Model::Model(const std::string& filename, Noggit::NoggitRenderContext context)
   : AsyncObject(filename)
@@ -394,46 +570,71 @@ void Model::initCommon(const BlizzardArchive::ClientFile& f, ModelHeader& header
   }
 
 
-  // just use the first LOD/view
+  // First LOD/view skin (00.skin). Some MD21 headers report nViews == 0 but still ship a profile/legacy skin file;
+  // load it when present so batches (projected flags) and indices are available.
+  std::string lodname = _file_key.filepath().substr(0, _file_key.filepath().length() - 3);
+  lodname.append("00.skin");
+  BlizzardArchive::ClientFile g(lodname, Noggit::Application::NoggitApplication::instance()->clientData());
+  bool const skin_file_present = !g.isEof();
 
-  if (header.nViews > 0) {
-    // indices - allocate space, too
-    std::string lodname = _file_key.filepath().substr(0, _file_key.filepath().length() - 3);
-    lodname.append("00.skin");
-    BlizzardArchive::ClientFile g(lodname, Noggit::Application::NoggitApplication::instance()->clientData());
-    if (g.isEof()) {
+  if (header.nViews > 0 || skin_file_present)
+  {
+    if (!skin_file_present)
+    {
       LogError << "loading skinfile " << lodname << std::endl;
       g.close();
       return;
     }
 
-    auto view = reinterpret_cast<ModelView const*>(g.getBuffer());
-    auto indexLookup = reinterpret_cast<uint16_t const*>(g.getBuffer() + view->ofs_index);
-    auto triangles = reinterpret_cast<uint16_t const*>(g.getBuffer() + view->ofs_triangle);
+    _skin_profile_geosets.clear();
 
-    _indices.resize (view->n_triangle);
+    ModelView synthetic_view{};
+    ModelView const* view_for_passes = nullptr;
+    ModelTexUnit const* texture_unit = nullptr;
+    ModelGeoset const* model_geosets = nullptr;
 
-    for (size_t i (0); i < _indices.size(); ++i) {
-      _indices[i] = indexLookup[triangles[i]];
+    std::uint32_t const file_magic = *reinterpret_cast<std::uint32_t const*>(g.getBuffer());
+    if (file_magic == kM2SkinProfileMagicLe)
+    {
+      if (!try_load_m2_skin_profile(g, _indices, _skin_profile_geosets, &synthetic_view, &texture_unit))
+      {
+        LogError << "M2 SKIN profile parse failed (vertices/indices/submesh layout): " << lodname << std::endl;
+        g.close();
+        return;
+      }
+      view_for_passes = &synthetic_view;
+      model_geosets = _skin_profile_geosets.data();
+    }
+    else
+    {
+      auto view = reinterpret_cast<ModelView const*>(g.getBuffer());
+      auto indexLookup = reinterpret_cast<uint16_t const*>(g.getBuffer() + view->ofs_index);
+      auto triangles = reinterpret_cast<uint16_t const*>(g.getBuffer() + view->ofs_triangle);
+
+      _indices.resize (view->n_triangle);
+
+      for (size_t i (0); i < _indices.size(); ++i) {
+        _indices[i] = indexLookup[triangles[i]];
+      }
+
+      model_geosets = reinterpret_cast<ModelGeoset const*>(g.getBuffer() + view->ofs_submesh);
+      texture_unit = reinterpret_cast<ModelTexUnit const*>(g.getBuffer() + view->ofs_texture_unit);
+      view_for_passes = view;
     }
 
-    // render ops
-    auto model_geosets = reinterpret_cast<ModelGeoset const*>(g.getBuffer() + view->ofs_submesh);
-    auto texture_unit = reinterpret_cast<ModelTexUnit const*>(g.getBuffer() + view->ofs_texture_unit);
-    
     _texture_lookup = M2Array<uint16_t>(f, header.ofsTexLookup, header.nTexLookup);
     _texture_animation_lookups = M2Array<int16_t>(f, header.ofsTexAnimLookup, header.nTexAnimLookup);
     _texture_unit_lookup = M2Array<int16_t>(f, header.ofsTexUnitLookup, header.nTexUnitLookup);
 
-    showGeosets.resize (view->n_submesh);
-    for (size_t i = 0; i<view->n_submesh; ++i) 
+    showGeosets.resize (view_for_passes->n_submesh);
+    for (size_t i = 0; i<view_for_passes->n_submesh; ++i) 
     {
       showGeosets[i] = true;
     }
 
     _render_flags = M2Array<ModelRenderFlags>(f, header.ofsRenderFlags, header.nRenderFlags);
 
-    _renderer.initRenderPasses(view, texture_unit, model_geosets);
+    _renderer.initRenderPasses(view_for_passes, texture_unit, model_geosets);
 
     g.close();
   }  

@@ -87,12 +87,16 @@ namespace Noggit
       QRadioButton* radio_flat = new QRadioButton ("Flat");
       QRadioButton* radio_linear = new QRadioButton ("Linear");
       QRadioButton* radio_smooth = new QRadioButton ("Smooth");
+      QRadioButton* radio_hill = new QRadioButton ("Hill");
       QRadioButton* radio_origin = new QRadioButton ("Origin");
+      QRadioButton* radio_inner = new QRadioButton ("Smooth inner vertices (wip)");
 
       _type_button_box->addButton (radio_flat, (int)eFlattenType_Flat);
       _type_button_box->addButton (radio_linear, (int)eFlattenType_Linear);
       _type_button_box->addButton (radio_smooth, (int)eFlattenType_Smooth);
+      _type_button_box->addButton (radio_hill, (int)eFlattenType_Hill);
       _type_button_box->addButton (radio_origin, (int)eFlattenType_Origin);
+      _type_button_box->addButton (radio_inner, (int)eFlattenType_Smooth_Inner);
 
       radio_linear->toggle();
 
@@ -101,7 +105,9 @@ namespace Noggit
       flatten_type_layout->addWidget (radio_flat, 0, 0);
       flatten_type_layout->addWidget (radio_linear, 0, 1);
       flatten_type_layout->addWidget (radio_smooth, 1, 0);
-      flatten_type_layout->addWidget (radio_origin, 1, 1);
+      flatten_type_layout->addWidget (radio_hill, 1, 1);
+      flatten_type_layout->addWidget (radio_origin, 2, 0);
+      flatten_type_layout->addWidget (radio_inner, 3, 0, 1, 2);
 
       flatten_type_group->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
       layout->addWidget (flatten_type_group);
@@ -129,10 +135,16 @@ namespace Noggit
       _snap_wmo_objects_chkbox = new QCheckBox("Snap WMO objects", this);
       _snap_wmo_objects_chkbox->setChecked(true);
 
+      _fast_blur_chkbox = new QCheckBox("Fast flatten / blur (approx)", this);
+      _fast_blur_chkbox->setToolTip(
+        "Flatten: stronger per-tick blend and cheaper tests (large brushes stay responsive).\n"
+        "Blur: neighbor-only smoothing (no wide kernel); use full blur for maximum quality.");
+
       settings_layout->addWidget(_radius_slider);
       settings_layout->addWidget(_speed_slider);
       settings_layout->addWidget(_snap_m2_objects_chkbox);
       settings_layout->addWidget(_snap_wmo_objects_chkbox);
+      settings_layout->addWidget(_fast_blur_chkbox);
 
       layout->addWidget(settings_group);
 
@@ -283,15 +295,31 @@ namespace Noggit
           , _snap_wmo_objects_chkbox->isChecked(), _snap_m2_objects_chkbox->isChecked());
 
 
-      world->flattenTerrain ( cursor_pos
-                            , 1.f - pow (0.5f, dt *_speed_slider->value())
-                            , _radius_slider->value()
-                            , _flatten_type
-                            , _flatten_mode
-                            , use_ref_pos() ? _lock_pos : cursor_pos
-                            , math::degrees (angled_mode() ? _angle : 0.0f)
-                            , math::degrees (angled_mode() ? _orientation : 0.0f)
-                            );
+      float const remain = 1.f - pow (0.5f, dt *_speed_slider->value());
+      if (_fast_blur_chkbox && _fast_blur_chkbox->isChecked())
+      {
+        world->flattenTerrainFast ( cursor_pos
+                                  , remain
+                                  , _radius_slider->value()
+                                  , _flatten_type
+                                  , _flatten_mode
+                                  , use_ref_pos() ? _lock_pos : cursor_pos
+                                  , math::degrees (angled_mode() ? _angle : 0.0f)
+                                  , math::degrees (angled_mode() ? _orientation : 0.0f)
+                                  );
+      }
+      else
+      {
+        world->flattenTerrain ( cursor_pos
+                              , remain
+                              , _radius_slider->value()
+                              , _flatten_type
+                              , _flatten_mode
+                              , use_ref_pos() ? _lock_pos : cursor_pos
+                              , math::degrees (angled_mode() ? _angle : 0.0f)
+                              , math::degrees (angled_mode() ? _orientation : 0.0f)
+                              );
+      }
 
       // re apply the ground height diff to the objects
       for (auto pair : objects_ground_distance)
@@ -309,12 +337,24 @@ namespace Noggit
           , _snap_wmo_objects_chkbox->isChecked(), _snap_m2_objects_chkbox->isChecked());
 
 
-      world->blurTerrain ( cursor_pos
-                         , 1.f - pow (0.5f, dt * _speed_slider->value())
-                         , _radius_slider->value()
-                         , _flatten_type
-                         , _flatten_mode
-                         );
+      if (_fast_blur_chkbox && _fast_blur_chkbox->isChecked())
+      {
+        world->blurTerrainFast ( cursor_pos
+                               , 1.f - pow (0.5f, dt * _speed_slider->value())
+                               , _radius_slider->value()
+                               , _flatten_type
+                               , _flatten_mode
+                               );
+      }
+      else
+      {
+        world->blurTerrain ( cursor_pos
+                           , 1.f - pow (0.5f, dt * _speed_slider->value())
+                           , _radius_slider->value()
+                           , _flatten_type
+                           , _flatten_mode
+                           );
+      }
 
       // re apply the ground height diff to the objects
       for (auto pair : objects_ground_distance)
@@ -485,6 +525,7 @@ namespace Noggit
       json["lock_x"] = _lock_x->value();
       json["lock_z"] = _lock_z->value();
       json["lock_h"] = _lock_h->value();
+      json["fast_blur"] = _fast_blur_chkbox ? _fast_blur_chkbox->isChecked() : false;
 
       return json;
     }
@@ -507,6 +548,8 @@ namespace Noggit
       _lock_x->setValue(json["lock_x"].toDouble());
       _lock_z->setValue(json["lock_z"].toDouble());
       _lock_h->setValue(json["lock_h"].toDouble());
+      if (_fast_blur_chkbox)
+        _fast_blur_chkbox->setChecked(json["fast_blur"].toBool());
     }
   }
 }

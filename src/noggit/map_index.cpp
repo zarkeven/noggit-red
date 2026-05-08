@@ -13,18 +13,755 @@
   #include <mysql/mysql.h>
 #endif
 #include <noggit/map_index.hpp>
+#include <noggit/map_light_target.hpp>
+#include <noggit/Log.h>
 #include <noggit/uid_storage.hpp>
 #include <noggit/application/NoggitApplication.hpp>
 #include <ClientFile.hpp>
+#include <ClientData.hpp>
+#include <Listfile.hpp>
 
 #include <QtCore/QSettings>
+#include <QCheckBox>
+#include <QMessageBox>
+#include <QString>
 #include <QByteArray>
 #include <QTextStream>
 #include <QRegExp>
 #include <QFile>
 
+#include <fstream>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
 #include <forward_list>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <set>
 #include <sstream>
+#include <vector>
+
+namespace
+{
+#pragma pack(push, 1)
+  struct MPL2Record
+  {
+    std::uint32_t id;
+    std::uint8_t color_bgra[4];
+    float position[3];
+    float attenuation_start;
+    float attenuation_end;
+    float intensity;
+    float rotation[3];
+    std::uint16_t tile_x;
+    std::uint16_t tile_y;
+    std::int16_t mlta_index;
+    std::int16_t texture_index;
+  };
+  static_assert(sizeof(MPL2Record) == 0x34, "MPL2 record must be 0x34 bytes");
+
+  struct MPL3Record
+  {
+    std::uint32_t light_index;
+    std::uint8_t color_bgra[4];
+    float position[3];
+    float attenuation_start;
+    float attenuation_end;
+    float intensity;
+    float rotation[3];
+    std::uint16_t tile_x;
+    std::uint16_t tile_y;
+    std::int16_t mlta_index;
+    std::int16_t texture_index;
+    std::uint16_t flags;
+    std::uint16_t scale_half;
+  };
+  static_assert(sizeof(MPL3Record) == 0x38, "MPL3 record must be 0x38 bytes");
+
+  struct MSLTRecord
+  {
+    std::uint32_t id;
+    std::uint8_t color_bgra[4];
+    float position[3];
+    float attenuation_start;
+    float attenuation_end;
+    float intensity;
+    float rotation[3];
+    float spotlight_radius;
+    float inner_angle;
+    float outer_angle;
+    std::uint16_t tile_x;
+    std::uint16_t tile_y;
+    std::int16_t mlta_index;
+    std::int16_t texture_index;
+  };
+  static_assert(sizeof(MSLTRecord) == 0x40, "MSLT record must be 0x40 bytes");
+#pragma pack(pop)
+
+  struct MltaRow
+  {
+    float amplitude;
+    float frequency;
+    int function;
+  };
+
+  float half_bits_to_float (std::uint16_t h)
+  {
+    std::uint32_t const sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
+    int const exp = (h >> 10) & 0x1f;
+    std::uint32_t const mant = h & 0x3ffu;
+    std::uint32_t f;
+    if (exp == 0)
+      f = sign | (mant << 13);
+    else if (exp == 31)
+      f = sign | 0x7f800000u | (mant << 13);
+    else
+      f = sign | static_cast<std::uint32_t>(exp - 15 + 127) << 23 | (mant << 13);
+    float out;
+    std::memcpy (&out, &f, sizeof (float));
+    return out;
+  }
+
+  std::uint16_t float_to_half_bits (float value)
+  {
+    std::uint32_t x;
+    std::memcpy (&x, &value, sizeof (float));
+    std::uint32_t const sign = (x >> 16) & 0x8000u;
+    int exp = int ((x >> 23) & 0xff) - 127 + 15;
+    std::uint32_t mant = x & 0x007fffffu;
+    if (exp <= 0)
+      return static_cast<std::uint16_t>(sign);
+    if (exp >= 31)
+      return static_cast<std::uint16_t>(sign | 0x7c00u);
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
+  }
+
+  void apply_mlta_to_light (World::PointLight& light, std::int16_t idx, std::vector<MltaRow> const& mlta_rows)
+  {
+    if (idx < 0 || static_cast<std::size_t>(idx) >= mlta_rows.size())
+      return;
+
+    MltaRow const& row = mlta_rows[static_cast<std::size_t>(idx)];
+    if (row.function <= 0)
+      return;
+
+    light.mlta_active = true;
+    light.mlta_amplitude = row.amplitude;
+    light.mlta_frequency = row.frequency;
+    light.mlta_function = row.function;
+    light.flicker_mode = static_cast<std::uint8_t>(std::clamp (row.function, 0, 3));
+    light.flicker_intensity = row.amplitude;
+    light.flicker_speed = row.frequency;
+  }
+
+  //! Cleared when Noggit exits; suppresses MPL2 vs NGPL overflow QMessageBox for the rest of the session.
+  bool suppress_point_light_mpl2_overflow_dialog = false;
+
+  [[nodiscard]] bool client_uses_modern_wdt_mphd()
+  {
+    auto* app = Noggit::Application::NoggitApplication::instance();
+    if (!app || !app->hasClientData())
+      return false;
+    return app->clientData()->version() != BlizzardArchive::ClientVersion::WOTLK;
+  }
+
+  //! MPL2 lives in `_lgt.wdt`; external tools often watch `.adt` mtimes. Bump each ADT that has lights so watchers refresh.
+  void bump_adt_write_times_for_point_lights(std::string const& basename, World* world)
+  {
+    BlizzardArchive::ClientData* const client_data = Noggit::Application::NoggitApplication::instance()->clientData();
+    if (!client_data)
+      return;
+
+    std::set<std::pair<std::uint16_t, std::uint16_t>> adt_tiles;
+    for (auto const& light : world->pointLights())
+      adt_tiles.emplace(light.tile_x, light.tile_y);
+
+    namespace fs = std::filesystem;
+
+    for (auto const& tz : adt_tiles)
+    {
+      std::ostringstream adt_rel;
+      adt_rel << "World\\Maps\\" << basename << "\\" << basename << "_"
+              << static_cast<int>(tz.first) << "_" << static_cast<int>(tz.second) << ".adt";
+      BlizzardArchive::Listfile::FileKey const key(
+        adt_rel.str(),
+        const_cast<BlizzardArchive::Listfile::Listfile*>(client_data->listfile()));
+      std::string const disk = client_data->getDiskPath(key);
+      if (disk.empty())
+        continue;
+
+      std::error_code ec;
+      fs::path const p(disk);
+      if (!fs::exists(p) || !fs::is_regular_file(p, ec) || ec)
+        continue;
+
+      fs::last_write_time(p, std::chrono::file_clock::now(), ec);
+    }
+  }
+
+  void loadPointLightsFromLgtWdt(std::string const& basename, World* world)
+  {
+    std::stringstream filename;
+    filename << "World\\Maps\\" << basename << "\\" << basename << "_lgt.wdt";
+    std::string const rel_win = filename.str();
+    std::string const rel_disk = BlizzardArchive::ClientData::normalizeFilenameInternal (rel_win);
+
+    BlizzardArchive::ClientData* const cd = Noggit::Application::NoggitApplication::instance()->clientData();
+    if (!cd)
+      return;
+
+    std::string open_key = rel_disk;
+    if (!cd->exists (open_key) && cd->exists (rel_win))
+      open_key = rel_win;
+    else if (!cd->exists (open_key))
+      return;
+
+    BlizzardArchive::ClientFile file(open_key, cd);
+    if (file.isEof())
+      return;
+
+    uint32_t fourcc = 0;
+    uint32_t size = 0;
+
+    std::vector<MPL2Record> mpl2_recs;
+    std::vector<MPL3Record> mpl3_recs;
+    std::vector<MSLTRecord> mslt_recs;
+    std::vector<MltaRow> mlta_rows;
+    std::vector<std::uint32_t> mtex_ids;
+
+    while (!file.isEof())
+    {
+      if (file.read(&fourcc, 4) != 4)
+        break;
+      if (file.read(&size, 4) != 4)
+        break;
+
+      if (fourcc == 'MVER')
+      {
+        file.seekRelative(size);
+        continue;
+      }
+
+      if (fourcc == 'MLTA')
+      {
+        std::size_t const n = size / (sizeof (float) * 2 + sizeof (int));
+        for (std::size_t i = 0; i < n; ++i)
+        {
+          MltaRow row{};
+          file.read (&row.amplitude, sizeof (float));
+          file.read (&row.frequency, sizeof (float));
+          file.read (&row.function, sizeof (int));
+          mlta_rows.push_back (row);
+        }
+        std::size_t const rem = size % (sizeof (float) * 2 + sizeof (int));
+        if (rem)
+          file.seekRelative (rem);
+        continue;
+      }
+
+      if (fourcc == 'MTEX')
+      {
+        std::size_t const count = size / sizeof (std::uint32_t);
+        mtex_ids.resize (count);
+        if (count)
+          file.read (mtex_ids.data(), static_cast<int>(size));
+        else
+        {}
+        continue;
+      }
+
+      if (fourcc == 'MPL2')
+      {
+        std::size_t const count = size / sizeof (MPL2Record);
+        mpl2_recs.resize (count);
+        if (count)
+          file.read (mpl2_recs.data(), static_cast<int>(count * sizeof (MPL2Record)));
+        std::size_t const remainder = size % sizeof (MPL2Record);
+        if (remainder)
+          file.seekRelative (remainder);
+        continue;
+      }
+
+      if (fourcc == 'MPL3')
+      {
+        std::size_t const count = size / sizeof (MPL3Record);
+        mpl3_recs.resize (count);
+        if (count)
+          file.read (mpl3_recs.data(), static_cast<int>(count * sizeof (MPL3Record)));
+        std::size_t const remainder = size % sizeof (MPL3Record);
+        if (remainder)
+          file.seekRelative (remainder);
+        continue;
+      }
+
+      if (fourcc == 'MSLT')
+      {
+        std::size_t const count = size / sizeof (MSLTRecord);
+        mslt_recs.resize (count);
+        if (count)
+          file.read (mslt_recs.data(), static_cast<int>(count * sizeof (MSLTRecord)));
+        std::size_t const remainder = size % sizeof (MSLTRecord);
+        if (remainder)
+          file.seekRelative (remainder);
+        continue;
+      }
+
+      file.seekRelative(size);
+    }
+
+    file.close();
+
+    world->pointLights().clear();
+
+    auto const mpl2_to_light = [&] (MPL2Record const& rec) {
+      World::PointLight light{};
+      light.light_type = World::MapLightType::Point;
+      light.id = rec.id;
+      light.position = { rec.position[0], rec.position[1], rec.position[2] };
+      light.color = { float(rec.color_bgra[2]) / 255.f
+                    , float(rec.color_bgra[1]) / 255.f
+                    , float(rec.color_bgra[0]) / 255.f };
+      light.attenuation_start = rec.attenuation_start;
+      light.attenuation_end = rec.attenuation_end;
+      light.intensity = rec.intensity;
+      light.tile_x = rec.tile_x;
+      light.tile_y = rec.tile_y;
+      light.rotation_radians = { rec.rotation[0], rec.rotation[1], rec.rotation[2] };
+      light.mlta_index = rec.mlta_index;
+      light.texture_index = rec.texture_index;
+
+      light.flicker_mode = rec.color_bgra[3];
+      if (light.flicker_mode > 3)
+        light.flicker_mode = 0;
+
+      bool const mlta_ok = rec.mlta_index >= 0
+        && static_cast<std::size_t>(rec.mlta_index) < mlta_rows.size()
+        && mlta_rows[static_cast<std::size_t>(rec.mlta_index)].function > 0;
+
+      if (mlta_ok)
+      {
+        apply_mlta_to_light (light, rec.mlta_index, mlta_rows);
+      }
+      else if (light.flicker_mode != 0)
+      {
+        light.mlta_active = false;
+        light.flicker_speed = rec.rotation[0];
+        light.flicker_intensity = rec.rotation[1];
+        auto const lo = static_cast<std::uint32_t>(static_cast<std::uint16_t>(rec.mlta_index));
+        auto const hi = static_cast<std::uint32_t>(static_cast<std::uint16_t>(rec.texture_index));
+        light.flicker_seed = (hi << 16) | lo;
+        if (light.flicker_seed == 0)
+          light.flicker_seed = rec.id * 2654435761u + 1u;
+      }
+
+      bool const legacy_packed = !mlta_ok && light.flicker_mode != 0;
+      if (!legacy_packed && rec.texture_index >= 0
+          && static_cast<std::size_t>(rec.texture_index) < mtex_ids.size())
+        light.cookie_file_data_id = mtex_ids[static_cast<std::size_t>(rec.texture_index)];
+      light.texture_index = -1;
+      return light;
+    };
+
+    if (!mpl3_recs.empty())
+    {
+      for (auto const& rec : mpl3_recs)
+      {
+        World::PointLight light{};
+        light.light_type = World::MapLightType::Point;
+        light.id = rec.light_index;
+        light.position = { rec.position[0], rec.position[1], rec.position[2] };
+        light.color = { float(rec.color_bgra[2]) / 255.f
+                      , float(rec.color_bgra[1]) / 255.f
+                      , float(rec.color_bgra[0]) / 255.f };
+        light.attenuation_start = rec.attenuation_start;
+        light.attenuation_end = rec.attenuation_end;
+        light.intensity = rec.intensity;
+        light.tile_x = rec.tile_x;
+        light.tile_y = rec.tile_y;
+        light.rotation_radians = { rec.rotation[0], rec.rotation[1], rec.rotation[2] };
+        light.mlta_index = rec.mlta_index;
+        light.texture_index = rec.texture_index;
+        light.mpl3_flags = rec.flags;
+        light.mpl3_scale = half_bits_to_float (rec.scale_half);
+
+        light.flicker_mode = rec.color_bgra[3];
+        if (light.flicker_mode > 3)
+          light.flicker_mode = 0;
+
+        bool const mlta_ok = rec.mlta_index >= 0
+          && static_cast<std::size_t>(rec.mlta_index) < mlta_rows.size()
+          && mlta_rows[static_cast<std::size_t>(rec.mlta_index)].function > 0;
+
+        if (mlta_ok)
+          apply_mlta_to_light (light, rec.mlta_index, mlta_rows);
+        else if (light.flicker_mode != 0)
+        {
+          light.mlta_active = false;
+          light.flicker_speed = rec.rotation[0];
+          light.flicker_intensity = rec.rotation[1];
+          auto const lo = static_cast<std::uint32_t>(static_cast<std::uint16_t>(rec.mlta_index));
+          auto const hi = static_cast<std::uint32_t>(static_cast<std::uint16_t>(rec.texture_index));
+          light.flicker_seed = (hi << 16) | lo;
+          if (light.flicker_seed == 0)
+            light.flicker_seed = rec.light_index * 2654435761u + 1u;
+        }
+
+        bool const legacy_packed = !mlta_ok && light.flicker_mode != 0;
+        if (!legacy_packed && rec.texture_index >= 0
+            && static_cast<std::size_t>(rec.texture_index) < mtex_ids.size())
+          light.cookie_file_data_id = mtex_ids[static_cast<std::size_t>(rec.texture_index)];
+        light.texture_index = -1;
+
+        world->pointLights().push_back (light);
+      }
+    }
+    else
+    {
+      for (auto const& rec : mpl2_recs)
+        world->pointLights().push_back (mpl2_to_light (rec));
+    }
+
+    for (auto const& rec : mslt_recs)
+    {
+      World::PointLight light{};
+      light.light_type = World::MapLightType::Spot;
+      light.id = rec.id;
+      light.position = { rec.position[0], rec.position[1], rec.position[2] };
+      light.color = { float(rec.color_bgra[2]) / 255.f
+                    , float(rec.color_bgra[1]) / 255.f
+                    , float(rec.color_bgra[0]) / 255.f };
+      light.attenuation_start = rec.attenuation_start;
+      light.attenuation_end = rec.attenuation_end;
+      light.intensity = rec.intensity;
+      light.tile_x = rec.tile_x;
+      light.tile_y = rec.tile_y;
+      light.rotation_radians = { rec.rotation[0], rec.rotation[1], rec.rotation[2] };
+      light.spotlight_radius = rec.spotlight_radius;
+      light.inner_angle = rec.inner_angle;
+      light.outer_angle = rec.outer_angle;
+      light.mlta_index = rec.mlta_index;
+      light.texture_index = rec.texture_index;
+
+      light.flicker_mode = rec.color_bgra[3];
+      if (light.flicker_mode > 3)
+        light.flicker_mode = 0;
+
+      bool const mlta_ok = rec.mlta_index >= 0
+        && static_cast<std::size_t>(rec.mlta_index) < mlta_rows.size()
+        && mlta_rows[static_cast<std::size_t>(rec.mlta_index)].function > 0;
+
+      if (mlta_ok)
+        apply_mlta_to_light (light, rec.mlta_index, mlta_rows);
+      else
+      {
+        // Rotation encodes spot orientation; do not unpack legacy MPL2 flicker from it.
+        light.flicker_mode = 0;
+        light.mlta_active = false;
+      }
+
+      if (rec.texture_index >= 0
+          && static_cast<std::size_t>(rec.texture_index) < mtex_ids.size())
+        light.cookie_file_data_id = mtex_ids[static_cast<std::size_t>(rec.texture_index)];
+      light.texture_index = -1;
+
+      world->pointLights().push_back (light);
+    }
+  }
+
+  void savePointLightsToLgtWdt(std::string const& basename, World* world)
+  {
+    std::stringstream filename;
+    filename << "World\\Maps\\" << basename << "\\" << basename << "_lgt.wdt";
+    std::string const rel_win = filename.str();
+    std::string const rel_disk = BlizzardArchive::ClientData::normalizeFilenameInternal (rel_win);
+
+    auto clamp_attenuation = [] (float& a_start, float& a_end)
+    {
+      if (!std::isfinite(a_start))
+        a_start = 0.f;
+      if (!std::isfinite(a_end))
+        a_end = 0.f;
+      if (a_start < 0.f)
+        a_start = 0.f;
+      if (a_end < 0.f)
+        a_end = 0.f;
+      if (a_start > a_end)
+        std::swap(a_start, a_end);
+    };
+
+    std::vector<MltaRow> mlta_out;
+    auto alloc_mlta = [&] (World::PointLight const& light) -> std::int16_t {
+      int fn = 0;
+      float a = 0.f;
+      float f = 0.f;
+      if (light.mlta_active && light.mlta_function > 0)
+      {
+        fn = light.mlta_function;
+        a = light.mlta_amplitude;
+        f = light.mlta_frequency;
+      }
+      else if (light.flicker_mode != 0)
+      {
+        fn = light.flicker_mode;
+        a = light.flicker_intensity;
+        f = light.flicker_speed;
+      }
+      else
+        return static_cast<std::int16_t>(-1);
+
+      for (std::size_t j = 0; j < mlta_out.size(); ++j)
+      {
+        if (mlta_out[j].function == fn
+            && std::abs (mlta_out[j].amplitude - a) < 1e-3f
+            && std::abs (mlta_out[j].frequency - f) < 1e-3f)
+          return static_cast<std::int16_t>(j);
+      }
+      mlta_out.push_back ({ a, f, fn });
+      return static_cast<std::int16_t>(mlta_out.size() - 1);
+    };
+
+    std::vector<MPL3Record> mpl3_records;
+    std::vector<MSLTRecord> mslt_records;
+    std::vector<bool> mpl3_legacy_texture_fields;
+    std::vector<std::uint32_t> mpl3_cookie_fdid;
+    std::vector<std::uint32_t> mslt_cookie_fdid;
+    mpl3_records.reserve (world->pointLights().size());
+    mslt_records.reserve (world->pointLights().size());
+    mpl3_legacy_texture_fields.reserve (world->pointLights().size());
+    mpl3_cookie_fdid.reserve (world->pointLights().size());
+    mslt_cookie_fdid.reserve (world->pointLights().size());
+
+    for (auto const& light : world->pointLights())
+    {
+      if (light.light_type == World::MapLightType::Spot)
+      {
+        MSLTRecord rec{};
+        rec.id = light.id;
+        rec.color_bgra[0] = static_cast<std::uint8_t>(std::clamp(light.color.b, 0.f, 1.f) * 255.f);
+        rec.color_bgra[1] = static_cast<std::uint8_t>(std::clamp(light.color.g, 0.f, 1.f) * 255.f);
+        rec.color_bgra[2] = static_cast<std::uint8_t>(std::clamp(light.color.r, 0.f, 1.f) * 255.f);
+        rec.color_bgra[3] = 0;
+
+        std::int16_t const mi = alloc_mlta (light);
+
+        rec.position[0] = light.position.x;
+        rec.position[1] = light.position.y;
+        rec.position[2] = light.position.z;
+        rec.attenuation_start = light.attenuation_start;
+        rec.attenuation_end = light.attenuation_end;
+        clamp_attenuation(rec.attenuation_start, rec.attenuation_end);
+        rec.intensity = light.intensity;
+        rec.rotation[0] = light.rotation_radians.x;
+        rec.rotation[1] = light.rotation_radians.y;
+        rec.rotation[2] = light.rotation_radians.z;
+        {
+          float const mx = std::max ({ light.spot_gizmo_scale.x, light.spot_gizmo_scale.y, light.spot_gizmo_scale.z });
+          rec.spotlight_radius = std::max(0.f, light.spotlight_radius * mx);
+        }
+        rec.inner_angle = light.inner_angle;
+        rec.outer_angle = light.outer_angle;
+        if (rec.inner_angle > rec.outer_angle)
+          std::swap(rec.inner_angle, rec.outer_angle);
+        rec.tile_x = light.tile_x;
+        rec.tile_y = light.tile_y;
+        rec.mlta_index = mi;
+        rec.texture_index = -1;
+        mslt_records.push_back (rec);
+        mslt_cookie_fdid.push_back (light.cookie_file_data_id);
+      }
+      else
+      {
+        MPL3Record rec{};
+        rec.light_index = light.id;
+        rec.color_bgra[0] = static_cast<std::uint8_t>(std::clamp(light.color.b, 0.f, 1.f) * 255.f);
+        rec.color_bgra[1] = static_cast<std::uint8_t>(std::clamp(light.color.g, 0.f, 1.f) * 255.f);
+        rec.color_bgra[2] = static_cast<std::uint8_t>(std::clamp(light.color.r, 0.f, 1.f) * 255.f);
+
+        std::int16_t const mi = alloc_mlta (light);
+        bool legacy_seed_flicker = false;
+        if (mi >= 0)
+        {
+          rec.color_bgra[3] = 0;
+          rec.rotation[0] = light.rotation_radians.x;
+          rec.rotation[1] = light.rotation_radians.y;
+          rec.rotation[2] = light.rotation_radians.z;
+          rec.mlta_index = mi;
+          rec.texture_index = -1;
+        }
+        else if (light.flicker_mode != 0)
+        {
+          legacy_seed_flicker = true;
+          rec.color_bgra[3] = light.flicker_mode;
+          rec.rotation[0] = light.flicker_speed;
+          rec.rotation[1] = light.flicker_intensity;
+          rec.rotation[2] = 0.f;
+          rec.mlta_index = static_cast<std::int16_t>(light.flicker_seed & 0xFFFFu);
+          rec.texture_index = static_cast<std::int16_t>((light.flicker_seed >> 16) & 0xFFFFu);
+        }
+        else
+        {
+          rec.color_bgra[3] = 0;
+          rec.rotation[0] = light.rotation_radians.x;
+          rec.rotation[1] = light.rotation_radians.y;
+          rec.rotation[2] = light.rotation_radians.z;
+          rec.mlta_index = -1;
+          rec.texture_index = -1;
+        }
+
+        rec.position[0] = light.position.x;
+        rec.position[1] = light.position.y;
+        rec.position[2] = light.position.z;
+        rec.attenuation_start = light.attenuation_start;
+        rec.attenuation_end = light.attenuation_end;
+        clamp_attenuation(rec.attenuation_start, rec.attenuation_end);
+        rec.intensity = light.intensity;
+        rec.tile_x = light.tile_x;
+        rec.tile_y = light.tile_y;
+        rec.flags = light.mpl3_flags;
+        rec.scale_half = float_to_half_bits (light.mpl3_scale);
+
+        mpl3_legacy_texture_fields.push_back (legacy_seed_flicker);
+        mpl3_cookie_fdid.push_back (legacy_seed_flicker ? 0u : light.cookie_file_data_id);
+        mpl3_records.push_back (rec);
+      }
+    }
+
+    std::set<std::uint32_t> mtex_unique;
+    for (std::uint32_t const fd : mpl3_cookie_fdid)
+    {
+      if (fd)
+        mtex_unique.insert (fd);
+    }
+    for (std::uint32_t const fd : mslt_cookie_fdid)
+    {
+      if (fd)
+        mtex_unique.insert (fd);
+    }
+    std::vector<std::uint32_t> mtex_sorted (mtex_unique.begin(), mtex_unique.end());
+
+    auto const remap_cookie = [&] (std::uint32_t fd) -> std::int16_t {
+      if (!fd)
+        return static_cast<std::int16_t>(-1);
+      auto const it = std::lower_bound (mtex_sorted.begin(), mtex_sorted.end(), fd);
+      if (it == mtex_sorted.end() || *it != fd)
+        return static_cast<std::int16_t>(-1);
+      return static_cast<std::int16_t>(it - mtex_sorted.begin());
+    };
+
+    for (std::size_t i = 0; i < mpl3_records.size(); ++i)
+    {
+      if (mpl3_legacy_texture_fields[i])
+        continue;
+      mpl3_records[i].texture_index = remap_cookie (mpl3_cookie_fdid[i]);
+    }
+    for (std::size_t i = 0; i < mslt_records.size(); ++i)
+      mslt_records[i].texture_index = remap_cookie (mslt_cookie_fdid[i]);
+
+    util::sExtendableArray lgtFile;
+    int curPos = 0;
+
+    lgtFile.Extend(8 + 0x4);
+    SetChunkHeader(lgtFile, curPos, 'MVER', 4);
+    *(lgtFile.GetPointer<int>(8)) = Noggit::MapLightTarget::_lgt_wdt_mver;
+    curPos += 8 + 0x4;
+
+    // Chunk order: MVER, then MPL3, MSLT, MTEX, MLTA as in retail (omit chunks with no body — see
+    // e.g. rymoore_lgt.wdt: MVER+MPL3+MLTA only when there are no spots or MTEX cookies).
+
+    if (!mpl3_records.empty())
+    {
+      lgtFile.Extend(8);
+      SetChunkHeader(lgtFile, curPos, 'MPL3', static_cast<int>(mpl3_records.size() * sizeof (MPL3Record)));
+      curPos += 8;
+      lgtFile.Insert (curPos
+                     , static_cast<unsigned long>(mpl3_records.size() * sizeof (MPL3Record))
+                     , reinterpret_cast<char*>(mpl3_records.data()));
+      curPos += static_cast<int>(mpl3_records.size() * sizeof (MPL3Record));
+    }
+
+    if (!mslt_records.empty())
+    {
+      lgtFile.Extend(8);
+      SetChunkHeader(lgtFile, curPos, 'MSLT', static_cast<int>(mslt_records.size() * sizeof (MSLTRecord)));
+      curPos += 8;
+      lgtFile.Insert (curPos
+                     , static_cast<unsigned long>(mslt_records.size() * sizeof (MSLTRecord))
+                     , reinterpret_cast<char*>(mslt_records.data()));
+      curPos += static_cast<int>(mslt_records.size() * sizeof (MSLTRecord));
+    }
+
+    if (!mtex_sorted.empty())
+    {
+      int const mtex_bytes = static_cast<int>(mtex_sorted.size() * sizeof (std::uint32_t));
+      lgtFile.Extend (8 + mtex_bytes);
+      SetChunkHeader (lgtFile, curPos, 'MTEX', mtex_bytes);
+      curPos += 8;
+      for (std::uint32_t const id : mtex_sorted)
+      {
+        *lgtFile.GetPointer<std::uint32_t>(curPos) = id;
+        curPos += static_cast<int>(sizeof (std::uint32_t));
+      }
+    }
+
+    if (!mlta_out.empty())
+    {
+      int const bytes = static_cast<int>(mlta_out.size() * (sizeof (float) * 2 + sizeof (int)));
+      lgtFile.Extend(8 + bytes);
+      SetChunkHeader(lgtFile, curPos, 'MLTA', bytes);
+      curPos += 8;
+      for (auto const& row : mlta_out)
+      {
+        *lgtFile.GetPointer<float>(curPos) = row.amplitude;
+        curPos += sizeof (float);
+        *lgtFile.GetPointer<float>(curPos) = row.frequency;
+        curPos += sizeof (float);
+        *lgtFile.GetPointer<int>(curPos) = row.function;
+        curPos += sizeof (int);
+      }
+    }
+
+    BlizzardArchive::ClientData* const cd = Noggit::Application::NoggitApplication::instance()->clientData();
+    if (!cd)
+      return;
+
+    namespace fs = std::filesystem;
+    fs::path const out_path = fs::path (cd->projectPath()) / rel_disk;
+    std::error_code ec;
+    fs::create_directories (out_path.parent_path(), ec);
+    std::ofstream out (out_path.string(), std::ios::binary | std::ios::trunc);
+    if (!out)
+    {
+      LogError << "savePointLightsToLgtWdt: failed to open " << out_path.string() << std::endl;
+      return;
+    }
+    std::vector<char> const& bytes = lgtFile.all_data();
+    out.write (bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (!out)
+      LogError << "savePointLightsToLgtWdt: short write " << out_path.string() << std::endl;
+
+    bump_adt_write_times_for_point_lights(basename, world);
+
+    if (!suppress_point_light_mpl2_overflow_dialog)
+    {
+      if (std::string const report = world->pointLightMpl2SaveOverflowReport(); !report.empty())
+      {
+        QMessageBox box(QMessageBox::Warning,
+                        QStringLiteral("Point lights"),
+                        QString::fromStdString(report),
+                        QMessageBox::Ok,
+                        nullptr);
+        QCheckBox dont_show(QStringLiteral("Don't show this warning again this session"));
+        box.setCheckBox(&dont_show);
+        box.exec();
+        if (dont_show.isChecked())
+          suppress_point_light_mpl2_overflow_dialog = true;
+      }
+    }
+  }
+}
 
 MapIndex::TileRange<false> MapIndex::loaded_tiles()
 {
@@ -83,6 +820,7 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
 
   if (create_empty)
   {
+    mphd = {};
 
     mHasAGlobalWMO = false;
     mBigAlpha = true;
@@ -128,7 +866,31 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
 
   assert(fourcc == 'MPHD');
 
-  theFile.read(&mphd, sizeof(MPHD));
+  // Retail ≥8.1: MPHD is flags, lgtFileDataID, occ, … (wowdev WDT). WotLK: flags, something, …
+  if (client_uses_modern_wdt_mphd() && size >= 32)
+  {
+    std::uint32_t w[8];
+    theFile.read (w, sizeof (w));
+    mphd.flags = w[0];
+    mphd.something = 0;
+    mphd.lgtFileDataID = w[1];
+    mphd.occFileDataID = w[2];
+    mphd.fogsFileDataID = w[3];
+    mphd.mpvFileDataID = w[4];
+    mphd.texFileDataID = w[5];
+    mphd.wdlFileDataID = w[6];
+    if (size > sizeof (w))
+      theFile.seekRelative (size - sizeof (w));
+  }
+  else
+  {
+    std::memset (&mphd, 0, sizeof (mphd));
+    std::uint32_t const to_read = std::min (size, static_cast<std::uint32_t>(sizeof (MPHD)));
+    if (to_read)
+      theFile.read (reinterpret_cast<char*>(&mphd), to_read);
+    if (size > to_read)
+      theFile.seekRelative (size - to_read);
+  }
 
   mHasAGlobalWMO = mphd.flags & FLAG_GLOBAL_OBJECT;
   mBigAlpha = mphd.flags & FLAG_BIG_ALPHA;
@@ -210,6 +972,8 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
   theFile.close();
 
   loadMinimapMD5translate();
+
+  loadPointLightsFromLgtWdt(basename, _world);
 }
 
 void MapIndex::saveall (World* world)
@@ -224,6 +988,8 @@ void MapIndex::saveall (World* world)
     tile->saveTile(world);
     tile->changed = false;
   }
+
+  savePointLightsToLgtWdt(basename, _world);
 }
 
 void MapIndex::save()
@@ -264,8 +1030,51 @@ void MapIndex::save()
 
   mphd.flags |= FLAG_SHADING;
 
-  wdtFile.Insert(curPos, sizeof(MPHD), (char*)&mphd);
-  curPos += sizeof(MPHD);
+  // Retail resolves `_lgt.wdt` only via MPHD.lgtFileDataID. Custom maps often had this at 0 because it was never
+  // filled from listfile; the client then skips _lgt entirely (no point/spot lights in-game).
+  if (client_uses_modern_wdt_mphd())
+  {
+    std::string const lgt_lookup = BlizzardArchive::ClientData::normalizeFilenameInternal (
+      std::string ("World\\Maps\\") + basename + "\\" + basename + "_lgt.wdt");
+    if (BlizzardArchive::ClientData* const cd = Noggit::Application::NoggitApplication::instance()->clientData())
+    {
+      if (BlizzardArchive::Listfile::Listfile const* const lf = cd->listfile())
+      {
+        std::uint32_t const lf_lgt = lf->getFileDataID (lgt_lookup);
+        if (lf_lgt != 0u)
+          mphd.lgtFileDataID = lf_lgt;
+        else if (mphd.lgtFileDataID == 0u && _world && !_world->pointLights().empty())
+        {
+          LogError << "MPHD.lgtFileDataID is 0 but this map has point/spot lights. Add a listfile.csv line for "
+                   << lgt_lookup
+                   << " with the same FileDataID your patch/client uses for that file (e.g. Epsilon patch.json id), "
+                      "then save the WDT again."
+                   << std::endl;
+        }
+      }
+    }
+  }
+
+  if (client_uses_modern_wdt_mphd())
+  {
+    std::uint32_t const pack[8] = {
+      mphd.flags,
+      mphd.lgtFileDataID,
+      mphd.occFileDataID,
+      mphd.fogsFileDataID,
+      mphd.mpvFileDataID,
+      mphd.texFileDataID,
+      mphd.wdlFileDataID,
+      0u, // pd4FileDataID
+    };
+    wdtFile.Insert (curPos, sizeof (pack), reinterpret_cast<char const*>(pack));
+    curPos += sizeof (pack);
+  }
+  else
+  {
+    wdtFile.Insert (curPos, sizeof (MPHD), reinterpret_cast<char*>(&mphd));
+    curPos += sizeof (MPHD);
+  }
 
   // MAIN
   //  {
@@ -319,6 +1128,8 @@ void MapIndex::save()
   f.setBuffer(wdtFile.all_data());
   f.save();
   f.close();
+
+  savePointLightsToLgtWdt(basename, _world);
 
   changed = false;
 }
@@ -435,6 +1246,13 @@ MapTile* MapIndex::loadTile(const TileIndex& tile, bool reloading, bool load_mod
   MapTile* adt = mTiles[tile.z][tile.x].tile.get();
 
   AsyncLoader::instance->queue_for_load(adt);
+
+  if (LoadTraceEnabled())
+  {
+    LogDebug << "Queuing ADT tile " << tile.x << ", " << tile.z << " (\"" << filename.str() << "\")"
+             << std::endl;
+  }
+
   _n_loaded_tiles++;
 
   return adt;
@@ -522,6 +1340,7 @@ void MapIndex::saveTile(const TileIndex& tile, World* world, bool save_unloaded)
 
     mTiles[tile.z][tile.x].tile->initEmptyChunks();
     mTiles[tile.z][tile.x].tile->saveTile(world);
+    savePointLightsToLgtWdt(basename, _world);
     return;
   }
 
@@ -531,6 +1350,8 @@ void MapIndex::saveTile(const TileIndex& tile, World* world, bool save_unloaded)
     world->horizon.update_horizon_tile(mTiles[tile.z][tile.x].tile.get());
 		mTiles[tile.z][tile.x].tile->saveTile(world);
 	}
+
+  savePointLightsToLgtWdt(basename, _world);
 }
 
 void MapIndex::saveChanged (World* world, bool save_unloaded)
@@ -576,6 +1397,7 @@ void MapIndex::saveChanged (World* world, bool save_unloaded)
         }
       }
     }
+    savePointLightsToLgtWdt(basename, _world);
     return;
   }
 
@@ -588,6 +1410,8 @@ void MapIndex::saveChanged (World* world, bool save_unloaded)
       tile->changed = false;
     }
   }
+
+  savePointLightsToLgtWdt(basename, _world);
 }
 
 bool MapIndex::hasAGlobalWMO() const

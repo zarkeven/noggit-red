@@ -5,6 +5,8 @@
 #include <noggit/tool_enums.hpp>
 #include <noggit/ui/FontNoggit.hpp>
 
+#include <QtGui/QIcon>
+
 #include <QtWidgets/QActionGroup>
 #include <QtWidgets/QToolBar>
 
@@ -31,6 +33,7 @@ namespace Noggit
       std::unordered_map<editing_mode, QAction*> _tool_actions;
 
       void add_tool_icon(editing_mode mode, const QString& name, const FontNoggit::Icons& icon);
+      void add_tool_icon_raster(editing_mode mode, const QString& name, QIcon const& icon);
     };
   }
 }

@@ -78,6 +78,7 @@ namespace Noggit
       QSpinBox* _spin_value;
 
       QCheckBox* _use_image_colors;
+      QCheckBox* _instant_replace_cb = nullptr;
 
       color_widgets::ColorSelector* color_picker;
       color_widgets::ColorWheel* color_wheel;

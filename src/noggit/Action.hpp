@@ -6,6 +6,7 @@
 #include <vector>
 #include <array>
 #include <string>
+#include <noggit/World.h>
 #include <external/tsl/robin_map.h>
 #include <noggit/area_trigger.hpp>
 #include <noggit/texture_set.hpp>
@@ -40,6 +41,7 @@ namespace Noggit
         eCHUNK_DOODADS_EXCLUSION  = 0x2000, // ground effects exclusion mapping
         eCHUNKS_LAYERINFO         = 0x4000, // ground effect id and texture flags
         eAREA_TRIGGER_TRANSFORMED = 0x8000,
+        ePOINT_LIGHTS_CHANGED     = 0x10000,
     };
 
     enum ActionModalityControllers
@@ -139,6 +141,7 @@ namespace Noggit
         void registerChunkDetailDoodadExclusionChange(MapChunk* chunk);
         void registerAllChunkChanges(MapChunk* chunk);
         void registerAreaTriggerTransformed(area_trigger* trigger);
+        void registerPointLightsChange();
 
 
     private:
@@ -174,6 +177,9 @@ namespace Noggit
         std::vector<std::pair<MapChunk*, std::vector<liquid_layer>>> _chunk_liquid_post;
         std::vector<std::pair<uint32_t, area_trigger>> _transformed_area_trigger_pre;
         std::vector<std::pair<uint32_t, area_trigger>> _transformed_area_trigger_post;
+
+        std::vector<World::PointLight> _point_lights_pre;
+        std::vector<World::PointLight> _point_lights_post;
 
         VertexSelectionCache _vertex_selection_pre;
         VertexSelectionCache _vertex_selection_post;

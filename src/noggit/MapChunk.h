@@ -71,6 +71,7 @@ private:
 
   void update_intersect_points();
 
+  bool smooth_inner_vertices(glm::vec3 const& pos, float remain, float radius);
 
 public:
   MapChunk(MapTile* mt, BlizzardArchive::ClientFile* f, bool bigAlpha, tile_mode mode, Noggit::NoggitRenderContext context
@@ -140,6 +141,7 @@ public:
   bool intersect (math::ray const&, selection_result*, bool first_result = false);
   bool ChangeMCCV(glm::vec3 const& pos, glm::vec4 const& color, float change, float radius, bool editMode);
   bool stampMCCV(glm::vec3 const& pos, glm::vec4 const& color, float change, float radius, bool editMode, QImage* img, bool paint, bool use_image_colors);
+  bool replaceMCCV(glm::vec3 const& pos, glm::vec4 const& color, float radius, QImage* img, bool use_image_mask, bool use_image_colors);
   glm::vec3 pickMCCV(glm::vec3 const& pos);
 
   ChunkWater const* liquid_chunk() const;
@@ -158,9 +160,14 @@ public:
   //! \todo implement Action stack for these
   bool changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius);
   bool flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
+  //! Stronger per-tick blend and cheaper distance tests; pairs with UI "fast flatten / blur".
+  bool flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
+  //! Linear ramp between \a A and \a B in XZ; half-width \a radius; end caps \a cap_len; \a blend_strength 0..1 preserves more terrain when higher.
+  bool applyTerrainRamp(glm::vec3 const& A, glm::vec3 const& B, float radius, float cap_len, float blend_strength);
   bool blurTerrain ( glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode
                    /*, std::function<std::optional<float>(float, float)> height*/
                    );
+  bool blurTerrainFast (glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode);
 
   bool changeTerrainProcessVertex(glm::vec3 const& pos, glm::vec3 const& vertex, float& dt, float radiusOuter, float radiusInner, int brushType);
   auto stamp(glm::vec3 const& pos, float dt, QImage const* img, float radiusOuter

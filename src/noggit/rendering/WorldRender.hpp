@@ -15,6 +15,8 @@
 
 #include <noggit/rendering/Primitives.hpp>
 
+#include <QOpenGLFramebufferObject>
+
 #include <memory>
 
 namespace OpenGL
@@ -36,6 +38,9 @@ struct WorldRenderParams
   bool draw_only_inside_light_sphere;
   bool draw_wireframe_light_sphere;
   float alpha_light_sphere;
+  bool draw_point_lights;
+  bool draw_point_light_spheres;
+  float point_light_sphere_opacity;
   float inner_radius_ratio;
   float angle;
   float orientation;
@@ -67,6 +72,23 @@ struct WorldRenderParams
   bool render_select_m2_collission_bbox;
   bool render_select_wmo_aabb;
   bool render_select_wmo_groups_bounds;
+
+  /// Vertex-paint (MCCV) preview: hold Alt in mccv mode. Uses brush radius / cursor color from tool.
+  bool draw_mccv_vertex_alt_viz = false;
+  glm::vec3 mccv_viz_hub{};
+  float mccv_viz_radius = 0.f;
+  bool mccv_viz_hub_valid = false;
+  glm::vec2 mccv_viz_hub_ndc{};
+
+  /// Ramp creation tool preview (Editor menu)
+  bool draw_ramp_preview = false;
+  glm::vec3 ramp_preview_a{};
+  glm::vec3 ramp_preview_b{};
+  float ramp_preview_radius = 0.f;
+  float ramp_preview_cap_len = 0.f;
+
+  /// Highlight quick-selected ADT chunks (Chunk Manipulator tool).
+  bool draw_chunk_manipulator_selection = false;
 };
 
 namespace Noggit::Rendering
@@ -110,7 +132,6 @@ namespace Noggit::Rendering
     bool local_lightning;
 
   private:
-
     void drawMinimap ( MapTile *tile
         , glm::mat4x4 const& model_view
         , glm::mat4x4 const& projection
@@ -157,7 +178,7 @@ namespace Noggit::Rendering
     Noggit::Rendering::Primitives::WireBox _wirebox_render;
 
     // buffers
-    OpenGL::Scoped::deferred_upload_buffers<8> _buffers;
+    OpenGL::Scoped::deferred_upload_buffers<12> _buffers;
     GLuint const& _mvp_ubo = _buffers[0];
     GLuint const& _lighting_ubo = _buffers[1];
     GLuint const& _terrain_params_ubo = _buffers[2];
@@ -166,21 +187,59 @@ namespace Noggit::Rendering
     GLuint const& _mapchunk_texcoord = _buffers[5];
     GLuint const& _liquid_chunk_vertex = _buffers[6];
     GLuint const& _occluder_index = _buffers[7];
+    GLuint const& _point_lights_ubo = _buffers[8];
+    GLuint const& _mccv_viz_instance_vbo = _buffers[9];
+    GLuint const& _mccv_viz_quad_vbo = _buffers[10];
+    GLuint const& _mccv_viz_crosshair_vbo = _buffers[11];
 
     // uniform blocks
     OpenGL::MVPUniformBlock _mvp_ubo_data;
     OpenGL::LightingUniformBlock _lighting_ubo_data;
     OpenGL::TerrainParamsUniformBlock _terrain_params_ubo_data;
+    OpenGL::PointLightsUniformBlock _point_lights_ubo_data;
 
     // VAOs
-    OpenGL::Scoped::deferred_upload_vertex_arrays<3> _vertex_arrays;
+    OpenGL::Scoped::deferred_upload_vertex_arrays<5> _vertex_arrays;
     GLuint const& _mapchunk_vao = _vertex_arrays[0];
     GLuint const& _liquid_chunk_vao = _vertex_arrays[1];
     GLuint const& _occluder_vao = _vertex_arrays[2];
+    GLuint const& _mccv_viz_vao = _vertex_arrays[3];
+    GLuint const& _mccv_crosshair_vao = _vertex_arrays[4];
 
     LiquidTextureManager _liquid_texture_manager;
 
     bool _need_terrain_params_ubo_update = false;
+
+    void updatePointLightsUniformBlock(bool enabled, glm::vec3 const& camera_pos);
+
+    void setupMccvVizBuffers();
+    void drawMccvVertexAltViz ( glm::mat4x4 const& model_view
+                              , glm::mat4x4 const& projection
+                              , glm::mat4x4 const& mvp
+                              , glm::vec3 const& camera_pos
+                              , glm::vec4 const& cursor_color
+                              , WorldRenderParams const& render_settings
+                              );
+
+    void drawRampPreview(glm::mat4x4 const& mvp, WorldRenderParams const& render_settings);
+
+    void drawChunkManipulatorSelection ( glm::mat4x4 const& model_view
+                                       , glm::mat4x4 const& projection
+                                       , WorldRenderParams const& render_settings
+                                       );
+
+    // Terrain→WMO seam blending: terrain base-color lookup (rendered top-down).
+    std::unique_ptr<QOpenGLFramebufferObject> _terrain_blend_fbo;
+    GLuint _terrain_blend_color_tex = 0;
+    glm::vec2 _terrain_blend_origin_xz{};
+    float _terrain_blend_inv_size = 0.f;
+    float _terrain_blend_world_size = 533.33333f * 2.f; // 2 tiles around camera
+    int _terrain_blend_tex_size = 1024;
+    glm::vec2 _terrain_blend_last_center_xz{};
+
+    std::unique_ptr<OpenGL::program> _mccv_viz_program;
+    std::unique_ptr<OpenGL::program> _mccv_crosshair_ndc_program;
+    bool _mccv_viz_buffers_ready = false;
   };
 }
 

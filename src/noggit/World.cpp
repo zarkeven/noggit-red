@@ -22,6 +22,7 @@
 #include <noggit/WMOInstance.h> // WMOInstance
 #include <noggit/World.h>
 #include <noggit/World.inl>
+#include <noggit/ui/tools/ChunkManipulator/ChunkClipboard.hpp>
 
 #include <math/bounding_box.hpp>
 
@@ -37,6 +38,9 @@
 #include <QSettings>
 
 #include <glm/gtx/quaternion.hpp>
+#include <glm/gtx/euler_angles.hpp>
+
+#include <cmath>
 
 #include <algorithm>
 #include <array>
@@ -125,7 +129,11 @@ World::World(const std::string& name, int map_id, Noggit::NoggitRenderContext co
 {
   LogDebug << "Loading world \"" << name << "\"." << std::endl;
   _loaded_tiles_buffer[0] = std::make_pair<std::pair<int, int>, MapTile*>(std::make_pair(0, 0), nullptr);
+
+  _chunk_clipboard = std::make_unique<Noggit::Ui::Tools::ChunkManipulator::ChunkClipboard>(this);
 }
+
+World::~World() = default;
 
 void World::LoadSavedSelectionGroups()
 {
@@ -1070,6 +1078,75 @@ void World::rotate_selected_models(math::degrees rx, math::degrees ry, math::deg
   update_selected_model_groups();
 }
 
+namespace
+{
+  glm::quat scene_dir_to_quat(glm::vec3 const& dir)
+  {
+    return glm::quat_cast(glm::eulerAngleYZX(
+      glm::radians(dir.y - 90.f),
+      glm::radians(-dir.x),
+      glm::radians(dir.z)));
+  }
+
+  void scene_dir_from_quat(glm::quat const& q, glm::vec3& dir_out)
+  {
+    glm::mat4 const M = glm::mat4_cast(glm::normalize(q));
+    float y_rad, z_rad, x_rad;
+    glm::extractEulerAngleYZX(M, y_rad, z_rad, x_rad);
+    dir_out.y = glm::degrees(y_rad) + 90.f;
+    dir_out.x = -glm::degrees(z_rad);
+    dir_out.z = glm::degrees(x_rad);
+  }
+}
+
+void World::rotate_selected_models_view_screen(glm::vec3 view_right, float yaw, float pitch, bool use_pivot)
+{
+  ZoneScoped;
+  if (!_selected_model_count)
+    return;
+
+  if (glm::dot(view_right, view_right) < 1e-10f)
+    return;
+
+  view_right = glm::normalize(view_right);
+  glm::vec3 const world_up(0.f, 1.f, 0.f);
+
+  glm::quat const dq = glm::normalize(
+    glm::angleAxis(glm::radians(-pitch), view_right)
+    * glm::angleAxis(glm::radians(yaw), world_up));
+
+  bool const has_multi_select = has_multiple_model_selected();
+
+  for (auto& entry : _current_selection)
+  {
+    if (entry.index() == eEntry_MapChunk)
+      continue;
+
+    updateTilesEntry(entry, model_update::remove);
+
+    auto& obj = std::get<selected_object_type>(entry);
+    NOGGIT_CUR_ACTION->registerObjectTransformed(obj);
+
+    if (use_pivot && has_multi_select)
+    {
+      glm::vec3& pos = obj->pos;
+      glm::vec3 diff_pos = pos - _multi_select_pivot.value();
+      glm::vec3 const rot_diff = glm::mat3_cast(dq) * diff_pos;
+      pos += rot_diff - diff_pos;
+    }
+
+    glm::quat const q_old = scene_dir_to_quat(obj->dir);
+    glm::quat const q_new = glm::normalize(dq * q_old);
+    scene_dir_from_quat(q_new, obj->dir);
+    obj->normalizeDirection();
+
+    obj->recalcExtents();
+    updateTilesEntry(entry, model_update::add);
+  }
+
+  update_selected_model_groups();
+}
+
 void World::set_selected_models_rotation(math::degrees rx, math::degrees ry, math::degrees rz)
 {
   ZoneScoped;
@@ -1116,7 +1193,10 @@ MapChunk* World::getChunkAt(glm::vec3 const& pos)
   MapTile* tile(mapIndex.getTile(pos));
   if (tile && tile->finishedLoading())
   {
-    return tile->getChunk((pos.x - tile->xbase) / CHUNKSIZE, (pos.z - tile->zbase) / CHUNKSIZE);
+    // Float edge at ADT/MCNK boundaries can yield 16 or negative before unsigned wrap; clamp so terrain bind / hits stay valid.
+    int const cx = std::clamp(static_cast<int>(std::floor((pos.x - tile->xbase) / CHUNKSIZE)), 0, 15);
+    int const cz = std::clamp(static_cast<int>(std::floor((pos.z - tile->zbase) / CHUNKSIZE)), 0, 15);
+    return tile->getChunk(static_cast<unsigned int>(cx), static_cast<unsigned int>(cz));
   }
   return nullptr;
 }
@@ -1380,6 +1460,19 @@ void World::stampShader(glm::vec3 const& pos, glm::vec4 const& color, float chan
     );
 }
 
+void World::replaceShader(glm::vec3 const& pos, glm::vec4 const& color, float radius, QImage* img, bool use_image_mask, bool use_image_colors)
+{
+  ZoneScoped;
+  for_all_chunks_in_rect
+    ( pos, radius
+    , [&] (MapChunk* chunk)
+      {
+        NOGGIT_CUR_ACTION->registerChunkVertexColorChange(chunk);
+        return chunk->replaceMCCV(pos, color, radius, img, use_image_mask, use_image_colors);
+      }
+    );
+}
+
 glm::vec3 World::pickShaderColor(glm::vec3 const& pos)
 {
   ZoneScoped;
@@ -1636,6 +1729,52 @@ void World::flattenTerrain(glm::vec3 const& pos, float remain, float radius, int
     );
 }
 
+void World::flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation)
+{
+  ZoneScoped;
+  for_all_chunks_in_range
+    ( pos, radius
+    , [&] (MapChunk* chunk)
+      {
+        NOGGIT_CUR_ACTION->registerChunkTerrainChange(chunk);
+        return chunk->flattenTerrainFast(pos, remain, radius, BrushType, mode, origin, angle, orientation);
+      }
+    , [this] (MapChunk* chunk)
+      {
+        recalc_norms (chunk);
+      }
+    );
+}
+
+void World::applyTerrainRamp(glm::vec3 const& A, glm::vec3 const& B, float radius, float cap_len, float blend_strength)
+{
+  ZoneScoped;
+
+  glm::vec2 const ab(B.x - A.x, B.z - A.z);
+  float const Lxz = glm::length(ab);
+  if (Lxz < 1e-3f || radius <= 0.f)
+  {
+    return;
+  }
+
+  float const cap = std::max(0.f, cap_len);
+  glm::vec3 const mid = (A + B) * 0.5f;
+  float const range = Lxz * 0.5f + radius + cap + 48.f;
+
+  for_all_chunks_in_range
+    ( mid, range
+    , [&] (MapChunk* chunk)
+      {
+        NOGGIT_CUR_ACTION->registerChunkTerrainChange(chunk);
+        return chunk->applyTerrainRamp(A, B, radius, cap, blend_strength);
+      }
+    , [this] (MapChunk* chunk)
+      {
+        recalc_norms(chunk);
+      }
+    );
+}
+
 std::vector<std::pair<SceneObject*, float>> World::getObjectsGroundDistance(glm::vec3 const& pos, float radius, bool iter_wmos_, bool iter_m2s)
 {
     std::vector<std::pair<SceneObject*, float>> objects_ground_distance;
@@ -1677,6 +1816,23 @@ void World::blurTerrain(glm::vec3 const& pos, float remain, float radius, int Br
                                       return res ? std::optional<float>(vec.y) : std::nullopt;
                                     }*/
                                   );
+      }
+    , [this] (MapChunk* chunk)
+      {
+        recalc_norms (chunk);
+      }
+    );
+}
+
+void World::blurTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode)
+{
+  ZoneScoped;
+  for_all_chunks_in_range
+    ( pos, radius
+    , [&] (MapChunk* chunk)
+      {
+        NOGGIT_CUR_ACTION->registerChunkTerrainChange(chunk);
+        return chunk->blurTerrainFast (pos, remain, radius, BrushType, mode);
       }
     , [this] (MapChunk* chunk)
       {

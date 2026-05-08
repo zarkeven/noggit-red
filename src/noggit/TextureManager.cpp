@@ -5,10 +5,19 @@
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 #include <ClientFile.hpp>
 
+#include <QtGui/QImage>
 #include <QtGui/QOffscreenSurface>
 #include <QtGui/QOpenGLFramebufferObjectFormat>
+#include <QtGui/QOpenGLContext>
+#include <QtGui/QOpenGLFunctions>
+
+#include <QtCore/QCoreApplication>
+#include <QtCore/QMetaObject>
+#include <QtCore/QThread>
 
 #include <algorithm>
+#include <exception>
+#include <mutex>
 #include <glm/vec2.hpp>
 
 decltype (TextureManager::_) TextureManager::_;
@@ -487,6 +496,7 @@ void blp_texture::finishLoading()
 
   std::string spec_filename = "", height_filename = "";
   bool has_specular = false, has_height = false;
+  bool use_specular_file = false;
 
   if (_file_key.filepath().starts_with("tileset/") )
   {
@@ -495,9 +505,12 @@ void blp_texture::finishLoading()
     spec_filename = _file_key.filepath().substr(0, _file_key.filepath().find_last_of(".")) + "_s.blp";
     has_specular = Noggit::Application::NoggitApplication::instance()->clientData()->exists(spec_filename);
 
-    if (has_specular)
+    // Open the *_s.blp only for live terrain rendering. Thumbnails / asset UI request the
+    // diffuse path and should decode that file, not the specular map.
+    if (has_specular && _context == Noggit::NoggitRenderContext::MAP_VIEW)
     {
       _is_specular = true;
+      use_specular_file = true;
     }
 
     bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
@@ -516,8 +529,11 @@ void blp_texture::finishLoading()
     }
   }
 
+  std::string const open_path =
+      exists ? (use_specular_file ? spec_filename : _file_key.filepath()) : "textures/shanecube.blp";
+
   BlizzardArchive::ClientFile f(
-      exists ? (has_specular ? spec_filename : _file_key.filepath()) : "textures/shanecube.blp"
+      open_path
       , Noggit::Application::NoggitApplication::instance()->clientData());
   if (f.isEof())
   {
@@ -571,85 +587,362 @@ void blp_texture::finishLoading()
   _state_changed.notify_all();
 }
 
+namespace
+{
+  constexpr int kGL_COMPRESSED_RGB_S3TC_DXT1_EXT = 0x83F0;
+  constexpr int kGL_COMPRESSED_RGBA_S3TC_DXT1_EXT = 0x83F1;
+  constexpr int kGL_COMPRESSED_RGBA_S3TC_DXT3_EXT = 0x83F2;
+  constexpr int kGL_COMPRESSED_RGBA_S3TC_DXT5_EXT = 0x83F3;
+  constexpr unsigned kGL_OUT_OF_MEMORY = 0x0505;
+
+  void rgb565_to_rgb8 (uint16_t c, uint8_t out[3])
+  {
+    unsigned const r = (c >> 11) & 31u;
+    unsigned const g = (c >> 5) & 63u;
+    unsigned const b = c & 31u;
+    out[0] = static_cast<uint8_t>((r << 3) | (r >> 2));
+    out[1] = static_cast<uint8_t>((g << 2) | (g >> 4));
+    out[2] = static_cast<uint8_t>((b << 3) | (b >> 2));
+  }
+
+  void decode_bc1_color_block (uint8_t const* s, uint32_t out_rgba[16])
+  {
+    uint16_t const c0 = static_cast<uint16_t>(s[0] | (s[1] << 8));
+    uint16_t const c1 = static_cast<uint16_t>(s[2] | (s[3] << 8));
+    uint32_t const bits = static_cast<uint32_t>(s[4] | (s[5] << 8) | (s[6] << 16) | (s[7] << 24));
+    uint8_t rgb0[3]{}, rgb1[3]{};
+    rgb565_to_rgb8 (c0, rgb0);
+    rgb565_to_rgb8 (c1, rgb1);
+    auto pack = [] (uint8_t r, uint8_t g, uint8_t b, uint8_t a) -> uint32_t
+    {
+      return static_cast<uint32_t>(r) | (static_cast<uint32_t>(g) << 8)
+          | (static_cast<uint32_t>(b) << 16) | (static_cast<uint32_t>(a) << 24);
+    };
+    uint32_t col[4]{};
+    col[0] = pack (rgb0[0], rgb0[1], rgb0[2], 255);
+    col[1] = pack (rgb1[0], rgb1[1], rgb1[2], 255);
+    if (c0 > c1)
+    {
+      col[2] = pack (static_cast<uint8_t>((2 * rgb0[0] + rgb1[0]) / 3),
+                     static_cast<uint8_t>((2 * rgb0[1] + rgb1[1]) / 3),
+                     static_cast<uint8_t>((2 * rgb0[2] + rgb1[2]) / 3), 255);
+      col[3] = pack (static_cast<uint8_t>((rgb0[0] + 2 * rgb1[0]) / 3),
+                     static_cast<uint8_t>((rgb0[1] + 2 * rgb1[1]) / 3),
+                     static_cast<uint8_t>((rgb0[2] + 2 * rgb1[2]) / 3), 255);
+    }
+    else
+    {
+      col[2] = pack (static_cast<uint8_t>((rgb0[0] + rgb1[0]) / 2),
+                     static_cast<uint8_t>((rgb0[1] + rgb1[1]) / 2),
+                     static_cast<uint8_t>((rgb0[2] + rgb1[2]) / 2), 255);
+      col[3] = pack (0, 0, 0, 0);
+    }
+    for (int i = 0; i < 16; ++i)
+    {
+      unsigned const idx = (bits >> (2 * i)) & 3u;
+      out_rgba[i] = col[idx];
+    }
+  }
+
+  uint8_t decode_bc3_alpha_value (unsigned idx, uint8_t a0, uint8_t a1)
+  {
+    if (a0 > a1)
+    {
+      if (idx == 0)
+      {
+        return a0;
+      }
+      if (idx == 1)
+      {
+        return a1;
+      }
+      static int const w0[6]{6, 5, 4, 3, 2, 1};
+      static int const w1[6]{1, 2, 3, 4, 5, 6};
+      unsigned const j = idx - 2;
+      return static_cast<uint8_t>((w0[j] * a0 + w1[j] * a1) / 7);
+    }
+    if (idx == 0)
+    {
+      return a0;
+    }
+    if (idx == 1)
+    {
+      return a1;
+    }
+    if (idx < 6)
+    {
+      static int const w0[4]{4, 3, 2, 1};
+      static int const w1[4]{1, 2, 3, 4};
+      unsigned const j = idx - 2;
+      return static_cast<uint8_t>((w0[j] * a0 + w1[j] * a1) / 5);
+    }
+    if (idx == 6)
+    {
+      return 0;
+    }
+    return 255;
+  }
+
+  void decode_bc3_block (uint8_t const* s, uint32_t out_rgba[16])
+  {
+    uint8_t const a0 = s[0];
+    uint8_t const a1 = s[1];
+    uint64_t a_bits = s[2];
+    a_bits |= static_cast<uint64_t>(s[3]) << 8;
+    a_bits |= static_cast<uint64_t>(s[4]) << 16;
+    a_bits |= static_cast<uint64_t>(s[5]) << 24;
+    a_bits |= static_cast<uint64_t>(s[6]) << 32;
+    a_bits |= static_cast<uint64_t>(s[7]) << 40;
+    uint32_t rgb[16]{};
+    decode_bc1_color_block (s + 8, rgb);
+    for (int i = 0; i < 16; ++i)
+    {
+      unsigned const idx_a = static_cast<unsigned>((a_bits >> (3 * i)) & 7u);
+      uint8_t const A = decode_bc3_alpha_value (idx_a, a0, a1);
+      uint32_t const c = rgb[i];
+      uint8_t const r = static_cast<uint8_t>(c & 0xFFu);
+      uint8_t const g = static_cast<uint8_t>((c >> 8) & 0xFFu);
+      uint8_t const b = static_cast<uint8_t>((c >> 16) & 0xFFu);
+      out_rgba[i] = static_cast<uint32_t>(r) | (static_cast<uint32_t>(g) << 8)
+          | (static_cast<uint32_t>(b) << 16) | (static_cast<uint32_t>(A) << 24);
+    }
+  }
+
+  void decode_bc2_block (uint8_t const* s, uint32_t out_rgba[16])
+  {
+    uint32_t rgb[16]{};
+    decode_bc1_color_block (s + 8, rgb);
+    for (int i = 0; i < 16; ++i)
+    {
+      unsigned const n = static_cast<unsigned>((s[i / 2] >> ((i % 2) * 4)) & 0xFu);
+      uint8_t const A = static_cast<uint8_t>(n * 17u);
+      uint32_t const c = rgb[i];
+      uint8_t const r = static_cast<uint8_t>(c & 0xFFu);
+      uint8_t const g = static_cast<uint8_t>((c >> 8) & 0xFFu);
+      uint8_t const b = static_cast<uint8_t>((c >> 16) & 0xFFu);
+      out_rgba[i] = static_cast<uint32_t>(r) | (static_cast<uint32_t>(g) << 8)
+          | (static_cast<uint32_t>(b) << 16) | (static_cast<uint32_t>(A) << 24);
+    }
+  }
+
+  bool decompress_s3tc ( int format
+                       , uint8_t const* data
+                       , std::size_t data_size
+                       , int width
+                       , int height
+                       , std::vector<uint8_t>& rgba
+                       )
+  {
+    if (width <= 0 || height <= 0)
+    {
+      return false;
+    }
+    int const bx = (width + 3) / 4;
+    int const by = (height + 3) / 4;
+    std::size_t const bsize
+        = (format == kGL_COMPRESSED_RGB_S3TC_DXT1_EXT || format == kGL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8u : 16u;
+    std::size_t const need = static_cast<std::size_t>(bx * by) * bsize;
+    if (data_size < need)
+    {
+      return false;
+    }
+
+    rgba.assign (static_cast<std::size_t>(width * height * 4), 0);
+    for (int byi = 0; byi < by; ++byi)
+    {
+      for (int bxi = 0; bxi < bx; ++bxi)
+      {
+        std::size_t const block_idx = static_cast<std::size_t>(byi * bx + bxi);
+        uint8_t const* block = data + block_idx * bsize;
+        uint32_t pix[16]{};
+        if (format == kGL_COMPRESSED_RGB_S3TC_DXT1_EXT || format == kGL_COMPRESSED_RGBA_S3TC_DXT1_EXT)
+        {
+          decode_bc1_color_block (block, pix);
+        }
+        else if (format == kGL_COMPRESSED_RGBA_S3TC_DXT3_EXT)
+        {
+          decode_bc2_block (block, pix);
+        }
+        else if (format == kGL_COMPRESSED_RGBA_S3TC_DXT5_EXT)
+        {
+          decode_bc3_block (block, pix);
+        }
+        else
+        {
+          return false;
+        }
+
+        for (int py = 0; py < 4; ++py)
+        {
+          for (int px = 0; px < 4; ++px)
+          {
+            int const x = bxi * 4 + px;
+            int const y = byi * 4 + py;
+            if (x >= width || y >= height)
+            {
+              continue;
+            }
+            uint32_t const p = pix[py * 4 + px];
+            uint8_t* d = &rgba[static_cast<std::size_t>(y * width + x) * 4u];
+            d[0] = static_cast<uint8_t>(p & 0xFFu);
+            d[1] = static_cast<uint8_t>((p >> 8) & 0xFFu);
+            d[2] = static_cast<uint8_t>((p >> 16) & 0xFFu);
+            d[3] = static_cast<uint8_t>((p >> 24) & 0xFFu);
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  QImage blpr_blp_texture_to_qimage (blp_texture& tex)
+  {
+    tex.finishLoading();
+    if (!tex.compression_format())
+    {
+      auto const dit = tex.data().find (0);
+      if (dit == tex.data().end())
+      {
+        return {};
+      }
+      std::vector<uint32_t> const& mip0 = dit->second;
+      if (mip0.size() < static_cast<std::size_t>(tex.width() * tex.height()))
+      {
+        return {};
+      }
+      QImage img ( reinterpret_cast<uchar const*>(mip0.data())
+                 , tex.width()
+                 , tex.height()
+                 , tex.width() * 4
+                 , QImage::Format_RGBA8888);
+      return img.copy();
+    }
+
+    int const fmt = static_cast<int>(*tex.compression_format());
+    auto const cit = tex.compressed_data().find (0);
+    if (cit == tex.compressed_data().end())
+    {
+      return {};
+    }
+    std::vector<uint8_t> const& comp0 = cit->second;
+    std::vector<uint8_t> rgba;
+    if (!decompress_s3tc (fmt, comp0.data(), comp0.size(), tex.width(), tex.height(), rgba))
+    {
+      return {};
+    }
+    QImage img ( rgba.data()
+               , tex.width()
+               , tex.height()
+               , tex.width() * 4
+               , QImage::Format_RGBA8888);
+    return img.copy();
+  }
+}
+
 namespace Noggit
 {
     BLPRenderer& BLPRenderer::getInstance()
     {
-        static BLPRenderer  instance;
+        // Single instance: all OpenGL for this helper runs on the Qt GUI thread (see render_blp_to_pixmap).
+        static BLPRenderer instance;
         return instance;
     }
+
+    QPixmap BLPRenderer::blp_to_pixmap_cpu ( std::string const& blp_filename, int width, int height)
+    {
+      blp_texture tex (blp_filename, Noggit::NoggitRenderContext::BLP_RENDERER);
+      QImage im = blpr_blp_texture_to_qimage (tex);
+      if (im.isNull())
+      {
+        throw std::runtime_error ("CPU BLP decode failed: " + blp_filename);
+      }
+      int const tw = width;
+      int const th = height;
+      if (tw > 0 && th > 0 && (tw != im.width() || th != im.height()))
+      {
+        im = im.scaled (tw, th, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+      }
+      return QPixmap::fromImage (std::move (im));
+    }
+
+    QPixmap* BLPRenderer::render_blp_to_pixmap_impl ( std::string const& blp_filename
+                                                    , int width
+                                                    , int height
+                                                    )
+  {
+    std::tuple<std::string, int, int> const curEntry{blp_filename, width, height};
+    auto it{_cache.find(curEntry)};
+
+    if (it != _cache.end())
+    {
+      return &it->second;
+    }
+
+    // CPU-only icon path (no OpenGL). This avoids driver crashes during map load
+    // while keeping thumbnails visually consistent.
+    _cpu_fallback = true;
+    QPixmap pm = blp_to_pixmap_cpu (blp_filename, width, height);
+    return &(_cache[curEntry] = std::move (pm));
+  }
 
     QPixmap* BLPRenderer::render_blp_to_pixmap ( std::string const& blp_filename
                                                , int width
                                                , int height
                                                )
   {
-    if (!_uploaded)
-    [[unlikely]]
+    QCoreApplication* const app = QCoreApplication::instance();
+    if (app && QThread::currentThread() != app->thread())
     {
-      upload();
+      struct Dispatch
+      {
+        BLPRenderer* self = nullptr;
+        std::string path;
+        int w = 0;
+        int h = 0;
+        QPixmap* out = nullptr;
+        std::exception_ptr err{};
+      } d{this, blp_filename, width, height};
+
+      QMetaObject::invokeMethod(
+          app,
+          [&d]()
+          {
+            try
+            {
+              d.out = d.self->render_blp_to_pixmap_impl(d.path, d.w, d.h);
+            }
+            catch (...)
+            {
+              d.err = std::current_exception();
+            }
+          },
+          Qt::BlockingQueuedConnection);
+
+      if (d.err)
+      {
+        std::rethrow_exception(d.err);
+      }
+      return d.out;
     }
 
-    std::tuple<std::string, int, int> const curEntry{blp_filename, width, height};
-    auto it{_cache.find(curEntry)};
-
-    if(it != _cache.end())
-      return &it->second;
-
-    OpenGL::context::save_current_context const context_save (::gl);
-
-    _context->makeCurrent(_surface.get());
-
-    OpenGL::context::scoped_setter const context_set (::gl, _context.get());
-
-    gl.activeTexture(GL_TEXTURE0);
-    blp_texture texture(blp_filename, Noggit::NoggitRenderContext::BLP_RENDERER);
-    texture.finishLoading();
-    texture.upload();
-
-    width = width == -1 ? texture.width() : width;
-    height = height == -1 ? texture.height() : height;
-
-    float h = static_cast<float>(height);
-    float w = static_cast<float>(width);
-
-    QOpenGLFramebufferObject pixel_buffer(width, height, *_fmt.get());
-    pixel_buffer.bind();
-
-    gl.viewport(0, 0, w, h);
-    gl.clearColor(.0f, .0f, .0f, 1.f);
-    gl.clear(GL_COLOR_BUFFER_BIT);
-    
-    OpenGL::Scoped::use_program shader (*_program.get());
-
-    shader.uniform("tex", 0);
-    shader.uniform("width", w);
-    shader.uniform("height", h);
-
-    gl.bindTexture(GL_TEXTURE_2D_ARRAY, texture.texture_array());
-    shader.uniform("tex_index", texture.array_index());
-
-    OpenGL::Scoped::vao_binder const _ (_vao[0]);
-    
-    OpenGL::Scoped::buffer_binder<GL_ELEMENT_ARRAY_BUFFER> indices_binder(_buffers[0]);
-
-    gl.drawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
-
-    QPixmap result{};
-    result = std::move(QPixmap::fromImage(pixel_buffer.toImage()));
-    pixel_buffer.release();
-
-    if (result.isNull())
-    {
-      throw std::runtime_error
-        ("failed rendering " + blp_filename + " to pixmap");
-    }
-
-    return &(_cache[curEntry] = std::move(result));
+    return render_blp_to_pixmap_impl(blp_filename, width, height);
   }
 
-  void BLPRenderer::upload()
+  bool BLPRenderer::upload_gl()
   {
+    static std::once_flag blpr_module_built_log;
+    std::call_once(
+        blpr_module_built_log,
+        []
+        {
+          LogDebug << "BLPRenderer (TextureManager.cpp) built " << __DATE__ << " " << __TIME__ << std::endl;
+        });
+
+    if (_uploaded)
+    {
+      return true;
+    }
+
     _cache = {};
 
     OpenGL::context::save_current_context const context_save (::gl);
@@ -658,13 +951,43 @@ namespace Noggit
     _fmt = std::make_unique<QOpenGLFramebufferObjectFormat>();
     _surface = std::make_unique<QOffscreenSurface>();
 
-    _context->create();
+    // Standalone context (no share group): sharing with the map QOpenGLWidget context has
+    // triggered bogus GL_OUT_OF_MEMORY on tiny uploads and nvoglv64 faults during FBO readback
+    // on some NVIDIA drivers when mixed with the rest of the app's GL traffic.
+    QSurfaceFormat const fmt = QSurfaceFormat::defaultFormat();
+    _context->setFormat (fmt);
+    _surface->setFormat (fmt);
 
-    _fmt->setSamples(1);
-    _fmt->setInternalTextureFormat(GL_RGBA8);
+    // QOpenGLFramebufferObject::toImage() + MSAA has been seen to crash in DrvPresentBuffers;
+    // BLP thumbnails do not need multisampling.
+    _fmt->setSamples (0);
+    _fmt->setInternalTextureFormat (GL_RGBA8);
 
     _surface->create();
-    _context->makeCurrent(_surface.get());
+    _context->create();
+    if (!_context->isValid())
+    {
+      LogError << "BLPRenderer: failed to create a valid QOpenGLContext" << std::endl;
+      unload();
+      _cpu_fallback = true;
+      return false;
+    }
+
+    if (!_context->makeCurrent (_surface.get()))
+    {
+      LogError << "BLPRenderer: makeCurrent() failed" << std::endl;
+      unload();
+      _cpu_fallback = true;
+      return false;
+    }
+
+    // QOpenGLContext function tables are per-context; initialize them explicitly.
+    _context->functions()->initializeOpenGLFunctions();
+    QOpenGLFunctions* glf = _context->functions();
+    while (glf->glGetError() != GL_NO_ERROR)
+    {
+    }
+    glf->glFinish();
 
     OpenGL::context::scoped_setter const context_set (::gl, _context.get());
 
@@ -698,12 +1021,33 @@ namespace Noggit
     gl.bufferData<GL_ARRAY_BUFFER,glm::vec2>(texcoords_vbo, texcoords, GL_STATIC_DRAW);
     gl.bufferData<GL_ELEMENT_ARRAY_BUFFER, std::uint16_t>(indices_vbo, indices, GL_STATIC_DRAW);
 
+    bool gl_bad = false;
+    bool oom = false;
+    GLenum e = GL_NO_ERROR;
+    while ((e = glf->glGetError()) != GL_NO_ERROR)
+    {
+      gl_bad = true;
+      if (e == static_cast<GLenum>(kGL_OUT_OF_MEMORY))
+      {
+        oom = true;
+      }
+    }
+    if (gl_bad)
+    {
+      LogError << "BLPRenderer: OpenGL error during icon geometry upload"
+               << (oom ? " (including GL_OUT_OF_MEMORY)" : "") << ", using CPU BLP decode fallback" << std::endl;
+      unload();
+      _cpu_fallback = true;
+      return false;
+    }
 
-    _program.reset(new OpenGL::program
-                       (
-                           {
-                               {
-                                   GL_VERTEX_SHADER, R"code(
+    try
+    {
+      _program.reset (new OpenGL::program
+                         (
+                             {
+                                 {
+                                     GL_VERTEX_SHADER, R"code(
                                   #version 330 core
 
                                   in vec4 position;
@@ -719,9 +1063,9 @@ namespace Noggit
                                     gl_Position = vec4(position.x * width / 2, position.y * height / 2, position.z, 1.0);
                                   }
                                   )code"
-                               },
-                               {
-                                   GL_FRAGMENT_SHADER, R"code(
+                                 },
+                                 {
+                                     GL_FRAGMENT_SHADER, R"code(
                                   #version 330 core
 
                                   uniform sampler2DArray tex;
@@ -736,9 +1080,17 @@ namespace Noggit
                                     out_color = vec4(texture(tex, vec3(f_tex_coord/2.f + vec2(0.5), tex_index)).rgb, 1.);
                                   }
                                   )code"
-                               }
-                           }
-                       ));
+                                 }
+                             }
+                         ));
+    }
+    catch (...)
+    {
+      LogError << "BLPRenderer: shader compile failed, using CPU BLP decode fallback" << std::endl;
+      unload();
+      _cpu_fallback = true;
+      return false;
+    }
 
     OpenGL::Scoped::use_program shader (*_program.get());
 
@@ -746,31 +1098,27 @@ namespace Noggit
 
     {
       OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> vertices_binder (vertices_vbo);
-      shader.attrib("position", 2, GL_FLOAT, GL_FALSE, 0, 0);
+      shader.attrib ("position", 2, GL_FLOAT, GL_FALSE, 0, 0);
     }
     {
       OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> texcoords_binder (texcoords_vbo);
-      shader.attrib("tex_coord", 2, GL_FLOAT, GL_FALSE, 0, 0);
+      shader.attrib ("tex_coord", 2, GL_FLOAT, GL_FALSE, 0, 0);
     }
 
     _uploaded = true;
+    return true;
   }
 
   void BLPRenderer::unload()
   {
-    OpenGL::context::save_current_context const context_save (::gl);
-    _context->makeCurrent(_surface.get());
-    OpenGL::context::scoped_setter const context_set (::gl, _context.get());
-
     _cache.clear();
-    _vao.unload();
-    _buffers.unload();
+    // Leave CPU fallback enabled; never touch OpenGL resources here.
+    _cpu_fallback = true;
+    _uploaded = false;
     _program.reset();
     _surface.reset();
     _fmt.reset();
     _context.reset();
-
-    _uploaded = false;
   }
 
 }

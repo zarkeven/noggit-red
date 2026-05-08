@@ -209,6 +209,9 @@ namespace Noggit::Ui::Windows
                            bool from_bookmark
   )
   {
+    using clock_t = std::chrono::steady_clock;
+    auto const t0 = clock_t::now();
+    LogError << "enterMapAt(): begin (creating MapView)" << std::endl;
     World* world = getWorld();
 
     if (world->mapIndex.hasAGlobalWMO())
@@ -234,7 +237,11 @@ namespace Noggit::Ui::Windows
 
 
     // _map_creation_wizard->destroyFakeWorld();
+    LogError << "enterMapAt(): new MapView()" << std::endl;
     _map_view = (new MapView(camera_yaw, camera_pitch, pos, this, _project, std::move(_map_creation_wizard->_world), uid_fix, from_bookmark));
+    LogError << "enterMapAt(): MapView constructed, wiring signals (ms="
+             << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+             << ")" << std::endl;
     connect(_map_view, &MapView::uid_fix_failed, [this]()
     { promptUidFixFailure(); });
     connect(_settings, &settings::saved, [this]()
@@ -245,9 +252,19 @@ namespace Noggit::Ui::Windows
     // addToolBar(_app_toolbar);
 
     _stack_widget->addWidget(_map_view);
+    LogError << "enterMapAt(): after addWidget (ms="
+             << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+             << ")" << std::endl;
     _stack_widget->setCurrentIndex(1);
+    LogError << "enterMapAt(): after setCurrentIndex (ms="
+             << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+             << ")" << std::endl;
 
     map_loaded = true;
+    LogDebug << "enterMapAt(): end (map_loaded=true)" << std::endl;
+    LogError << "enterMapAt(): end (map_loaded=true) (ms="
+             << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+             << ")" << std::endl;
 
   }
 

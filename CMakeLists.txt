@@ -6,7 +6,13 @@
 # ░███  ░░█████ ░░███     ███ ░░███  ░░███ ░░███  ░░███  ░███     ░███        ░███    ░███  ░███ ░   █ ░███    ███
 # █████  ░░█████ ░░░███████░   ░░█████████  ░░█████████  █████    █████       █████   █████ ██████████ ██████████
 #░░░░░    ░░░░░    ░░░░░░░      ░░░░░░░░░    ░░░░░░░░░  ░░░░░    ░░░░░       ░░░░░   ░░░░░ ░░░░░░░░░░ ░░░░░░░░░░
-CMAKE_MINIMUM_REQUIRED(VERSION 3.3)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.16)
+# CMake 4.x rejects FetchContent subprojects that still declare cmake_minimum_required(VERSION 3.1...).
+# This raises the effective policy floor for those projects (supported since CMake 3.26).
+IF(CMAKE_VERSION VERSION_GREATER_EQUAL "3.26")
+  # 3.10+ silences FastNoise2 / other deps that still declare cmake_minimum_required(VERSION 3.7) under CMake 4+.
+  SET(CMAKE_POLICY_VERSION_MINIMUM "3.10" CACHE STRING "Minimum policy version for legacy dependency CMakeLists under CMake 4+")
+ENDIF()
 CMAKE_POLICY(SET CMP0057 NEW) # "Support new IN_LIST if() operator."
 SET(CMAKE_CXX_STANDARD 20)
 SET(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +22,11 @@ INCLUDE(CheckCXXCompilerFlag)
 INCLUDE(cmake/cmake_function.cmake)
 INCLUDE(cmake/cmake_macro.cmake)
 option(FAST_BUILD_FETCHCONTENT "Skip FetchContent check when for existing source directories (WARNING: This means dependencies aren't updated)" OFF)
+# StormLib/CascLib/Lua use FetchContent_Populate via FetchContent_PopulateFast (prebuilt binaries, no CMakeLists).
+# CMP0169 NEW deprecates Populate; OLD must be in effect before the FetchContent module processes declares.
+IF(POLICY CMP0169)
+  CMAKE_POLICY(SET CMP0169 OLD)
+ENDIF()
 INCLUDE(cmake/FetchContentFast.cmake)
 INCLUDE(FetchContent)
 
@@ -56,12 +67,23 @@ add_compiler_flag_if_supported(CMAKE_CXX_FLAGS -Wno-multichar)
 add_compiler_flag_if_supported(CMAKE_CXX_FLAGS /EHa)
 #Multi core building for visual studio
 add_compiler_flag_if_supported(CMAKE_CXX_FLAGS /MP)
+# With /MP and /Zi, multiple CL.EXE processes must serialize PDB writes (otherwise C1041).
+add_compiler_flag_if_supported(CMAKE_CXX_FLAGS /FS)
 #Allow Big obj for msvc compilation
 add_compiler_flag_if_supported(CMAKE_CXX_FLAGS /bigobj)
 
 add_compiler_flag_if_supported (CMAKE_C_FLAGS -Wno-implicit-function-declaration)
 
 IF(WIN32)
+  # Always produce usable crash callstacks from Release builds.
+  # (Driver crashes often happen only with optimizations enabled.)
+  add_compile_options("$<$<CONFIG:Release>:/Zi>")
+  add_link_options("$<$<CONFIG:Release>:/DEBUG:FULL>")
+
+  # Same for RelWithDebInfo (useful when Release exe is locked).
+  add_compile_options("$<$<CONFIG:RelWithDebInfo>:/Zi>")
+  add_link_options("$<$<CONFIG:RelWithDebInfo>:/DEBUG:FULL>")
+
   OPTION(NAME_REUSE_AS_ERROR "Make name reuse warnings errors ?" OFF)
   IF(NAME_REUSE_AS_ERROR)
     # declaration of 'identifier' hides previous:
@@ -114,6 +136,17 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(FastNoise2)
 
 FIND_PACKAGE(Sol2 REQUIRED)
+
+# If Qt5 is shipped alongside the repo (common on Windows dev setups),
+# help CMake find it without requiring users to set CMAKE_PREFIX_PATH manually.
+if (WIN32)
+  set(_noggit_qt5_prefix "${CMAKE_SOURCE_DIR}/.qt5/5.15.2/msvc2019_64")
+  if (EXISTS "${_noggit_qt5_prefix}/lib/cmake/Qt5/Qt5Config.cmake")
+    # Prepend so it wins over other Qt installs.
+    list(PREPEND CMAKE_PREFIX_PATH "${_noggit_qt5_prefix}")
+  endif()
+endif()
+
 FIND_PACKAGE(Qt5 COMPONENTS Widgets OpenGLExtensions Gui Network Xml Multimedia REQUIRED)
 
 IF(USE_SQL)

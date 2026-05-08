@@ -29,11 +29,8 @@ struct LiquidChunkInstanceDataUniformBlock
   uint _pad7;
 };
 
-layout (std140) uniform matrices
-{
-  mat4 model_view;
-  mat4 projection;
-};
+uniform mat4 model_view;
+uniform mat4 projection;
 
 layout (std140) uniform liquid_layers_params
 {

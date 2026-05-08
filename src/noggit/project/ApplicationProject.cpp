@@ -1,6 +1,7 @@
 #include "ApplicationProject.h"
 #include "ApplicationProjectReader.h"
 #include "ApplicationProjectWriter.h"
+#include "WowExportListfileDownload.hpp"
 
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 #include <noggit/World.h>
@@ -14,6 +15,7 @@
 #include <blizzard-archive-library/include/ClientFile.hpp>
 
 #include <QFile>
+#include <QString>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
@@ -88,6 +90,42 @@ namespace Noggit::Project
     project->ClientDatabase = std::make_shared<BlizzardDatabaseLib::BlizzardDatabase>(dbd_file_directory, client_build);
 
     Log << "Loading Client Path : " << project->ClientPath << std::endl;
+
+    if (project->projectVersion == ProjectVersion::SL
+        && ! _configuration->ApplicationListfileWowExportUrlTemplate.empty())
+    {
+      QString const url_t = QString::fromStdString (_configuration->ApplicationListfileWowExportUrlTemplate);
+      bool const needs_build =
+        url_t.contains (QStringLiteral ("%s")) || url_t.contains (QStringLiteral ("%1"));
+
+      std::filesystem::path const listfile_csv = project_path / "listfile.csv";
+      bool const need_download =
+        _configuration->ApplicationListfileWowExportAlwaysDownload || ! std::filesystem::exists (listfile_csv);
+
+      if (need_download && (! needs_build || ! _configuration->ApplicationListfileWowExportBuild.empty()))
+      {
+        QString dl_err;
+        if (wow_export_download_listfile_csv (
+              url_t,
+              QString::fromStdString (_configuration->ApplicationListfileWowExportBuild),
+              listfile_csv,
+              &dl_err))
+        {
+          Log << "Downloaded listfile.csv (remote listfile)" << std::endl;
+        }
+        else
+        {
+          LogError << "Listfile download failed: " << dl_err.toStdString() << std::endl;
+          QMessageBox::warning (nullptr,
+                                QStringLiteral("Listfile download"),
+                                QStringLiteral("Could not download listfile.\n%1").arg (dl_err));
+        }
+      }
+      else if (need_download && needs_build)
+      {
+        Log << "Listfile download skipped: set ApplicationListfileWowExportBuild for this URL pattern." << std::endl;
+      }
+    }
 
     try
     {

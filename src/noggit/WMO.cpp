@@ -715,8 +715,6 @@ void WMOGroup::load()
   _batches.resize (size / sizeof (wmo_batch));
   f.read (_batches.data (), size);
 
-  _renderer.initRenderBatches();
-
   // - MOLR ----------------------------------------------
   if (header.flags.has_light)
   {
@@ -978,6 +976,9 @@ void WMOGroup::load()
     }
 
   }
+
+  // Build render-batch mapping/flags now that optional MOCV/MOCV2 data is loaded.
+  _renderer.initRenderBatches();
 
   //dl_light = 0;
   // "real" lighting?

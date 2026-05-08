@@ -43,6 +43,12 @@ namespace Noggit
       QVector<QWidgetAction*> _flatten_secondary_tool;
       void nextFlattenMode();
 
+      //! Flatten / blur: Raise + Lower toggles (also mirrored on the viewport overlay bar).
+      [[nodiscard]] bool flattenRaiseChecked();
+      [[nodiscard]] bool flattenLowerChecked();
+      void setFlattenRaiseChecked(bool v);
+      void setFlattenLowerChecked(bool v);
+
       QVector<QWidgetAction*> _texture_secondary_tool;
       bool showUnpaintableChunk();
 
@@ -73,6 +79,13 @@ namespace Noggit
                          Noggit::BoolToggleProperty* view_state,
                          const QString& name,
                          const Noggit::Ui::FontNoggit::Icons& icon,
+                         ViewToolbar* sec_tool_bar,
+                         QVector<QWidgetAction*> sec_action_bar = QVector<QWidgetAction*>());
+
+      void add_tool_icon(MapView* mapView,
+                         Noggit::BoolToggleProperty* view_state,
+                         const QString& name,
+                         const QIcon& icon,
                          ViewToolbar* sec_tool_bar,
                          QVector<QWidgetAction*> sec_action_bar = QVector<QWidgetAction*>());
 

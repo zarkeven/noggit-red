@@ -256,6 +256,9 @@ public:
 
   std::vector<uint16_t> _indices;
 
+  /// Filled when the first LOD skin uses the modern `SKIN` (M2SkinProfile) header; used as geoset table for render passes.
+  std::vector<ModelGeoset> _skin_profile_geosets;
+
   std::optional<FakeGeometry> _fake_geometry;
 
   uint32_t nBoundingTriangles;

@@ -249,6 +249,11 @@ void Noggit::Action::undo(bool redo)
       }
     }
   }
+  if (_flags & ActionFlags::ePOINT_LIGHTS_CHANGED && !_point_lights_pre.empty())
+  {
+    _map_view->getWorld()->pointLights() = (redo ? _point_lights_post : _point_lights_pre);
+    _map_view->invalidate();
+  }
 
 }
 
@@ -581,6 +586,10 @@ void Noggit::Action::finish()
         }
       }
     }
+  }
+  if (_flags & ActionFlags::ePOINT_LIGHTS_CHANGED && !_point_lights_pre.empty())
+  {
+    _point_lights_post = _map_view->getWorld()->pointLights();
   }
 
   if (_post)
@@ -916,6 +925,16 @@ void Noggit::Action::registerAreaTriggerTransformed(area_trigger* trigger)
   }
 
   _transformed_area_trigger_pre.emplace_back(trigger->id, *trigger);
+}
+
+void Noggit::Action::registerPointLightsChange()
+{
+  _flags |= ActionFlags::ePOINT_LIGHTS_CHANGED;
+
+  if (!_point_lights_pre.empty())
+    return;
+
+  _point_lights_pre = _map_view->getWorld()->pointLights();
 }
 
 Noggit::Action::~Action()

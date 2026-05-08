@@ -1,11 +1,8 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 #version 410 core
 
-layout (std140) uniform matrices
-{
-    mat4 model_view;
-    mat4 projection;
-};
+uniform mat4 model_view;
+uniform mat4 projection;
 
 uniform vec3 aabb[2];
 

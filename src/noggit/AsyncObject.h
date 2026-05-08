@@ -12,7 +12,7 @@
 class AsyncObject
 {
 private: 
-  bool _loading_failed = false;
+  std::atomic<bool> _loading_failed = {false};
 
 protected:
   std::atomic<bool> finished = {false};

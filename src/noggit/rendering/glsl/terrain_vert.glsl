@@ -7,11 +7,8 @@ const float CHUNKSIZE = 533.33333 / 16.0;
 in vec2 position;
 in vec2 texcoord;
 
-layout (std140) uniform matrices
-{
-  mat4 model_view;
-  mat4 projection;
-};
+uniform mat4 model_view;
+uniform mat4 projection;
 
 struct ChunkInstanceData
 {

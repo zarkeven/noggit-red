@@ -13,6 +13,8 @@
 
 #include <glm/vec3.hpp>
 
+#include <QtGui/QIcon>
+
 #include <QLineF>
 #include <QPoint>
 
@@ -134,6 +136,10 @@ namespace Noggit
         // The icon displayed in the toolbar
         [[nodiscard]]
         virtual Ui::FontNoggit::Icons icon() const = 0;
+
+        /// When non-null, the main terrain toolbar uses this raster icon instead of \ref icon().
+        [[nodiscard]]
+        virtual QIcon toolbarIconOverride() const;
 
         // UI setup code goes here
         virtual void setupUi(Ui::Tools::ToolPanel* toolPanel);

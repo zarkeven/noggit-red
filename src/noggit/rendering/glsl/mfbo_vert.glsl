@@ -3,11 +3,8 @@
 
 in vec4 position;
 
-layout (std140) uniform matrices
-{
-  mat4 model_view;
-  mat4 projection;
-};
+uniform mat4 model_view;
+uniform mat4 projection;
 
 void main()
 {

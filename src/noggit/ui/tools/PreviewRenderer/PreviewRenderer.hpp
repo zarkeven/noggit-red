@@ -7,12 +7,14 @@
 #include <noggit/ui/tools/ViewportManager/ViewportManager.hpp>
 #include <noggit/rendering/Primitives.hpp>
 #include "noggit/rendering/LiquidTextureManager.hpp"
+#include <opengl/types.hpp>
 
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObjectFormat>
 #include <QOffscreenSurface>
 #include <QPixmap>
 
+#include <optional>
 #include <vector>
 
 class ModelInstance;
@@ -88,6 +90,8 @@ class PreviewRenderer : public Noggit::Ui::Tools::ViewportManager::Viewport
 
     void updateMVPUniformBlock(const glm::mat4x4& model_view, const glm::mat4x4& projection);
 
+    void updatePointLightsUniformBlock();
+
   private:
     int _width;
     int _height;
@@ -97,18 +101,24 @@ class PreviewRenderer : public Noggit::Ui::Tools::ViewportManager::Viewport
     QOpenGLContext _offscreen_context;
     QOpenGLFramebufferObjectFormat _fmt;
     QOffscreenSurface _offscreen_surface;
+    bool _offscreen_gl_ready = false;
+    bool _offscreen_gl_failed = false;
+
+    bool ensureOffscreenGL();
 
     glm::vec3 _background_color;
     glm::vec3 _diffuse_light;
     glm::vec3 _ambient_light;
     glm::vec3 _light_dir;
 
-    OpenGL::Scoped::deferred_upload_buffers<2> _buffers;
+    OpenGL::Scoped::deferred_upload_buffers<3> _buffers;
     GLuint const& _mvp_ubo = _buffers[0];
     GLuint const& _lighting_ubo = _buffers[1];
+    GLuint const& _point_lights_ubo = _buffers[2];
 
     OpenGL::MVPUniformBlock _mvp_ubo_data;
     OpenGL::LightingUniformBlock _lighting_ubo_data;
+    OpenGL::PointLightsUniformBlock _point_lights_ubo_data;
 
     Noggit::Rendering::LiquidTextureManager _liquid_texture_manager;
 

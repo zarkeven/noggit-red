@@ -105,11 +105,13 @@ void ModelViewer::tick(float dt)
 
 void ModelViewer::setModel(std::string const& filename)
 {
-  OpenGL::context::scoped_setter const _ (::gl, context());
   makeCurrent();
+  OpenGL::context::scoped_setter const _ (::gl, context());
   PreviewRenderer::setModel(filename);
   emit model_set(filename);
   _last_selected_model = filename;
+  _needs_redraw = true;
+  update();
 }
 
 void Noggit::Ui::Tools::AssetBrowser::ModelViewer::setMoveSensitivity(float s)

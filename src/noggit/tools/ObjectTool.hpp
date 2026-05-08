@@ -86,6 +86,8 @@ namespace Noggit
         float _keyx = 0, _keyy = 0, _keyz = 0, _keyr = 0, _keys = 0;
         float _mh = 0, _mv = 0, _rh = 0, _rv = 0; // mh = left click x, rv = right click y
         bool _moveObject = false;
+        //! Ctrl+Alt+RMB: viewport-aligned free rotation (see onTick).
+        bool _rmb_free_object_rotate = false;
 
         void setupHotkeys();
         void updateRotationEditor();

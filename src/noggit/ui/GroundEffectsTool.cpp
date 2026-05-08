@@ -7,6 +7,7 @@
 #include <noggit/ui/FontAwesome.hpp>
 #include <noggit/ui/GroundEffectsTool.hpp>
 #include <noggit/ui/texturing_tool.hpp>
+#include <noggit/Log.h>
 #include <noggit/ui/tools/AssetBrowser/Ui/AssetBrowser.hpp>
 #include <noggit/ui/tools/PreviewRenderer/PreviewRenderer.hpp>
 #include <noggit/ui/tools/UiCommon/ExtendedSlider.hpp>
@@ -26,6 +27,9 @@
 #include <QtWidgets/QRadioButton>
 #include <QtWidgets/QSpinBox>
 #include <QVBoxLayout>
+#include <QTimer>
+
+#include <exception>
 
 namespace Noggit
 {
@@ -163,9 +167,28 @@ namespace Noggit
                     _object_list->iconSize().height(),
                     Noggit::NoggitRenderContext::GROUND_EFFECT_PREVIEW, this);
                 _preview_renderer->setVisible(false);
-                // Initialize renderer.
-                _preview_renderer->setModelOffscreen("world/wmo/azeroth/buildings/human_farm/farm.wmo");
-                _preview_renderer->renderToPixmap();
+                // Defer GL warmup: during MapView::createGUI the main share context / surface may not be
+                // ready yet; compiling WMO shaders here produced crashes (PreviewRenderer::upload).
+                QTimer::singleShot (0, this, [this]()
+                {
+                  if (!_preview_renderer)
+                  {
+                    return;
+                  }
+                  try
+                  {
+                    _preview_renderer->setModelOffscreen ("world/wmo/azeroth/buildings/human_farm/farm.wmo");
+                    (void)_preview_renderer->renderToPixmap();
+                  }
+                  catch (std::exception const& e)
+                  {
+                    LogError << "GroundEffectsTool: deferred preview warmup failed: " << e.what() << std::endl;
+                  }
+                  catch (...)
+                  {
+                    LogError << "GroundEffectsTool: deferred preview warmup failed (non-std exception)" << std::endl;
+                  }
+                });
 
                 // Disable this if no active doodad. 
                 // Density: 0 → 8. > 24 → 24. This value is for the amount of doodads and on higher values for coverage.

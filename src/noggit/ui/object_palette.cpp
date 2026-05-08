@@ -8,8 +8,10 @@
 #include <noggit/ui/tools/AssetBrowser/Ui/AssetBrowser.hpp>
 #include <noggit/ui/tools/PreviewRenderer/PreviewRenderer.hpp>
 #include <noggit/World.h>
+#include <noggit/Log.h>
 
 #include <QDockWidget>
+#include <QTimer>
 #include <QMimeData>
 #include <QtGui/QDrag>
 #include <QtGui/QDragEnterEvent>
@@ -21,6 +23,7 @@
 #include <QtWidgets/QListWidgetItem>
 #include <QtWidgets/QPushButton>
 
+#include <exception>
 #include <string>
 #include <unordered_set>
 
@@ -97,9 +100,30 @@ namespace Noggit
                                                                  this);
       _preview_renderer->setVisible(false);
 
-      // just to initialize context, ugly-ish
-      _preview_renderer->setModelOffscreen("world/wmo/azeroth/buildings/human_farm/farm.wmo");
-      _preview_renderer->renderToPixmap();
+      // Defer GL work: MapView::createGUI runs before GL is reliably ready. Also defer LoadSavedPalette —
+      // it calls addObjectByFilename -> renderToPixmap for each entry and would crash if run in ctor.
+      QTimer::singleShot (0, this, [this]()
+      {
+        if (!_preview_renderer)
+        {
+          return;
+        }
+        try
+        {
+          _preview_renderer->setModelOffscreen ("world/wmo/azeroth/buildings/human_farm/farm.wmo");
+          (void)_preview_renderer->renderToPixmap();
+        }
+        catch (std::exception const& e)
+        {
+          LogError << "ObjectPalette: deferred preview warmup failed: " << e.what() << std::endl;
+        }
+        catch (...)
+        {
+          LogError << "ObjectPalette: deferred preview warmup failed (non-std exception)" << std::endl;
+        }
+
+        LoadSavedPalette();
+      });
 
       QObject::connect(_object_list, &QListWidget::itemSelectionChanged, [this]()
         {
@@ -128,8 +152,6 @@ namespace Noggit
       button_layout->addStretch();
 
       layout->addLayout(button_layout, 0, 1);
-
-      LoadSavedPalette();
     }
 
 

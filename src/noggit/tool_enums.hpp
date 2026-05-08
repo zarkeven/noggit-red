@@ -40,7 +40,9 @@ enum eFlattenType
   eFlattenType_Flat,
   eFlattenType_Linear,
   eFlattenType_Smooth,
+  eFlattenType_Hill,
   eFlattenType_Origin,
+  eFlattenType_Smooth_Inner,
   eFlattenType_Count,
 };
 
@@ -77,6 +79,7 @@ enum class editing_mode
   scripting = 12,
   chunk = 13,
   area_trigger = 14,
+  point_light = 15,
 };
 
 enum water_opacity

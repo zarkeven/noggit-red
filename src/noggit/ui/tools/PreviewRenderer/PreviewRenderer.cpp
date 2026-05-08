@@ -5,6 +5,7 @@
 #include <noggit/ModelInstance.h>
 #include <noggit/rendering/Primitives.hpp>
 #include <noggit/TextureManager.h>
+#include <noggit/Log.h>
 #include <noggit/tool_enums.hpp>
 #include <noggit/WMO.h>
 #include <noggit/WMOInstance.h>
@@ -18,7 +19,9 @@
 
 #include <QColor>
 #include <QMatrix4x4>
+#include <QOpenGLContext>
 #include <QSettings>
+#include <QSurfaceFormat>
 #include <QVector3D>
 
 
@@ -36,19 +39,70 @@ PreviewRenderer::PreviewRenderer(int width, int height, Noggit::NoggitRenderCont
   _context = context;
   _cache = {};
 
-  OpenGL::context::save_current_context const context_save (::gl);
-  _offscreen_context.create();
+  _light_dir = glm::vec3(0.0f, 1.0f, 0.0f);
+}
 
-  _fmt.setSamples(1);
+bool PreviewRenderer::ensureOffscreenGL()
+{
+  if (_offscreen_gl_failed)
+  {
+    return false;
+  }
+  if (_offscreen_gl_ready)
+  {
+    return true;
+  }
+
+  OpenGL::context::save_current_context const context_save (::gl);
+
+  if (!_offscreen_context.isValid())
+  {
+    // Match the main window (4.1 core, etc.) and share resources; otherwise #version 410 shaders
+    // can fail or GL calls can hit "no context" during early widget construction (see GroundEffectsTool).
+    QSurfaceFormat const fmt = QSurfaceFormat::defaultFormat();
+    _offscreen_context.setFormat (fmt);
+    if (QOpenGLContext* const share = QOpenGLContext::globalShareContext())
+    {
+      _offscreen_context.setShareContext (share);
+    }
+
+    if (!_offscreen_context.create())
+    {
+      LogError << "PreviewRenderer: failed to create offscreen QOpenGLContext" << std::endl;
+      _offscreen_gl_failed = true;
+      return false;
+    }
+  }
+
+  if (!_offscreen_surface.isValid())
+  {
+    _offscreen_surface.setFormat (_offscreen_context.format());
+    _offscreen_surface.create();
+  }
+  if (!_offscreen_surface.isValid())
+  {
+    LogError << "PreviewRenderer: failed to create a valid QOffscreenSurface" << std::endl;
+    _offscreen_gl_failed = true;
+    return false;
+  }
+
+  if (!_offscreen_context.makeCurrent(&_offscreen_surface))
+  {
+    LogError << "PreviewRenderer: makeCurrent() failed for offscreen context" << std::endl;
+    _offscreen_gl_failed = true;
+    return false;
+  }
+
+  // Offscreen previews do not need MSAA, and MSAA+readback has been unstable on some drivers.
+  _fmt.setSamples(0);
   _fmt.setInternalTextureFormat(GL_RGBA8);
   _fmt.setAttachment(QOpenGLFramebufferObject::Depth);
 
-  _offscreen_surface.create();
-  _offscreen_context.makeCurrent(&_offscreen_surface);
-
   OpenGL::context::scoped_setter const context_set (::gl, &_offscreen_context);
+  _offscreen_context.functions()->initializeOpenGLFunctions();
 
-  _light_dir = glm::vec3(0.0f, 1.0f, 0.0f);
+  _offscreen_gl_ready = true;
+  return true;
 }
 
 Noggit::Ui::Tools::PreviewRenderer::~PreviewRenderer()
@@ -60,6 +114,11 @@ void PreviewRenderer::setModel(std::string const &filename)
   _filename = filename;
   _model_instances.clear();
   _wmo_instances.clear();
+
+  if (LoadTraceEnabled())
+  {
+    LogDebug << "Preview setModel '" << filename << "'" << std::endl;
+  }
 
   // add new model instance
   QString q_filename = QString(filename.c_str());
@@ -109,6 +168,12 @@ void PreviewRenderer::setModel(std::string const &filename)
 
 void PreviewRenderer::setModelOffscreen(std::string const& filename)
 {
+  if (!ensureOffscreenGL())
+  {
+    setModel(filename);
+    return;
+  }
+
   OpenGL::context::save_current_context const context_save (::gl);
   _offscreen_context.makeCurrent(&_offscreen_surface);
   OpenGL::context::scoped_setter const context_set (::gl, &_offscreen_context);
@@ -157,6 +222,10 @@ void PreviewRenderer::draw()
   if (_lighting_needs_update)
     updateLightingUniformBlock();
 
+  // Must match WorldRender: m2_frag / wmo_frag read point_lights; an unbound UBO leaves meta undefined
+  // and can execute billions of fragment-shader iterations (driver TDR / apparent crash).
+  updatePointLightsUniformBlock();
+
   gl.enable(GL_DEPTH_TEST);
   gl.depthFunc(GL_LEQUAL);
   gl.enable(GL_BLEND);
@@ -187,6 +256,8 @@ void PreviewRenderer::draw()
     {
       OpenGL::Scoped::use_program wmo_program{*_wmo_program.get()};
 
+      wmo_program.uniform("model_view", mv);
+      wmo_program.uniform("projection", proj);
       wmo_program.uniform("camera", glm::vec3(_camera.position.x, _camera.position.y, _camera.position.z));
 
 
@@ -233,6 +304,8 @@ void PreviewRenderer::draw()
     model_render_state.tex_arrays = { 0, 0 };
     model_render_state.tex_indices = { 0, 0 };
     model_render_state.tex_unit_lookups = { 0, 0 };
+    m2_shader.uniform("model_view", mv);
+    m2_shader.uniform("projection", proj);
     gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     gl.disable(GL_BLEND);
     gl.depthMask(GL_TRUE);
@@ -241,6 +314,7 @@ void PreviewRenderer::draw()
     m2_shader.uniform("unlit", static_cast<int>(model_render_state.unlit));
     m2_shader.uniform("tex_unit_lookup_1", 0);
     m2_shader.uniform("tex_unit_lookup_2", 0);
+    m2_shader.uniform("terrain_uv_mask", 0);
     m2_shader.uniform("pixel_shader", 0);
 
     std::vector<ModelInstance*> instance{ nullptr };
@@ -304,6 +378,9 @@ void PreviewRenderer::draw()
     if(_draw_boxes.get() && !model_boxes_to_draw.empty())
     {
       OpenGL::Scoped::use_program m2_box_shader{ *_m2_box_program.get() };
+
+      m2_box_shader.uniform("model_view", mv);
+      m2_box_shader.uniform("projection", proj);
 
       OpenGL::Scoped::bool_setter<GL_LINE_SMOOTH, GL_TRUE> const line_smooth;
       gl.hint (GL_LINE_SMOOTH_HINT, GL_NICEST);
@@ -435,6 +512,14 @@ QPixmap* PreviewRenderer::renderToPixmap()
   if(it != _cache.end())
     return &it->second;
 
+  if (!ensureOffscreenGL())
+  {
+    // Avoid crashing map-load: return a safe placeholder pixmap when offscreen GL is unavailable.
+    QPixmap fallback(_width, _height);
+    fallback.fill(QColor(127, 127, 127));
+    return &(_cache[curEntry] = std::move(fallback));
+  }
+
   OpenGL::context::save_current_context const context_save (::gl);
 
   _offscreen_context.makeCurrent(&_offscreen_surface);
@@ -545,13 +630,8 @@ void PreviewRenderer::upload()
     m2_shader.uniform("tex1", 1);
     m2_shader.uniform("tex2", 2);
 
-    m2_shader.bind_uniform_block("matrices", 0);
-    gl.bindBuffer(GL_UNIFORM_BUFFER, _mvp_ubo);
-    gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::MVPUniformBlock), NULL, GL_DYNAMIC_DRAW);
-    gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::MVP, _mvp_ubo, 0, sizeof(OpenGL::MVPUniformBlock));
-    gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
-
     m2_shader.bind_uniform_block("lighting", 1);
+    m2_shader.bind_uniform_block("point_lights", 5);
     gl.bindBuffer(GL_UNIFORM_BUFFER, _lighting_ubo);
     gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::LightingUniformBlock), NULL, GL_DYNAMIC_DRAW);
     gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::LIGHTING, _lighting_ubo, 0, sizeof(OpenGL::LightingUniformBlock));
@@ -569,8 +649,8 @@ void PreviewRenderer::upload()
 
   {
     OpenGL::Scoped::use_program m2_shader_instanced{ *_m2_instanced_program.get() };
-    m2_shader_instanced.bind_uniform_block("matrices", 0);
     m2_shader_instanced.bind_uniform_block("lighting", 1);
+    m2_shader_instanced.bind_uniform_block("point_lights", 5);
     m2_shader_instanced.uniform("bone_matrices", 0);
     m2_shader_instanced.uniform("tex1", 1);
     m2_shader_instanced.uniform("tex2", 2);
@@ -587,7 +667,6 @@ void PreviewRenderer::upload()
 
   {
     OpenGL::Scoped::use_program m2_box_shader{ *_m2_box_program.get() };
-    m2_box_shader.bind_uniform_block("matrices", 0);
   }
 
 
@@ -626,9 +705,14 @@ void PreviewRenderer::upload()
     OpenGL::Scoped::use_program wmo_program{ *_wmo_program.get() };
     wmo_program.uniform("render_batches_tex", 0);
     wmo_program.uniform("texture_samplers", samplers);
-    wmo_program.bind_uniform_block("matrices", 0);
     wmo_program.bind_uniform_block("lighting", 1);
+    wmo_program.bind_uniform_block("point_lights", 5);
   }
+
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _point_lights_ubo);
+  gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::PointLightsUniformBlock), NULL, GL_DYNAMIC_DRAW);
+  gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::POINT_LIGHTS, _point_lights_ubo, 0, sizeof(OpenGL::PointLightsUniformBlock));
+  gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
 
   // liquid
   _liquid_texture_manager.upload();
@@ -647,7 +731,6 @@ void PreviewRenderer::upload()
 
     static std::vector<int> samplers{ 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
 
-    liquid_render.bind_uniform_block("matrices", 0);
     liquid_render.bind_uniform_block("lighting", 1);
     liquid_render.bind_uniform_block("liquid_layers_params", 4);
     liquid_render.uniform("vertex_data", 0);
@@ -655,7 +738,9 @@ void PreviewRenderer::upload()
 
   }
 
-  setModel("world/wmo/azeroth/buildings/human_farm/farm.wmo");
+  // Do not call setModel() here: upload() runs on the first draw() after the
+  // asset browser (or offscreen thumbnail path) has already loaded the user's
+  // selection; a placeholder model would replace it and break previews.
 
   auto background_color = _settings->value("assetBrowser/background_color",
     QVariant::fromValue(QColor(127, 127, 127))).value<QColor>();
@@ -693,6 +778,13 @@ void PreviewRenderer::unloadOpenglData()
 {
   if (_offscreen_mode)
   {
+    if (!_offscreen_gl_ready)
+    {
+      _cache.clear();
+      _uploaded = false;
+      return;
+    }
+
     OpenGL::context::save_current_context const context_save (::gl);
     _offscreen_context.makeCurrent(&_offscreen_surface);
     OpenGL::context::scoped_setter const context_set (::gl, &_offscreen_context);
@@ -738,8 +830,12 @@ void Noggit::Ui::Tools::PreviewRenderer::updateMVPUniformBlock(const glm::mat4x4
 {
   _mvp_ubo_data.model_view = model_view;
   _mvp_ubo_data.projection = projection;
+}
 
-  gl.bindBuffer(GL_UNIFORM_BUFFER, _mvp_ubo);
-  gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::MVPUniformBlock), &_mvp_ubo_data);
+void Noggit::Ui::Tools::PreviewRenderer::updatePointLightsUniformBlock()
+{
+  _point_lights_ubo_data.meta = { 0, 0, 0, 0 };
 
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _point_lights_ubo);
+  gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::PointLightsUniformBlock), &_point_lights_ubo_data);
 }

@@ -124,9 +124,9 @@ AssetBrowserWidget::AssetBrowserWidget(MapView* map_view, QWidget *parent)
       Noggit::NoggitRenderContext::ASSET_BROWSER_PREVIEW, this);
   _preview_renderer->setVisible(false);
 
-  // just to initialize context, ugly-ish
-  _preview_renderer->setModelOffscreen("world/wmo/azeroth/buildings/human_farm/farm.wmo");
-  _preview_renderer->renderToPixmap();
+  // NOTE: Do not force an offscreen-GL preview render during MapView startup.
+  // Some drivers crash during early UBO uploads/context init; previews will be
+  // rendered lazily when actually needed (tree expand / selection).
 
   connect(ui->listfileTree->selectionModel(), &QItemSelectionModel::selectionChanged
       ,[=] (const QItemSelection& selected, const QItemSelection& deselected)
@@ -167,6 +167,11 @@ AssetBrowserWidget::AssetBrowserWidget(MapView* map_view, QWidget *parent)
   connect(ui->listfileTree, &QTreeView::expanded
       ,[this] (const QModelIndex& index)
       {
+        // During initial population we may programmatically expand nodes; don't
+        // try to render previews (which may trigger offscreen GL init) yet.
+        if (_is_initializing)
+          return;
+
         QSettings settings;
         bool render_preview = settings.value("assetBrowser/render_asset_preview").toBool();
 
@@ -199,6 +204,7 @@ AssetBrowserWidget::AssetBrowserWidget(MapView* map_view, QWidget *parent)
 
   updateModelData();
 
+  _is_initializing = false;
 
 }
 

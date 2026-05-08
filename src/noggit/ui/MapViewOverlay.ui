@@ -175,6 +175,209 @@
        <property name="spacing">
         <number>6</number>
        </property>
+       <item alignment="Qt::AlignLeft|Qt::AlignTop">
+        <widget class="QWidget" name="flattenRaiseLowerBar" native="true">
+         <property name="visible">
+          <bool>false</bool>
+         </property>
+         <property name="autoFillBackground">
+          <bool>true</bool>
+         </property>
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
+           <horstretch>0</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>30</height>
+          </size>
+         </property>
+         <property name="maximumSize">
+          <size>
+           <width>16777215</width>
+           <height>30</height>
+          </size>
+         </property>
+         <layout class="QHBoxLayout" name="horizontalLayout_flatten_rl">
+          <property name="spacing">
+           <number>0</number>
+          </property>
+          <property name="alignment">
+           <set>Qt::AlignVCenter</set>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QLabel" name="flattenBarIconLabel">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>28</width>
+              <height>28</height>
+             </size>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>28</width>
+              <height>28</height>
+             </size>
+            </property>
+            <property name="toolTip">
+             <string>Flatten | Blur</string>
+            </property>
+            <property name="text">
+             <string/>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QFrame" name="flattenBarVLine1">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>1</width>
+              <height>20</height>
+             </size>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>1</width>
+              <height>22</height>
+             </size>
+            </property>
+            <property name="frameShape">
+             <enum>QFrame::VLine</enum>
+            </property>
+            <property name="frameShadow">
+             <enum>QFrame::Plain</enum>
+            </property>
+            <property name="lineWidth">
+             <number>1</number>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="flattenRaiseToggle">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>26</height>
+             </size>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>16777215</width>
+              <height>28</height>
+             </size>
+            </property>
+            <property name="toolTip">
+             <string>Flatten: raise terrain toward the brush height</string>
+            </property>
+            <property name="text">
+             <string>Raise</string>
+            </property>
+            <property name="checked">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QFrame" name="flattenBarVLine2">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>1</width>
+              <height>20</height>
+             </size>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>1</width>
+              <height>22</height>
+             </size>
+            </property>
+            <property name="frameShape">
+             <enum>QFrame::VLine</enum>
+            </property>
+            <property name="frameShadow">
+             <enum>QFrame::Plain</enum>
+            </property>
+            <property name="lineWidth">
+             <number>1</number>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="flattenLowerToggle">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>26</height>
+             </size>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>16777215</width>
+              <height>28</height>
+             </size>
+            </property>
+            <property name="toolTip">
+             <string>Flatten: lower terrain toward the brush height</string>
+            </property>
+            <property name="text">
+             <string>Lower</string>
+            </property>
+            <property name="checked">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
        <item>
         <widget class="QWidget" name="gizmoBar" native="true">
          <layout class="QHBoxLayout" name="horizontalLayout_11">

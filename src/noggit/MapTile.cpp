@@ -24,13 +24,74 @@
 
 #include <QtCore/QSettings>
 
+#include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <string>
 #include <utility>
 #include <vector>
 
+namespace
+{
+  [[nodiscard]] std::uint32_t decode_ngpl_byte(std::uint8_t b)
+  {
+    return b == 0 ? 104u : static_cast<std::uint32_t>(b);
+  }
+
+  [[nodiscard]] std::uint8_t encode_adt_cap(std::uint32_t max_effective)
+  {
+    return max_effective == 104u ? 0 : static_cast<std::uint8_t>(std::min<std::uint32_t>(max_effective, 255u));
+  }
+
+  //! Noggit ADT extension `NGPL`: per-ADT point light cap (4-byte) or legacy per-MCNK (256-byte).
+  void loadNgplChunkFromAdt(BlizzardArchive::ClientFile& file, std::uint8_t& out_enc)
+  {
+    out_enc = 0;
+
+    std::size_t pos = 0;
+    std::size_t const file_size = file.getSize();
+    while (pos + 8 <= file_size)
+    {
+      file.seek(pos);
+      std::uint32_t fourcc = 0;
+      std::uint32_t chsize = 0;
+      if (file.read(&fourcc, 4) != 4)
+        break;
+      if (file.read(&chsize, 4) != 4)
+        break;
+
+      if (fourcc == 'NGPL')
+      {
+        std::uint32_t chunk_max = 104u;
+        if (chsize == 4)
+        {
+          std::uint32_t u = 0;
+          if (file.read(&u, 4) == 4)
+            chunk_max = (u == 0 || u == 104) ? 104u : std::min<std::uint32_t>(u, 255u);
+        }
+        else if (chsize == 256)
+        {
+          std::array<std::uint8_t, 256> cells{};
+          if (file.read(cells.data(), 256) == 256)
+          {
+            chunk_max = 104u;
+            for (std::uint8_t const b : cells)
+              chunk_max = std::max(chunk_max, decode_ngpl_byte(b));
+          }
+        }
+        else
+          file.seekRelative(static_cast<int>(chsize));
+
+        out_enc = encode_adt_cap(chunk_max);
+      }
+
+      pos += 8u + static_cast<std::size_t>(chsize);
+    }
+  }
+}
 
 MapTile::MapTile( int pX
                 , int pZ
@@ -383,6 +444,8 @@ void MapTile::finishLoading()
   mTextureFilenames.clear();
   _mtxf_entries.clear();
 
+  loadNgplChunkFromAdt(theFile, _adt_point_light_cap_enc);
+
   theFile.close();
 
   // - Really done. --------------------------------------
@@ -546,6 +609,19 @@ void MapTile::getVertexInternal(float x, float z, glm::vec3* v)
 }
 
 /// --- Only saving related below this line. --------------------------
+
+std::uint32_t MapTile::effectiveAdtPointLightCap() const
+{
+  return _adt_point_light_cap_enc == 0 ? 104u : static_cast<std::uint32_t>(_adt_point_light_cap_enc);
+}
+
+void MapTile::setAdtPointLightCap(std::uint32_t cap_wow_style)
+{
+  _adt_point_light_cap_enc = (cap_wow_style == 104u)
+                                 ? 0
+                                 : static_cast<std::uint8_t>(std::min<std::uint32_t>(cap_wow_style, 255u));
+  changed = true;
+}
 
 void MapTile::saveTile(World* world)
 {
@@ -919,6 +995,16 @@ void MapTile::save(World* world, bool save_using_mclq_liquids)
       lMFBO_Data[lID++] = (int16_t)mMinimumValues[i].y;
 
     lCurrentPosition += static_cast<int>(8 + chunkSize);
+  }
+
+  // NGPL (Noggit): per-ADT point light cap (4-byte). Omitted when using the WoW default (104).
+  if (_adt_point_light_cap_enc != 0)
+  {
+    std::uint32_t const u = static_cast<std::uint32_t>(_adt_point_light_cap_enc);
+    lADTFile.Extend(8 + 4);
+    SetChunkHeader(lADTFile, lCurrentPosition, 'NGPL', 4);
+    *lADTFile.GetPointer<std::uint32_t>(lCurrentPosition + 8) = u;
+    lCurrentPosition += 12;
   }
 
   //! \todo Do not do bullshit here in MTFX.
@@ -1964,6 +2050,21 @@ std::array<glm::vec3, 2>& MapTile::getExtents()
 std::array<glm::vec3, 2>& MapTile::getCombinedExtents()
 {
   recalcCombinedExtents(); return _combined_extents;
+}
+
+std::array<glm::vec3, 2> MapTile::getTerrainWaterCullExtents()
+{
+  recalcExtents();
+  std::array<glm::vec3, 2> ext{_extents};
+
+  if (Water.hasData())
+  {
+    auto& we = Water.getExtents();
+    ext[0].y = std::min(ext[0].y, we[0].y);
+    ext[1].y = std::max(ext[1].y, we[1].y);
+  }
+
+  return ext;
 }
 
 World* MapTile::getWorld()

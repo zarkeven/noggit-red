@@ -18,13 +18,33 @@ namespace Noggit
 
       for (auto&& tool : tools)
       {
-          add_tool_icon(tool->editingMode(), tr(tool->name()), tool->icon());
+          QIcon const raster = tool->toolbarIconOverride();
+          if (!raster.isNull())
+          {
+            add_tool_icon_raster(tool->editingMode(), tr(tool->name()), raster);
+          }
+          else
+          {
+            add_tool_icon(tool->editingMode(), tr(tool->name()), tool->icon());
+          }
       }
     }
 
     void toolbar::add_tool_icon(editing_mode mode, const QString& name, const FontNoggit::Icons& icon)
     {
       auto action = addAction(FontNoggitIcon{icon}, name);
+      connect (action, &QAction::triggered, [this, mode] () {
+        _set_editing_mode (mode);
+      });
+      action->setActionGroup(&_tool_group);
+      action->setCheckable(true);
+
+      _tool_actions[mode] = action;
+    }
+
+    void toolbar::add_tool_icon_raster(editing_mode mode, const QString& name, QIcon const& icon)
+    {
+      auto action = addAction(icon, name);
       connect (action, &QAction::triggered, [this, mode] () {
         _set_editing_mode (mode);
       });

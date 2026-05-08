@@ -1,6 +1,10 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 #version 410 core
 
+// Match MapHeaders.h / terrain_vert.glsl: ADT tile and MCNK outer size in world yards.
+const float kWoWTilesize = 533.33333;
+const float kWoWChunksize = kWoWTilesize / 16.0;
+
 in vec4 position;
 in vec3 normal;
 in vec4 vertex_color;
@@ -15,18 +19,15 @@ out vec2 f_texcoord_2;
 out vec4 f_vertex_color;
 
 flat out uint flags;
-flat out uint shader;
+flat out uint wmo_batch_shader;
 flat out uint tex_array0;
 flat out uint tex_array1;
 flat out uint tex0;
 flat out uint tex1;
 flat out uint alpha_test_mode;
 
-layout (std140) uniform matrices
-{
-  mat4 model_view;
-  mat4 projection;
-};
+uniform mat4 model_view;
+uniform mat4 projection;
 
 uniform mat4 transform;
 uniform usamplerBuffer render_batches_tex;
@@ -51,7 +52,7 @@ void main()
     f_vertex_color = vec4(0);
 
     flags = 0;
-    shader = 0;
+    wmo_batch_shader = 0;
     tex_array0 = 0;
     tex_array1 = 0;
     tex0 = 0;
@@ -71,18 +72,27 @@ void main()
     uvec4 batch_second_half = texelFetch(render_batches_tex, int((batch_mapping - 1) * 2 + 1));
 
     flags = batch_first_half.r;
-    shader = batch_first_half.g;
+    wmo_batch_shader = batch_first_half.g;
     tex_array0 = batch_first_half.b;
     tex_array1 = batch_first_half.a;
     tex0 = batch_second_half.r;
     tex1 = batch_second_half.g;
     alpha_test_mode = batch_second_half.b;
 
+    bool ground_proj = (flags & 32u) != 0u;
+
     // Env and EnvMetal
-    if(shader == 3 || shader == 5)
+    if(wmo_batch_shader == 3 || wmo_batch_shader == 5)
     {
       f_texcoord = texcoord;
       f_texcoord_2 = reflect(normalize(view_space_pos.xyz), f_normal).xy;
+    }
+    else if (ground_proj)
+    {
+      // Same as m2_vert ground path: chunk-scale fract, minus instance origin so moving the WMO does not scroll UVs.
+      vec2 origin_xz = transform[3].xz;
+      f_texcoord = fract((pos.xz - origin_xz) / kWoWChunksize);
+      f_texcoord_2 = texcoord_2;
     }
     else
     {

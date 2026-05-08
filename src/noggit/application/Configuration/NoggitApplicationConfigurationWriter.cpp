@@ -22,7 +22,8 @@ namespace Noggit::Application {
         noggitApplicationConfiguration.GraphicsConfiguration.SamplesCount = 0;
 
         noggitApplicationConfiguration.LoggingConfiguration = NoggitApplicationLoggingConfiguration();
-        noggitApplicationConfiguration.LoggingConfiguration.EnableConsoleLogging = false;
+        // Default builds no longer mirror all logging to log.txt; keep console as default.
+        noggitApplicationConfiguration.LoggingConfiguration.EnableConsoleLogging = true;
         noggitApplicationConfiguration.LoggingConfiguration.ApplicationLoggingPath = "log.txt";
 
         PersistConfigurationState(outputFile, noggitApplicationConfiguration);
@@ -61,6 +62,11 @@ namespace Noggit::Application {
         rootConfiguration.insert("ApplicationDatabaseDefinitionsPath", configuration.ApplicationDatabaseDefinitionsPath.c_str());
         rootConfiguration.insert("ApplicationNoggitDefinitionsPath", configuration.ApplicationNoggitDefinitionsPath.c_str());
         rootConfiguration.insert("ApplicationListFilePath", configuration.ApplicationListFilePath.c_str());
+        rootConfiguration.insert("ApplicationListfileWowExportUrlTemplate",
+                                 configuration.ApplicationListfileWowExportUrlTemplate.c_str());
+        rootConfiguration.insert("ApplicationListfileWowExportBuild", configuration.ApplicationListfileWowExportBuild.c_str());
+        rootConfiguration.insert("ApplicationListfileWowExportAlwaysDownload",
+                                 configuration.ApplicationListfileWowExportAlwaysDownload);
         rootConfiguration.insert("GraphicsConfiguration", graphicsConfiguration);
         rootConfiguration.insert("LoggingConfiguration", loggingConfiguration);
 

@@ -15,6 +15,7 @@
 #include <external/tsl/robin_map.h>
 
 #include <array>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -151,6 +152,9 @@ public:
   void recalcCombinedExtents();
   std::array<glm::vec3, 2>& getExtents();;
   std::array<glm::vec3, 2>& getCombinedExtents();;
+  //! Terrain + water on the ADT footprint only (excludes M2/WMO). Used for tile frustum / occlusion
+  //! so incorrect or extreme object bounds cannot drop whole ADTs from rendering.
+  [[nodiscard]] std::array<glm::vec3, 2> getTerrainWaterCullExtents();
 
   World* getWorld();;
 
@@ -171,6 +175,13 @@ public:
   bool childrenFinishedLoading();
   bool texturesFinishedLoading();
   bool objectsFinishedLoading();
+
+  //! Per-ADT cap for MPL2-style point lights (Noggit `NGPL` chunk on the ADT root, 4-byte payload).
+  //! Encoded byte 0 means WoW default 104; 1..255 is the explicit cap for the whole ADT tile.
+  [[nodiscard]] std::uint32_t effectiveAdtPointLightCap() const;
+
+  //! Set the encoded cap for this ADT and mark the tile dirty (used by the editor).
+  void setAdtPointLightCap(std::uint32_t cap_wow_style);
 
 private:
 
@@ -213,6 +224,9 @@ private:
 
   std::unique_ptr<MapChunk> mChunks[16][16];
   std::array<float, 145 * 256 * 4> _chunk_heightmap_buffer;
+
+  //! 0 = WoW default 104 lights per ADT; otherwise explicit cap (1..255).
+  std::uint8_t _adt_point_light_cap_enc{};
 
   bool _load_models;
   bool _load_textures;

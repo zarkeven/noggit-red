@@ -16,6 +16,73 @@ namespace
 {
   std::size_t inside_gl_begin_end = 0;
 
+  struct buffer_data_request
+  {
+    GLenum target = 0;
+    GLuint buffer = 0;
+  };
+
+  thread_local buffer_data_request tl_last_buffer_data_request = {};
+
+  struct buffer_data_request_scope
+  {
+    buffer_data_request_scope(GLenum target, GLuint buffer)
+      : _prev(tl_last_buffer_data_request)
+    {
+      tl_last_buffer_data_request = { target, buffer };
+    }
+
+    ~buffer_data_request_scope()
+    {
+      tl_last_buffer_data_request = _prev;
+    }
+
+  private:
+    buffer_data_request _prev;
+  };
+
+  static char const* gl_buffer_target_name(GLenum target)
+  {
+    switch (target)
+    {
+      case GL_ARRAY_BUFFER: return "GL_ARRAY_BUFFER";
+      case GL_ATOMIC_COUNTER_BUFFER: return "GL_ATOMIC_COUNTER_BUFFER";
+      case GL_COPY_READ_BUFFER: return "GL_COPY_READ_BUFFER";
+      case GL_COPY_WRITE_BUFFER: return "GL_COPY_WRITE_BUFFER";
+      case GL_DISPATCH_INDIRECT_BUFFER: return "GL_DISPATCH_INDIRECT_BUFFER";
+      case GL_DRAW_INDIRECT_BUFFER: return "GL_DRAW_INDIRECT_BUFFER";
+      case GL_ELEMENT_ARRAY_BUFFER: return "GL_ELEMENT_ARRAY_BUFFER";
+      case GL_PIXEL_PACK_BUFFER: return "GL_PIXEL_PACK_BUFFER";
+      case GL_PIXEL_UNPACK_BUFFER: return "GL_PIXEL_UNPACK_BUFFER";
+      case GL_SHADER_STORAGE_BUFFER: return "GL_SHADER_STORAGE_BUFFER";
+      case GL_TEXTURE_BUFFER: return "GL_TEXTURE_BUFFER";
+      case GL_TRANSFORM_FEEDBACK_BUFFER: return "GL_TRANSFORM_FEEDBACK_BUFFER";
+      case GL_UNIFORM_BUFFER: return "GL_UNIFORM_BUFFER";
+      default: return "UNKNOWN_BUFFER_TARGET";
+    }
+  }
+
+  static GLenum gl_buffer_target_binding_enum(GLenum target)
+  {
+    switch (target)
+    {
+      case GL_ARRAY_BUFFER: return GL_ARRAY_BUFFER_BINDING;
+      case GL_ATOMIC_COUNTER_BUFFER: return GL_ATOMIC_COUNTER_BUFFER_BINDING;
+      case GL_COPY_READ_BUFFER: return GL_COPY_READ_BUFFER_BINDING;
+      case GL_COPY_WRITE_BUFFER: return GL_COPY_WRITE_BUFFER_BINDING;
+      case GL_DISPATCH_INDIRECT_BUFFER: return GL_DISPATCH_INDIRECT_BUFFER_BINDING;
+      case GL_DRAW_INDIRECT_BUFFER: return GL_DRAW_INDIRECT_BUFFER_BINDING;
+      case GL_ELEMENT_ARRAY_BUFFER: return GL_ELEMENT_ARRAY_BUFFER_BINDING;
+      case GL_PIXEL_PACK_BUFFER: return GL_PIXEL_PACK_BUFFER_BINDING;
+      case GL_PIXEL_UNPACK_BUFFER: return GL_PIXEL_UNPACK_BUFFER_BINDING;
+      case GL_SHADER_STORAGE_BUFFER: return GL_SHADER_STORAGE_BUFFER_BINDING;
+      case GL_TEXTURE_BUFFER: return GL_TEXTURE_BUFFER_BINDING;
+      case GL_TRANSFORM_FEEDBACK_BUFFER: return GL_TRANSFORM_FEEDBACK_BUFFER_BINDING;
+      case GL_UNIFORM_BUFFER: return GL_UNIFORM_BUFFER_BINDING;
+      default: return 0;
+    }
+  }
+
   template<typename Extension> struct extension_traits;
   template<> struct extension_traits<QOpenGLExtension_ARB_vertex_program>
   {
@@ -41,6 +108,13 @@ namespace
       if (QOpenGLContext::currentContext() != _current_context)
       {
         throw std::runtime_error (std::string(_function) + ": called without active OpenGL context: not current context");
+      }
+
+      // Clear pre-existing GL errors so we only attribute errors
+      // created by the wrapped OpenGL call to this function name.
+      // (glGetError() is sticky until drained.)
+      while (glGetError())
+      {
       }
     }
     verify_context_and_check_for_gl_errors (QOpenGLContext* current_context, char const* function)
@@ -467,7 +541,15 @@ void OpenGL::context::deleteBuffers (GLuint count, GLuint* buffers)
 void OpenGL::context::bindBuffer (GLenum target, GLuint buffer)
 {
 #ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS
-  verify_context_and_check_for_gl_errors const _ (_current_context, NOGGIT_CURRENT_FUNCTION);
+  verify_context_and_check_for_gl_errors const _(
+      _current_context,
+      NOGGIT_CURRENT_FUNCTION,
+      [target, buffer]()
+      {
+        return " target=" + std::string(gl_buffer_target_name(target))
+          + " target_enum=" + std::to_string(static_cast<unsigned>(target))
+          + " buffer=" + std::to_string(buffer);
+      });
 #endif
   return _current_context->functions()->glBindBuffer (target, buffer);
 }
@@ -626,7 +708,7 @@ void OpenGL::context::compile_shader (GLuint shader)
   {
     std::vector<char> log (get_shader (shader, GL_INFO_LOG_LENGTH));
     _current_context->functions()->glGetShaderInfoLog (shader, static_cast<GLsizei>(log.size()), nullptr, log.data());
-    LogDebug << std::string (log.data ()) << std::endl;
+    LogError << "glCompileShader failed:\n" << std::string (log.data ()) << std::endl;
     throw std::runtime_error ("compiling shader failed: " + std::string (log.data()));
   }
 }
@@ -971,6 +1053,7 @@ void OpenGL::context::texBuffer(GLenum target, GLenum internalformat, GLuint buf
 template<GLenum target>
 void OpenGL::context::bufferData (GLuint buffer, GLsizeiptr size, GLvoid const* data, GLenum usage)
 {
+  buffer_data_request_scope const _req_scope(target, buffer);
   GLuint old = 0;
 
 #ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS
@@ -997,6 +1080,7 @@ template void OpenGL::context::bufferData<GL_ELEMENT_ARRAY_BUFFER> (GLuint buffe
 template<GLenum target, typename T>
 void OpenGL::context::bufferData(GLuint buffer, std::vector<T> const& data, GLenum usage)
 {
+  buffer_data_request_scope const _req_scope(target, buffer);
 
 #ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS
   GLuint old = 0;
@@ -1024,14 +1108,77 @@ void OpenGL::context::bufferData(GLuint buffer, std::vector<T> const& data, GLen
 void OpenGL::context::bufferData (GLenum target, GLsizeiptr size, GLvoid const* data, GLenum usage)
 {
 #ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS
-  verify_context_and_check_for_gl_errors const _ (_current_context, NOGGIT_CURRENT_FUNCTION);
+  buffer_data_request const req = tl_last_buffer_data_request;
+  GLint bound = -1;
+  GLboolean is_buffer = GL_FALSE;
+  GLenum const binding_enum = gl_buffer_target_binding_enum(target);
+  if (binding_enum != 0)
+  {
+    gl.getIntegerv(binding_enum, &bound);
+    if (bound > 0)
+    {
+      is_buffer = _current_context->functions()->glIsBuffer(static_cast<GLuint>(bound));
+    }
+  }
+
+  // If we crash inside the driver (no GL error reported),
+  // this breadcrumb often becomes the last line written.
+  if ((target == GL_ARRAY_BUFFER || target == GL_ELEMENT_ARRAY_BUFFER) && size > 0 && size <= 64)
+  {
+    LogDebug
+      << "glBufferData(pre) target=" << gl_buffer_target_name(target)
+      << " size=" << static_cast<long long>(size)
+      << " usage=" << static_cast<unsigned>(usage)
+      << " bound=" << bound
+      << (req.target == target ? (" req_buffer=" + std::to_string(static_cast<unsigned>(req.buffer))) : "")
+      << std::endl;
+  }
+
+  verify_context_and_check_for_gl_errors const _(
+      _current_context,
+      NOGGIT_CURRENT_FUNCTION,
+      [target, size, usage, bound, is_buffer, req]()
+      {
+        return " target=" + std::string(gl_buffer_target_name(target))
+          + " target_enum=" + std::to_string(static_cast<unsigned>(target))
+          + " size=" + std::to_string(static_cast<long long>(size))
+          + " usage=" + std::to_string(static_cast<unsigned>(usage))
+          + " bound=" + std::to_string(bound)
+          + " isBuffer=" + std::to_string(static_cast<int>(is_buffer))
+          + (req.target == target ? (" req_buffer=" + std::to_string(static_cast<unsigned>(req.buffer))) : "");
+      });
 #endif
   return _current_context->functions()->glBufferData (target, size, data, usage);
 }
 void OpenGL::context::bufferSubData (GLenum target, GLintptr offset, GLsizeiptr size, GLvoid const* data)
 {
 #ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS
-  verify_context_and_check_for_gl_errors const _ (_current_context, NOGGIT_CURRENT_FUNCTION);
+  buffer_data_request const req = tl_last_buffer_data_request;
+  GLint bound = -1;
+  GLboolean is_buffer = GL_FALSE;
+  GLenum const binding_enum = gl_buffer_target_binding_enum(target);
+  if (binding_enum != 0)
+  {
+    gl.getIntegerv(binding_enum, &bound);
+    if (bound > 0)
+    {
+      is_buffer = _current_context->functions()->glIsBuffer(static_cast<GLuint>(bound));
+    }
+  }
+
+  verify_context_and_check_for_gl_errors const _(
+      _current_context,
+      NOGGIT_CURRENT_FUNCTION,
+      [target, offset, size, bound, is_buffer, req]()
+      {
+        return " target=" + std::string(gl_buffer_target_name(target))
+          + " target_enum=" + std::to_string(static_cast<unsigned>(target))
+          + " offset=" + std::to_string(static_cast<long long>(offset))
+          + " size=" + std::to_string(static_cast<long long>(size))
+          + " bound=" + std::to_string(bound)
+          + " isBuffer=" + std::to_string(static_cast<int>(is_buffer))
+          + (req.target == target ? (" req_buffer=" + std::to_string(static_cast<unsigned>(req.buffer))) : "");
+      });
 #endif
   return _current_context->functions()->glBufferSubData (target, offset, size, data);
 }
@@ -1039,6 +1186,7 @@ void OpenGL::context::bufferSubData (GLenum target, GLintptr offset, GLsizeiptr 
 template<GLenum target>
 void OpenGL::context::bufferSubData (GLuint buffer, GLintptr offset, GLsizeiptr size, GLvoid const* data)
 {
+  buffer_data_request_scope const _req_scope(target, buffer);
 #ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS
   GLuint old;
   gl.getIntegerv ( target == GL_ARRAY_BUFFER ? GL_ARRAY_BUFFER_BINDING
@@ -1064,6 +1212,7 @@ void OpenGL::context::bufferSubData (GLuint buffer, GLintptr offset, GLsizeiptr 
 template<GLenum target, typename T>
 void OpenGL::context::bufferSubData(GLuint buffer, GLintptr offset, std::vector<T> const& data)
 {
+  buffer_data_request_scope const _req_scope(target, buffer);
 #ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS
   GLuint old = 0;
   gl.getIntegerv ( target == GL_ARRAY_BUFFER ? GL_ARRAY_BUFFER_BINDING

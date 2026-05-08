@@ -24,7 +24,9 @@ TerrainFlattenNode::TerrainFlattenNode()
   _mode = new QComboBox(&_embedded_widget);
   _mode->addItems({"Flat",
                    "Linear",
-                   "Smooth"});
+                   "Smooth",
+                   "Origin",
+                   "Smooth inner"});
   addWidgetTop(_mode);
 
   addPortDefault<LogicData>(PortType::In, "Logic", true);

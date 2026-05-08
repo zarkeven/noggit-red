@@ -797,29 +797,98 @@
                    </item>
                   </widget>
                  </item>
-                  <item row="6" column="0">
-                    <widget class="QLabel" name="label_44">
-                      <property name="minimumSize">
-                        <size>
-                          <width>200</width>
-                          <height>0</height>
-                        </size>
-                      </property>
-                      <property name="toolTip">
-                        <string>Requires restart. This will enable modern features added in expansions after WotLK. This enables height texturing and WMO scaling. Some features may require additional tools.</string>
-                      </property>
-                      <property name="text">
-                        <string>Modern features (MoP/Legion+)</string>
-                      </property>
-                    </widget>
-                  </item>
-                  <item row="6" column="1">
-                    <widget class="QCheckBox" name="_modern_features">
-                      <property name="text">
-                        <string/>
-                      </property>
-                    </widget>
-                  </item>
+                 <item row="6" column="0">
+                  <widget class="QLabel" name="label_16">
+                   <property name="text">
+                    <string>Use MCLQ Liquids (vanilla/BC) export</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="6" column="1">
+                  <widget class="QCheckBox" name="_use_mclq_liquids_export">
+                   <property name="enabled">
+                    <bool>true</bool>
+                   </property>
+                   <property name="text">
+                    <string/>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="7" column="0">
+                  <widget class="QLabel" name="label_44">
+                   <property name="minimumSize">
+                    <size>
+                     <width>200</width>
+                     <height>0</height>
+                    </size>
+                   </property>
+                   <property name="toolTip">
+                    <string>Requires restart. This will enable modern features added in expansions after WotLK. This enables height texturing and WMO scaling. Some features may require additional tools.</string>
+                   </property>
+                   <property name="text">
+                    <string>Modern features (MoP/Legion+)</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="7" column="1">
+                  <widget class="QCheckBox" name="_modern_features">
+                   <property name="text">
+                    <string/>
+                   </property>
+                  </widget>
+                 </item>
+                <item row="8" column="0">
+                 <widget class="QLabel" name="label_use_windows_ink">
+                  <property name="minimumSize">
+                   <size>
+                    <width>200</width>
+                    <height>0</height>
+                   </size>
+                  </property>
+                  <property name="toolTip">
+                   <string>Requires restart. When enabled, Qt uses Windows Ink for tablet input (better compatibility for many modern pen devices). When disabled, Qt uses WinTab.</string>
+                  </property>
+                  <property name="text">
+                   <string>Use Windows Ink (tablet)</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="8" column="1">
+                 <widget class="QCheckBox" name="_use_windows_ink">
+                  <property name="text">
+                   <string/>
+                  </property>
+                  <property name="checked">
+                   <bool>true</bool>
+                  </property>
+                 </widget>
+                </item>
+                <item row="9" column="0">
+                 <widget class="QLabel" name="label_tablet_pressure_strength">
+                  <property name="minimumSize">
+                   <size>
+                    <width>200</width>
+                    <height>0</height>
+                   </size>
+                  </property>
+                  <property name="toolTip">
+                   <string>When a pen tablet is active, brush strength is scaled by pen pressure (0..1).</string>
+                  </property>
+                  <property name="text">
+                   <string>Tablet pressure affects brush strength</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="9" column="1">
+                 <widget class="QCheckBox" name="_tablet_pressure_strength">
+                  <property name="text">
+                   <string/>
+                  </property>
+                  <property name="checked">
+                   <bool>true</bool>
+                  </property>
+                 </widget>
+                </item>
                  <item row="0" column="0">
                   <widget class="QLabel" name="label_12">
                    <property name="minimumSize">
@@ -840,23 +909,6 @@
                    </property>
                    <property name="checked">
                     <bool>true</bool>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="6" column="1">
-                  <widget class="QCheckBox" name="_use_mclq_liquids_export">
-                   <property name="enabled">
-                    <bool>true</bool>
-                   </property>
-                   <property name="text">
-                    <string/>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="6" column="0">
-                  <widget class="QLabel" name="label_16">
-                   <property name="text">
-                    <string>Use MCLQ Liquids (vanilla/BC) export</string>
                    </property>
                   </widget>
                  </item>
@@ -882,6 +934,258 @@
           </item>
           <item>
            <spacer name="verticalSpacer_7">
+            <property name="orientation">
+             <enum>Qt::Vertical</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>20</width>
+              <height>40</height>
+             </size>
+            </property>
+           </spacer>
+          </item>
+         </layout>
+        </widget>
+        <widget class="QWidget" name="tab_external_applications">
+         <attribute name="title">
+          <string>External Apps</string>
+         </attribute>
+         <layout class="QVBoxLayout" name="verticalLayout_external_apps">
+          <property name="topMargin">
+           <number>8</number>
+          </property>
+          <item>
+           <widget class="QGroupBox" name="groupBox_discord">
+            <property name="title">
+             <string>Discord</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignCenter</set>
+            </property>
+            <layout class="QVBoxLayout" name="verticalLayout_discord">
+             <item>
+              <layout class="QFormLayout" name="formLayout_discord">
+               <property name="labelAlignment">
+                <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
+               </property>
+               <property name="formAlignment">
+                <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
+               </property>
+               <item row="0" column="0">
+                <widget class="QLabel" name="label_discord_rich_presence">
+                 <property name="minimumSize">
+                  <size>
+                   <width>200</width>
+                   <height>0</height>
+                  </size>
+                 </property>
+                 <property name="toolTip">
+                  <string>Shows what you're doing in Noggit on your Discord profile.</string>
+                 </property>
+                 <property name="text">
+                  <string>Discord Rich Presence</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QCheckBox" name="_discord_rich_presence_cb">
+                 <property name="text">
+                  <string/>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QLabel" name="label_discord_app_id">
+                 <property name="minimumSize">
+                  <size>
+                   <width>200</width>
+                   <height>0</height>
+                  </size>
+                 </property>
+                 <property name="toolTip">
+                  <string>Discord application client ID used for Rich Presence.</string>
+                 </property>
+                 <property name="text">
+                  <string>Discord Application ID</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="1">
+                <widget class="QLineEdit" name="_discord_app_id_field">
+                 <property name="placeholderText">
+                  <string>e.g. 123456789012345678</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="2" column="0">
+                <widget class="QLabel" name="label_discord_large_image_key">
+                 <property name="toolTip">
+                  <string>Art Asset key (lowercase) uploaded in the Discord Developer Portal.</string>
+                 </property>
+                 <property name="text">
+                  <string>Large Image Key</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="2" column="1">
+                <widget class="QLineEdit" name="_discord_large_image_key_field">
+                 <property name="placeholderText">
+                  <string>e.g. noggit</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="0">
+                <widget class="QLabel" name="label_discord_large_image_text">
+                 <property name="toolTip">
+                  <string>Shown when hovering the large image in Rich Presence.</string>
+                 </property>
+                 <property name="text">
+                  <string>Large Image Text</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="1">
+                <widget class="QLineEdit" name="_discord_large_image_text_field">
+                 <property name="placeholderText">
+                  <string>Noggit Red</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="groupBox_epsilon">
+            <property name="title">
+             <string>Epsilon patch export</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignCenter</set>
+            </property>
+            <layout class="QVBoxLayout" name="verticalLayout_epsilon">
+             <item>
+              <layout class="QFormLayout" name="formLayout_epsilon">
+               <property name="labelAlignment">
+                <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
+               </property>
+               <item row="0" column="0">
+                <widget class="QLabel" name="label_epsilon_enable">
+                 <property name="text">
+                  <string>Integration</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QCheckBox" name="_epsilon_integration_cb">
+                 <property name="text">
+                  <string>Enable export on save</string>
+                 </property>
+                 <property name="toolTip">
+                  <string>After saving the map, copy the map WDT and _lgt.wdt into the patch folder and update patch.json.</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QLabel" name="label_epsilon_patches_path">
+                 <property name="text">
+                  <string>Epsilon Patches directory</string>
+                 </property>
+                 <property name="toolTip">
+                  <string>Folder that contains per-patch subfolders (e.g. .../Epsilon/_retail_/Patches).</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="1">
+                <layout class="QHBoxLayout" name="horizontalLayout_epsilon_patches">
+                 <item>
+                  <widget class="QLineEdit" name="_epsilon_patches_path_field">
+                   <property name="placeholderText">
+                    <string>e.g. C:/Epsilon/_retail_/Patches</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QPushButton" name="_epsilon_patches_path_browse">
+                   <property name="text">
+                    <string>Browse</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item row="2" column="0">
+                <widget class="QLabel" name="label_epsilon_patch_name">
+                 <property name="text">
+                  <string>Project / patch folder name</string>
+                 </property>
+                 <property name="toolTip">
+                  <string>Subfolder under Patches where patch.json and world/ live (e.g. MyMapPatch).</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="2" column="1">
+                <widget class="QLineEdit" name="_epsilon_patch_name_field">
+                 <property name="placeholderText">
+                  <string>MyMapPatch</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="0">
+                <widget class="QLabel" name="label_epsilon_starting_fdid">
+                 <property name="text">
+                  <string>Starting FileDataID</string>
+                 </property>
+                 <property name="toolTip">
+                  <string>When new files are added to patch.json, IDs start at max(existing, this−1)+1. Range is limited by the spin box (≤ 2^31−1).</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="1">
+                <widget class="QSpinBox" name="_epsilon_starting_fdid_field">
+                 <property name="minimum">
+                  <number>100000</number>
+                 </property>
+                 <property name="maximum">
+                  <number>2147483647</number>
+                 </property>
+                 <property name="value">
+                  <number>5000000</number>
+                 </property>
+                </widget>
+               </item>
+               <item row="4" column="0">
+                <widget class="QLabel" name="label_epsilon_wdt_fdid">
+                 <property name="text">
+                  <string>Map WDT FileDataID (0 = auto)</string>
+                 </property>
+                 <property name="toolTip">
+                  <string>Set to your map's WDT FileDataID from Map.db2 / listfile so the client loads this patch WDT. 0 assigns the next free ID (custom maps only).</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="4" column="1">
+                <widget class="QSpinBox" name="_epsilon_wdt_fdid_field">
+                 <property name="minimum">
+                  <number>0</number>
+                 </property>
+                 <property name="maximum">
+                  <number>2147483647</number>
+                 </property>
+                 <property name="value">
+                  <number>0</number>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item>
+           <spacer name="verticalSpacer_external_apps">
             <property name="orientation">
              <enum>Qt::Vertical</enum>
             </property>

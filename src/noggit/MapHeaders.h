@@ -342,9 +342,17 @@ struct mclq
 struct MPHD
 {
   uint32_t flags;
+  //! WotLK: second MPHD dword. Retail (≥8.1): @ref lgtFileDataID is the *second* dword on disk (no `something`).
   uint32_t something;
-  uint32_t unused[6];
+  //! `_lgt.wdt` FileDataID (retail ≥8.1). On disk immediately after `flags` for modern WDTs.
+  uint32_t lgtFileDataID;
+  uint32_t occFileDataID;
+  uint32_t fogsFileDataID;
+  uint32_t mpvFileDataID;
+  uint32_t texFileDataID;
+  uint32_t wdlFileDataID;
 };
+static_assert(sizeof(MPHD) == 32, "MPHD must remain 32 bytes for WDT I/O");
 
 struct mtxf_entry
 {

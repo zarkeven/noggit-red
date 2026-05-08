@@ -1,11 +1,14 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include "ModelRender.hpp"
+#include <noggit/MapChunk.h>
 #include <noggit/Model.h>
 #include <noggit/ModelInstance.h>
 #include <noggit/Misc.h>
 #include <noggit/Particle.h>
+#include <noggit/texture_set.hpp>
 #include <noggit/TextureManager.h>
+#include <noggit/World.h>
 
 #include <math/bounding_box.hpp>
 #include <math/frustum.hpp>
@@ -16,6 +19,37 @@
 
 
 using namespace Noggit::Rendering;
+
+namespace
+{
+  void try_fill_terrain_ground_bind(World* world, glm::vec3 const& anchor_world, M2TerrainGroundBind& out)
+  {
+    out = {};
+    if (!world)
+    {
+      return;
+    }
+
+    MapChunk* const chunk = world->getChunkAt(anchor_world);
+    if (!chunk)
+    {
+      return;
+    }
+
+    TextureSet* const ts = chunk->getTextureSet();
+    if (!ts || ts->num() == 0)
+    {
+      return;
+    }
+
+    scoped_blp_texture_reference const tex = ts->texture(0);
+    tex->upload();
+    out.texture_array = tex->texture_array();
+    out.array_index = static_cast<GLint>(tex->array_index());
+    out.chunk_corner_xz = glm::vec2(chunk->xbase, chunk->zbase);
+    out.valid = true;
+  }
+}
 
 ModelRender::ModelRender(Model* model)
 : _model(model)
@@ -101,6 +135,8 @@ void ModelRender::draw(glm::mat4x4 const& model_view
     , display_mode display
     , bool no_cull
     , bool animate
+    , World* world_for_terrain_projection
+    , bool enable_terrain_texture_projection
 )
 {
   if (!_model->finishedLoading() || _model->loading_failed())
@@ -141,9 +177,18 @@ void ModelRender::draw(glm::mat4x4 const& model_view
 
   OpenGL::Scoped::buffer_binder<GL_ELEMENT_ARRAY_BUFFER> indices_binder(_indices_buffer);
 
+  M2TerrainGroundBind terrain_ground{};
+  M2TerrainGroundBind const* terrain_ptr = nullptr;
+  if (enable_terrain_texture_projection && world_for_terrain_projection && hasTerrainGroundProjectionPasses())
+  {
+    glm::mat4x4 const& m = instance.transformMatrix();
+    try_fill_terrain_ground_bind(world_for_terrain_projection, glm::vec3(m[3][0], m[3][1], m[3][2]), terrain_ground);
+    terrain_ptr = &terrain_ground;
+  }
+
   for (ModelRenderPass& p : _render_passes)
   {
-    if (p.prepareDraw(m2_shader, _model, model_render_state))
+    if (p.prepareDraw(m2_shader, _model, model_render_state, terrain_ptr))
     {
       gl.drawElements(GL_TRIANGLES, p.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(p.index_start * sizeof(GLushort)));
       p.afterDraw();
@@ -170,6 +215,8 @@ void ModelRender::draw(glm::mat4x4 const& model_view
     , bool animate
     , bool draw_fake_geometry_box
     , bool draw_animation_box
+    , World* world_for_terrain_projection
+    , bool enable_terrain_texture_projection
 )
 {
   ZoneScopedN(NOGGIT_CURRENT_FUNCTION);
@@ -250,12 +297,56 @@ void ModelRender::draw(glm::mat4x4 const& model_view
 
     OpenGL::Scoped::buffer_binder<GL_ELEMENT_ARRAY_BUFFER> indices_binder(_indices_buffer);
 
-    for (ModelRenderPass& p : _render_passes)
+    bool const terrain_proj = enable_terrain_texture_projection
+      && world_for_terrain_projection
+      && hasTerrainGroundProjectionPasses();
+
+    if (!terrain_proj)
     {
-      if (p.prepareDraw(m2_shader, _model, model_render_state))
+      for (ModelRenderPass& p : _render_passes)
       {
-        gl.drawElementsInstanced(GL_TRIANGLES, p.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(p.index_start * sizeof(GLushort)), static_cast<GLsizei>(instances.size()));
-        //p.after_draw();
+        if (p.prepareDraw(m2_shader, _model, model_render_state, nullptr))
+        {
+          gl.drawElementsInstanced(GL_TRIANGLES, p.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(p.index_start * sizeof(GLushort)), static_cast<GLsizei>(instances.size()));
+        }
+      }
+    }
+    else if (instances.size() == 1)
+    {
+      M2TerrainGroundBind terrain_ground{};
+      try_fill_terrain_ground_bind(world_for_terrain_projection, glm::vec3(instances[0][3][0], instances[0][3][1], instances[0][3][2]), terrain_ground);
+      M2TerrainGroundBind const* const terrain_ptr = terrain_ground.valid ? &terrain_ground : nullptr;
+
+      for (ModelRenderPass& p : _render_passes)
+      {
+        if (p.prepareDraw(m2_shader, _model, model_render_state, terrain_ptr))
+        {
+          gl.drawElementsInstanced(GL_TRIANGLES, p.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(p.index_start * sizeof(GLushort)), 1);
+        }
+      }
+    }
+    else
+    {
+      glm::mat4x4 single;
+      for (glm::mat4x4 const& inst : instances)
+      {
+        M2TerrainGroundBind terrain_ground{};
+        try_fill_terrain_ground_bind(world_for_terrain_projection, glm::vec3(inst[3][0], inst[3][1], inst[3][2]), terrain_ground);
+        M2TerrainGroundBind const* const terrain_ptr = terrain_ground.valid ? &terrain_ground : nullptr;
+
+        {
+          OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> const transform_binder(_transform_buffer);
+          single = inst;
+          gl.bufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4x4), &single, GL_DYNAMIC_DRAW);
+        }
+
+        for (ModelRenderPass& p : _render_passes)
+        {
+          if (p.prepareDraw(m2_shader, _model, model_render_state, terrain_ptr))
+          {
+            gl.drawElementsInstanced(GL_TRIANGLES, p.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(p.index_start * sizeof(GLushort)), 1);
+          }
+        }
       }
     }
   }
@@ -307,6 +398,26 @@ void ModelRender::drawBox(OpenGL::Scoped::use_program& m2_box_shader, std::size_
 std::vector<ModelRenderPass> const& Noggit::Rendering::ModelRender::renderPasses() const
 {
   return _render_passes;
+}
+
+bool ModelRender::hasTerrainGroundProjectionPasses() const
+{
+  for (ModelRenderPass const& p : _render_passes)
+  {
+    if (p.skin_projected)
+    {
+      return true;
+    }
+    if (p.tu_lookups[0] == texture_unit_lookup::ground)
+    {
+      return true;
+    }
+    if (p.texture_count > 1 && p.tu_lookups[1] == texture_unit_lookup::ground)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 void ModelRender::setupVAO(OpenGL::Scoped::use_program& m2_shader)
@@ -568,15 +679,18 @@ void ModelRender::fixShaderIDLayer()
       previous_render_flag = -1;
       for (int i = 0; i < passes.size(); ++i)
       {
-        auto& pass = _render_passes[i];
+        auto& pass = passes[i];
         uint16_t renderflag_index = pass.renderflag_index;
 
         if (renderflag_index == previous_render_flag)
         {
-          pass.shader_id = _render_passes[i - 1].shader_id;
-          pass.texture_count = _render_passes[i - 1].texture_count;
-          pass.texture_combo_index = _render_passes[i - 1].texture_combo_index;
-          pass.texture_coord_combo_index = _render_passes[i - 1].texture_coord_combo_index;
+          pass.shader_id = passes[i - 1].shader_id;
+          pass.texture_count = passes[i - 1].texture_count;
+          pass.texture_combo_index = passes[i - 1].texture_combo_index;
+          pass.texture_coord_combo_index = passes[i - 1].texture_coord_combo_index;
+          // Keep skin / projection flags from the merged batch (same render op).
+          pass.flags = passes[i - 1].flags;
+          pass.geoset_index = passes[i - 1].geoset_index;
         }
         else
         {
@@ -799,7 +913,7 @@ ModelRenderPass::ModelRenderPass(ModelTexUnit const& tex_unit, Model* m)
 {
 }
 
-bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model *m, OpenGL::M2RenderState& model_render_state)
+bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model *m, OpenGL::M2RenderState& model_render_state, M2TerrainGroundBind const* terrain_ground)
 {
   if (!m->showGeosets[submesh] || !pixel_shader)
   {
@@ -921,10 +1035,10 @@ bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model 
 
   if (texture_count > 1)
   {
-    bindTexture(1, m, model_render_state, m2_shader);
+    bindTexture(1, m, model_render_state, m2_shader, terrain_ground);
   }
 
-  bindTexture(0, m, model_render_state, m2_shader);
+  bindTexture(0, m, model_render_state, m2_shader, terrain_ground);
 
   GLint tu1 = static_cast<GLint>(tu_lookups[0]), tu2 = static_cast<GLint>(tu_lookups[1]);
 
@@ -975,6 +1089,32 @@ bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model 
 
   m2_shader.uniform("mesh_color", mesh_color);
 
+  int terrain_uv_mask = 0;
+  if (terrain_ground && terrain_ground->valid)
+  {
+    if (tu_lookups[0] == texture_unit_lookup::ground)
+    {
+      terrain_uv_mask |= 1;
+    }
+    if (texture_count > 1 && tu_lookups[1] == texture_unit_lookup::ground)
+    {
+      terrain_uv_mask |= 2;
+    }
+    // Single-texture projected decals often still use T1 mapping in the M2; force chunk UV + terrain bind on slot 0.
+    if (skin_projected && texture_count == 1
+        && tu_lookups[0] != texture_unit_lookup::ground
+        && tu_lookups[0] != texture_unit_lookup::environment)
+    {
+      terrain_uv_mask |= 1;
+    }
+  }
+
+  m2_shader.uniform("terrain_uv_mask", terrain_uv_mask);
+  if (terrain_uv_mask != 0)
+  {
+    m2_shader.uniform("terrain_chunk_corner_xz", terrain_ground->chunk_corner_xz);
+  }
+
   return true;
 }
 
@@ -983,8 +1123,22 @@ void ModelRenderPass::afterDraw()
   gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
-void ModelRenderPass::bindTexture(size_t index, Model* m, OpenGL::M2RenderState& model_render_state, OpenGL::Scoped::use_program& m2_shader)
+void ModelRenderPass::bindTexture(size_t index, Model* m, OpenGL::M2RenderState& model_render_state, OpenGL::Scoped::use_program& m2_shader, M2TerrainGroundBind const* terrain_ground)
 {
+  bool const bind_chunk_tex = terrain_ground && terrain_ground->valid
+    && (tu_lookups[index] == texture_unit_lookup::ground
+        || (skin_projected && texture_count == 1 && index == 0
+            && tu_lookups[0] != texture_unit_lookup::ground
+            && tu_lookups[0] != texture_unit_lookup::environment));
+
+  if (bind_chunk_tex)
+  {
+    gl.activeTexture(static_cast<GLenum>(GL_TEXTURE0 + index + 1));
+    gl.bindTexture(GL_TEXTURE_2D_ARRAY, terrain_ground->texture_array);
+    m2_shader.uniform(index ? "tex2_index" : "tex1_index", terrain_ground->array_index);
+    model_render_state.tex_indices[index] = terrain_ground->array_index;
+    return;
+  }
 
   uint16_t tex = m->_texture_lookup[textures[index]];
 
@@ -1020,13 +1174,16 @@ void ModelRenderPass::bindTexture(size_t index, Model* m, OpenGL::M2RenderState&
   }
   else
   {
-    if (m->_specialTextures[tex] >= m->_replaceTextures.size())
+    auto const repl_key = static_cast<std::size_t>(m->_specialTextures[tex]);
+    auto const it = m->_replaceTextures.find(repl_key);
+    if (it == m->_replaceTextures.end())
 	{
-	  LogError << "model: special texture index out of range " << m->file_key().stringRepr() << std::endl;
+	  LogError << "model: special texture replacement missing for type " << m->_specialTextures[tex] << " "
+               << m->file_key().stringRepr() << std::endl;
 	  return;
 	}
 
-    auto& texture = m->_replaceTextures.at (m->_specialTextures[tex]);
+    auto& texture = it->second;
     texture->upload();
     GLuint tex_array = texture->texture_array();
     int tex_index = texture->array_index();
@@ -1061,6 +1218,12 @@ void ModelRenderPass::initUVTypes(Model* m)
   tu_lookups[0] = texture_unit_lookup::none;
   tu_lookups[1] = texture_unit_lookup::none;
 
+  // wowdev M2/.skin texture units: flags &0x4 / &0x20 projected; geosetIndex (flags2) &0x2 projected
+  bool const batch_projected = ((flags & 0x4u) != 0)
+                            || ((flags & 0x20u) != 0)
+                            || ((geoset_index & 0x2u) != 0);
+  skin_projected = batch_projected;
+
   if (m->_texture_unit_lookup.size() < texture_coord_combo_index + texture_count)
   {
     LogError << "model: texture_coord_combo_index out of range " << m->file_key().stringRepr() << std::endl;
@@ -1069,8 +1232,8 @@ void ModelRenderPass::initUVTypes(Model* m)
     {
       switch (i)
       {
-        case 0: tu_lookups[i] = texture_unit_lookup::t1; break;
-        case 1: tu_lookups[i] = texture_unit_lookup::t2; break;
+        case 0: tu_lookups[i] = batch_projected ? texture_unit_lookup::ground : texture_unit_lookup::t1; break;
+        case 1: tu_lookups[i] = batch_projected ? texture_unit_lookup::ground : texture_unit_lookup::t2; break;
       }
     }
 
@@ -1081,11 +1244,25 @@ void ModelRenderPass::initUVTypes(Model* m)
 
   for (int i = 0; i < texture_count; ++i)
   {
-    switch (m->_texture_unit_lookup[texture_coord_combo_index + i])
+    int16_t const lid = m->_texture_unit_lookup[texture_coord_combo_index + i];
+
+    if (lid == (int16_t)(-1))
     {
-      case (int16_t)(-1): tu_lookups[i] = texture_unit_lookup::environment; break;
-      case 0: tu_lookups[i] = texture_unit_lookup::t1; break;
-      case 1: tu_lookups[i] = texture_unit_lookup::t2; break;
+      tu_lookups[i] = texture_unit_lookup::environment;
+    }
+    // Projected batches: world-space UVs for any mesh texture lookup (0, 1, 2, …), not only T1/T2.
+    else if (batch_projected && lid >= 0)
+    {
+      tu_lookups[i] = texture_unit_lookup::ground;
+    }
+    else
+    {
+      switch (lid)
+      {
+        case 0: tu_lookups[i] = texture_unit_lookup::t1; break;
+        case 1: tu_lookups[i] = texture_unit_lookup::t2; break;
+        default: tu_lookups[i] = texture_unit_lookup::t1; break;
+      }
     }
   }
 }

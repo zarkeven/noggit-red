@@ -11,6 +11,8 @@
 #include <QFile>
 #include <QTextStream>
 
+#include <noggit/Log.h>
+
 #include <stdexcept>
 #include <list>
 #include <regex>
@@ -26,10 +28,17 @@ namespace OpenGL
     gl.shaderSource (_handle, 1, &source_ptr, nullptr);
     gl.compile_shader (_handle);
   }
+  catch (std::exception const& e)
+  {
+    LogError << "OpenGL::shader: " << e.what() << std::endl;
+    std::throw_with_nested (std::runtime_error (
+        std::string ("error constructing GL shader (see log for compile/context details): ") + e.what ()));
+  }
   catch (...)
   {
-    std::throw_with_nested
-      (std::runtime_error ("error constructing shader '" + source + "'"));
+    LogError << "OpenGL::shader: unknown exception during compile" << std::endl;
+    std::throw_with_nested (
+        std::runtime_error ("error constructing GL shader (unknown inner exception)"));
   }
   shader::~shader()
   {
@@ -241,7 +250,13 @@ namespace OpenGL
 
     void use_program::bind_uniform_block(std::string const& name, unsigned target)
     {
-        gl.uniformBlockBinding(_program._handle.value() , uniform_block_location(name), target);
+        // Some shaders intentionally omit/optimize-out certain UBOs (or we migrate away from them).
+        // Treat missing uniform blocks as a no-op instead of triggering GL_INVALID_VALUE.
+        GLuint const idx = uniform_block_location(name);
+        if (idx == GL_INVALID_INDEX)
+          return;
+
+        gl.uniformBlockBinding(_program._handle.value(), idx, target);
     }
     void use_program::uniform (std::string const& name, std::vector<int> const& value)
     {

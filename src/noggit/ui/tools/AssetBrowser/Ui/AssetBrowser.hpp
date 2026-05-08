@@ -79,6 +79,7 @@ namespace Noggit
       QStandardItemModel* _model;
       NoggitExpendableFilterProxyModel* _sort_model;
       PreviewRenderer* _preview_renderer;
+      bool _is_initializing = true;
       QRegularExpression _wmo_group_and_lod_regex;
       MapView* _map_view;
       std::string _selected_path;

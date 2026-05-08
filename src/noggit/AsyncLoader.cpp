@@ -7,8 +7,6 @@
 #include <noggit/errorHandling.h>
 #include <noggit/Log.h>
 
-#include <QtCore/QSettings>
-
 #include <algorithm>
 #include <list>
 
@@ -29,9 +27,6 @@ bool AsyncLoader::is_loading()
 void AsyncLoader::process()
 {
   AsyncObject* object = nullptr;
-
-  QSettings settings;
-  bool additional_log = settings.value("additional_file_loading_log", false).toBool();
 
   while (!_stop)
   {
@@ -70,20 +65,25 @@ void AsyncLoader::process()
 
     try
     {
-      if (additional_log)
+      bool const trace_loads = LoadTraceEnabled();
+
+      std::string const load_id = object->file_key().hasFilepath()
+        ? object->file_key().filepath()
+        : std::to_string(object->file_key().fileDataID());
+
+      if (trace_loads)
       {
         std::lock_guard<std::mutex> const lock(_guard);
-        LogDebug << "Loading file '" << (object->file_key().hasFilepath() ? object->file_key().filepath()
-          : std::to_string(object->file_key().fileDataID()))<< "'" << std::endl;
+        // Match bindless log.txt: [Debug] Loading '...' / Loaded  '...' (two spaces before quote on Loaded).
+        LogDebug << "Loading '" << load_id << "'" << std::endl;
       }
 
       object->finishLoading();
 
-      if (additional_log)
+      if (trace_loads)
       {
         std::lock_guard<std::mutex> const lock(_guard);
-        LogDebug << "Loaded  file '" << (object->file_key().hasFilepath() ? object->file_key().filepath()
-        : std::to_string(object->file_key().fileDataID())) << "'" << std::endl;
+        LogDebug << "Loaded  '" << load_id << "'" << std::endl;
       }
 
       {
@@ -92,9 +92,32 @@ void AsyncLoader::process()
         _state_changed.notify_all();
       }
     }
-    catch (BlizzardArchive::Exceptions::FileReadFailedError const&)
+    catch (BlizzardArchive::Exceptions::FileReadFailedError const& e)
     {
       std::lock_guard<std::mutex> const lock(_guard);
+
+      std::string const id = object->file_key().hasFilepath()
+        ? object->file_key().filepath()
+        : std::to_string(object->file_key().fileDataID());
+      LogError << "AsyncLoader: read failed for '" << id << "': " << e.what() << std::endl;
+
+      object->error_on_loading();
+
+      if (object->is_required_when_saving())
+      {
+        _important_object_failed_loading = true;
+      }
+
+      _currently_loading.remove(object);
+    }
+    catch (std::exception const& e)
+    {
+      std::lock_guard<std::mutex> const lock(_guard);
+
+      std::string const id = object->file_key().hasFilepath()
+        ? object->file_key().filepath()
+        : std::to_string(object->file_key().fileDataID());
+      LogError << "AsyncLoader: std::exception for '" << id << "': " << e.what() << std::endl;
 
       object->error_on_loading();
 
@@ -109,8 +132,12 @@ void AsyncLoader::process()
     {
       std::lock_guard<std::mutex> const lock(_guard);
 
+      std::string const id = object->file_key().hasFilepath()
+        ? object->file_key().filepath()
+        : std::to_string(object->file_key().fileDataID());
+      LogError << "AsyncLoader: unknown exception for '" << id << "'" << std::endl;
+
       object->error_on_loading();
-      LogError << "Caught unknown error." << std::endl;
 
       if (object->is_required_when_saving())
       {

@@ -70,8 +70,28 @@ namespace Noggit::Application
 
   bool NoggitApplication::initalize(int argc, char* argv[], std::vector<bool> Parser)
   {
-	  InitLogging();
 	  Command = Parser;
+
+	  // Log next to the executable when argv[0] carries a directory; otherwise cwd.
+	  std::filesystem::path log_dir = std::filesystem::current_path();
+	  if (argv && argv[0])
+	  {
+	    std::filesystem::path const exe_path (argv[0]);
+	    if (exe_path.has_parent_path())
+	    {
+	      std::filesystem::path const parent = exe_path.parent_path();
+	      if (!parent.empty())
+	      {
+	        log_dir = parent;
+	      }
+	    }
+	  }
+	  InitLogging (log_dir);
+
+	  Log << "Load trace (AsyncLoader / ADT / previews): "
+	      << (LoadTraceEnabled() ? "on" : "off")
+	      << " (env NOGGIT_LOAD_TRACE, QSettings load_trace, or additional_file_loading_log)"
+	      << std::endl;
 
 	  QLocale locale = QLocale(QLocale::English);
 	  QString dateTimeText = locale.toString(QDateTime::currentDateTime(), "dd MMMM yyyy hh:mm:ss");
@@ -238,58 +258,12 @@ namespace Noggit::Application
 	  // auto failsafe = std::async(&opengl_context_creation_stuck_failsafe);
 
 	  QSurfaceFormat::setDefaultFormat(format);
-	  QOpenGLContext context;
-		if (!context.create()) [[unlikely]]
-		{
-			LogError << "Failed to create OpenGL 4.1 context." << std::endl;
-
-			QMessageBox msgBox;
-			msgBox.setIcon(QMessageBox::Critical);
-			msgBox.setWindowTitle("OpenGL Context Error");
-			msgBox.setText("Failed to create an OpenGL 4.1 context. Ensure your graphic device and drivers are compatible with OpenGL 4.1"
-											"\nThe application will now close.");
-			msgBox.setStandardButtons(QMessageBox::Ok);
-			msgBox.exec();
-
-			// qFatal("Noggit : Failed to create OpenGL 4.1 context.\n Ensure your graphic device and drivers are compatible with OpenGL 4.1");
-			QCoreApplication::exit(EXIT_FAILURE);
-			return false;
-			// exit(EXIT_FAILURE);
-		}
-
-	  QOffscreenSurface surface;
-	  surface.create();
-
-	  context.makeCurrent(&surface);
-
+	  // IMPORTANT:
+	  // Do NOT create/makeCurrent any OpenGL context here.
+	  // On some NVIDIA drivers, creating an early offscreen context can poison later
+	  // QOpenGLWidget contexts (manifesting as bogus GL_OUT_OF_MEMORY then nvoglv64 crashes).
+	  // We validate/log the real OpenGL context later when MapView initializes its QOpenGLWidget context.
 	  success = true;
-
-	  OpenGL::context::scoped_setter const _(::gl, &context);
-
-	  GLint majVers = 0, minVers = 0;
-	  glGetIntegerv(GL_MAJOR_VERSION, &majVers);
-	  glGetIntegerv(GL_MINOR_VERSION, &minVers);
-
-	  if (majVers != 4)
-	  {
-		  LogError << "Default GL major version is not 4" << std::endl;
-	  }
-	  else if (minVers < 1) // noggit required 4.1
-	  {
-		  LogError << "Default GL minor version is less than 1" << std::endl;
-	  }
-		auto profile = format.profile();
-
-	  LogDebug << "GL: Version: " << gl.getString(GL_VERSION) << std::endl;
-	  LogDebug << "GL: Vendor: " << gl.getString(GL_VENDOR) << std::endl;
-	  LogDebug << "GL: Renderer: " << gl.getString(GL_RENDERER) << std::endl;
-
-	  if (profile != QSurfaceFormat::OpenGLContextProfile::CoreProfile) // allow compatibility profile ?
-	  {
-		  LogError << "OpenGL version profile is not valid. Profile id : " << profile << std::endl;
-		  throw std::runtime_error(
-			  "OpenGL version profile is not valid.");
-	  }
 
     _application_configuration = std::make_shared<Noggit::Application::NoggitApplicationConfiguration>(applicationConfiguration);
 	  //All of the below should be Project Initalisation

@@ -39,6 +39,15 @@ namespace Noggit::Application {
 
             if (noggitConfiguration.contains("ApplicationListFilePath"))
                 noggitApplicationConfiguration.ApplicationListFilePath = noggitConfiguration["ApplicationListFilePath"].toString().toStdString();
+            if (noggitConfiguration.contains("ApplicationListfileWowExportUrlTemplate"))
+                noggitApplicationConfiguration.ApplicationListfileWowExportUrlTemplate =
+                  noggitConfiguration["ApplicationListfileWowExportUrlTemplate"].toString().toStdString();
+            if (noggitConfiguration.contains("ApplicationListfileWowExportBuild"))
+                noggitApplicationConfiguration.ApplicationListfileWowExportBuild =
+                  noggitConfiguration["ApplicationListfileWowExportBuild"].toString().toStdString();
+            if (noggitConfiguration.contains("ApplicationListfileWowExportAlwaysDownload"))
+                noggitApplicationConfiguration.ApplicationListfileWowExportAlwaysDownload =
+                  noggitConfiguration["ApplicationListfileWowExportAlwaysDownload"].toBool();
 
             if (noggitConfiguration.contains("GraphicsConfiguration") && noggitConfiguration["GraphicsConfiguration"].isObject())
             {

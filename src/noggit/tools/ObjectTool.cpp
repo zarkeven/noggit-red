@@ -16,6 +16,8 @@
 #include <noggit/ui/windows/noggitWindow/NoggitWindow.hpp>
 #include <noggit/World.h>
 
+#include <glm/geometric.hpp>
+
 #include <QDateTime>
 #include <QSettings>
 
@@ -43,6 +45,11 @@ namespace Noggit
             actionModality |= Noggit::ActionModalityControllers::eSCALE;
         if (_keyr)
             actionModality |= Noggit::ActionModalityControllers::eROTATE;
+        if (_rmb_free_object_rotate)
+            actionModality |= Noggit::ActionModalityControllers::eROTATE
+                | Noggit::ActionModalityControllers::eRMB
+                | Noggit::ActionModalityControllers::eCTRL
+                | Noggit::ActionModalityControllers::eALT;
 
         return actionModality;
     }
@@ -498,10 +505,17 @@ namespace Noggit
 
         float numpad_moveratio = 0.001f;
 
+        _rmb_free_object_rotate = false;
+
         if (mapView()->getWorld()->has_selection())
         {
             auto mv = mapView();
             auto world = mv->getWorld();
+
+            _rmb_free_object_rotate = params.right_mouse
+                && params.mod_ctrl_down
+                && params.mod_alt_down
+                && !params.mod_shift_down;
 
             // reset numpad_moveratio when no numpad key is pressed
             if (!(_keyx != 0 || _keyy != 0 || _keyz != 0 || _keyr != 0 || _keys != 0))
@@ -714,38 +728,52 @@ namespace Noggit
 
             if (mv->isRotatingCamera())
             {
-                if (params.mod_ctrl_down) // X
+                if (_rmb_free_object_rotate)
                 {
+                    glm::vec3 const view_right = glm::normalize(params.dirRight);
                     NOGGIT_ACTION_MGR->beginAction(mv, Noggit::ActionFlags::eOBJECTS_TRANSFORMED,
-                        Noggit::ActionModalityControllers::eCTRL
-                        | Noggit::ActionModalityControllers::eRMB);
-                    world->rotate_selected_models(math::degrees(_rh + _rv)
-                        , math::degrees(0.f)
-                        , math::degrees(0.f)
-                        , _use_median_pivot_point.get()
-                    );
+                        Noggit::ActionModalityControllers::eROTATE
+                        | Noggit::ActionModalityControllers::eRMB
+                        | Noggit::ActionModalityControllers::eCTRL
+                        | Noggit::ActionModalityControllers::eALT);
+                    world->rotate_selected_models_view_screen(view_right, _rh, _rv
+                        , _use_median_pivot_point.get());
                 }
-                if (params.mod_shift_down) // Y
+                else
                 {
-                    NOGGIT_ACTION_MGR->beginAction(mv, Noggit::ActionFlags::eOBJECTS_TRANSFORMED,
-                        Noggit::ActionModalityControllers::eSHIFT
-                        | Noggit::ActionModalityControllers::eRMB);
-                    world->rotate_selected_models(math::degrees(0.f)
-                        , math::degrees(_rh + _rv)
-                        , math::degrees(0.f)
-                        , _use_median_pivot_point.get()
-                    );
-                }
-                if (params.mod_alt_down) // Z
-                {
-                    NOGGIT_ACTION_MGR->beginAction(mv, Noggit::ActionFlags::eOBJECTS_TRANSFORMED,
-                        Noggit::ActionModalityControllers::eALT
-                        | Noggit::ActionModalityControllers::eRMB);
-                    world->rotate_selected_models(math::degrees(0.f)
-                        , math::degrees(0.f)
-                        , math::degrees(_rh + _rv)
-                        , _use_median_pivot_point.get()
-                    );
+                    if (params.mod_ctrl_down && !params.mod_alt_down) // X (exclusive with free-rotate combo)
+                    {
+                        NOGGIT_ACTION_MGR->beginAction(mv, Noggit::ActionFlags::eOBJECTS_TRANSFORMED,
+                            Noggit::ActionModalityControllers::eCTRL
+                            | Noggit::ActionModalityControllers::eRMB);
+                        world->rotate_selected_models(math::degrees(_rh + _rv)
+                            , math::degrees(0.f)
+                            , math::degrees(0.f)
+                            , _use_median_pivot_point.get()
+                        );
+                    }
+                    if (params.mod_shift_down) // Y
+                    {
+                        NOGGIT_ACTION_MGR->beginAction(mv, Noggit::ActionFlags::eOBJECTS_TRANSFORMED,
+                            Noggit::ActionModalityControllers::eSHIFT
+                            | Noggit::ActionModalityControllers::eRMB);
+                        world->rotate_selected_models(math::degrees(0.f)
+                            , math::degrees(_rh + _rv)
+                            , math::degrees(0.f)
+                            , _use_median_pivot_point.get()
+                        );
+                    }
+                    if (params.mod_alt_down && !params.mod_ctrl_down) // Z (exclusive with free-rotate combo)
+                    {
+                        NOGGIT_ACTION_MGR->beginAction(mv, Noggit::ActionFlags::eOBJECTS_TRANSFORMED,
+                            Noggit::ActionModalityControllers::eALT
+                            | Noggit::ActionModalityControllers::eRMB);
+                        world->rotate_selected_models(math::degrees(0.f)
+                            , math::degrees(0.f)
+                            , math::degrees(_rh + _rv)
+                            , _use_median_pivot_point.get()
+                        );
+                    }
                 }
 
                 updateRotationEditor();
@@ -877,6 +905,7 @@ namespace Noggit
         _keyr = 0;
         _keys = 0;
         _moveObject = false;
+        _rmb_free_object_rotate = false;
     }
 
     void ObjectTool::setupHotkeys()

@@ -11,6 +11,8 @@
 #include <QObject>
 #include <QWidgetAction>
 
+#include <QtGui/QIcon>
+
 namespace Noggit
 {
     Tool::Tool(MapView* mapView)
@@ -52,6 +54,11 @@ namespace Noggit
     unsigned int Tool::actionModality() const
     {
         return 0;
+    }
+
+    QIcon Tool::toolbarIconOverride() const
+    {
+        return {};
     }
 
     void Tool::setupUi(Ui::Tools::ToolPanel* toolPanel)

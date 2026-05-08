@@ -13,6 +13,16 @@ layout (std140) uniform lighting
   vec4 RiverColorDark;
 };
 
+layout (std140) uniform point_lights
+{
+  ivec4 meta; // x: count, y: enabled
+  vec4 position_radius[256];
+  vec4 color_intensity[256];
+  vec4 attenuation[256];
+  vec4 spot_dir_cos_inner[256];
+  vec4 spot_cos_outer_kind[256];
+};
+
 layout (std140) uniform overlay_params
 {
   int draw_shadows;
@@ -33,11 +43,13 @@ layout (std140) uniform overlay_params
   int climb_use_smooth_interpolation;
   float climb_value;
   int draw_vertex_color;
+  int draw_tileset;
   int draw_groundeffectid_overlay;
   int draw_groundeffect_layerid_overlay;
   int draw_noeffectdoodad_overlay;
   int draw_only_normals;
   int point_normals_up;
+  int draw_texture_layer_count_overlay;
 };
 
 struct ChunkInstanceData
@@ -95,6 +107,13 @@ flat in int instanceID;
 flat in vec3 triangle_normal;
 
 out vec4 out_color;
+
+// Chunk Manipulator preview pass:
+// - preview_pass == 1: only draw chunks flagged as preview footprint (.g != 0)
+// - preview_alpha scales output alpha for blending (e.g. 0.5)
+uniform int preview_pass;
+uniform float preview_alpha;
+uniform int albedo_only;
 
 const float TILESIZE  = 533.33333;
 const float CHUNKSIZE = TILESIZE / 16.0;
@@ -307,11 +326,62 @@ float contour_alpha(float unit_size, vec2 pos, vec2 line_width)
                   );
 }
 
+// 5-bit row, MSB = left column (5 cols x 7 rows digit bitmaps for 0–4)
+int tex_layer_count_row_bits(int n, int ir)
+{
+  ir = clamp(ir, 0, 6);
+  if (n == 0)
+  {
+    if (ir == 0) return 31; if (ir == 1) return 17; if (ir == 2) return 17; if (ir == 3) return 17;
+    if (ir == 4) return 17; if (ir == 5) return 17; return 31;
+  }
+  if (n == 1)
+  {
+    if (ir == 0) return 4; if (ir == 1) return 12; if (ir == 2) return 4; if (ir == 3) return 4;
+    if (ir == 4) return 4; if (ir == 5) return 4; return 14;
+  }
+  if (n == 2)
+  {
+    if (ir == 0) return 31; if (ir == 1) return 1; if (ir == 2) return 1; if (ir == 3) return 30;
+    if (ir == 4) return 16; if (ir == 5) return 16; return 31;
+  }
+  if (n == 3)
+  {
+    if (ir == 0) return 31; if (ir == 1) return 1; if (ir == 2) return 1; if (ir == 3) return 30;
+    if (ir == 4) return 1; if (ir == 5) return 1; return 31;
+  }
+  // n == 4
+  if (ir == 0) return 17; if (ir == 1) return 17; if (ir == 2) return 17; if (ir == 3) return 31;
+  if (ir == 4) return 1; if (ir == 5) return 1; return 1;
+}
+
+float tex_layer_count_digit_alpha(vec2 gn, int n)
+{
+  n = clamp(n, 0, 4);
+  if (max(abs(gn.x), abs(gn.y)) > 1.0)
+    return 0.0;
+  vec2 t01 = gn * 0.5 + 0.5;
+  int ic = int(floor(t01.x * 5.0));
+  int ir = int(floor(t01.y * 7.0));
+  ic = clamp(ic, 0, 4);
+  ir = clamp(ir, 0, 6);
+  int row = tex_layer_count_row_bits(n, ir);
+  int mask = 1 << (4 - ic);
+  return (row & mask) != 0 ? 1.0 : 0.0;
+}
+
 void main()
 {
   float dist_from_camera = distance(camera, vary_position);
 
   vec3 fw = fwidth(vary_position.xyz);
+
+  if (albedo_only != 0)
+  {
+    vec4 base = enable_mists_heightmapping ? mists_texture_blend() : texture_blend();
+    out_color = vec4(base.rgb, 1.0);
+    return;
+  }
 
   // calc world lighting
   vec3 currColor;
@@ -344,6 +414,11 @@ void main()
 	  out_color = mix(vec4(1.0, 1.0, 1.0, 0.0), texture_blend(), int(instances[instanceID].ChunkHoles_DrawImpass_TexLayerCount_CantPaint.b > 0));
   }
 
+  if (draw_tileset == 0)
+  {
+    out_color = vec4(1.0, 1.0, 1.0, 1.0);
+  }
+
   vec3 spc = out_color.a * out_color.rgb * pow(specularFactor, 8);
   out_color.a = 1.0;
 
@@ -354,6 +429,37 @@ void main()
   }
 
   // apply world lighting
+  if (meta.y != 0)
+  {
+    for (int i = 0; i < meta.x; ++i)
+    {
+      vec3 L = position_radius[i].xyz - vary_position;
+      float dist = length(L);
+      float radius = position_radius[i].w;
+      float start = max(0.0, attenuation[i].x);
+      float end = attenuation[i].y > 0.0 ? attenuation[i].y : radius;
+      if (dist > end)
+        continue;
+
+      // Single smoothstep (no extra square): squaring made falloff very tight near attenuation_end.
+      float att = (end > start) ? (1.0 - smoothstep(start, end, dist)) : 1.0;
+      vec3 ldir = normalize(L);
+      float spot_mask = 1.0;
+      if (spot_cos_outer_kind[i].y > 0.5)
+      {
+        vec3 forward = spot_dir_cos_inner[i].xyz;
+        float cosTheta = dot(forward, -ldir);
+        float ci = spot_dir_cos_inner[i].w;
+        float co = spot_cos_outer_kind[i].x;
+        if (cosTheta < co)
+          continue;
+        spot_mask = smoothstep(co, ci, cosTheta);
+      }
+      float ndotl = max(dot(normalized_normal, ldir), 0.0);
+      lDiffuse += color_intensity[i].xyz * (color_intensity[i].w * att * ndotl * spot_mask);
+    }
+  }
+
   out_color.rgb = clamp(out_color.rgb * (currColor + lDiffuse + spc), 0.0, 1.0);
 
   // apply overlays
@@ -456,9 +562,58 @@ void main()
     out_color.rgb = mix(vec3(1.0), out_color.rgb, 0.5);
   }
 
-  if(draw_selection_overlay != 0 && instances[instanceID].AreaIDColor_Pad2_DrawSelection.a != 0)
+  // Chunk selection / preview overlays. Chunk flags are stored in the instance UBO:
+  // - .a (w): selected chunks (Chunk Manipulator quick selection, plus tile selection)
+  // - .g (y): paste preview footprint (Chunk Manipulator cached paste at cursor)
+  if (draw_selection_overlay != 0)
   {
-   out_color.rgb = mix(vec3(1.0), out_color.rgb, 0.5);
+    if (instances[instanceID].AreaIDColor_Pad2_DrawSelection.a != 0)
+    {
+      vec3 sel_col = vec3(0.20, 1.00, 0.45);
+      out_color.rgb = mix(out_color.rgb, sel_col, 0.45);
+    }
+
+    if (instances[instanceID].AreaIDColor_Pad2_DrawSelection.g != 0)
+    {
+      vec3 prev_col = vec3(0.20, 1.00, 0.45);
+      out_color.rgb = mix(out_color.rgb, prev_col, 0.50);
+    }
+  }
+
+  if (draw_texture_layer_count_overlay != 0)
+  {
+    int layer_n = instances[instanceID].ChunkHoles_DrawImpass_TexLayerCount_CantPaint.b;
+    int n = clamp(layer_n, 0, 4);
+
+    uvec2 tile_index_tl = uvec2(uint(floor(vary_position.x / TILESIZE)), uint(floor(vary_position.z / TILESIZE)));
+    vec2 tile_base_tl = vec2(float(tile_index_tl.x * TILESIZE), float(tile_index_tl.y * TILESIZE));
+    uvec2 chunk_index_tl = uvec2(uint(floor(instanceID / 16)), uint(floor(instanceID % 16)));
+    vec2 chunk_base_tl = vec2(float(chunk_index_tl.x * CHUNKSIZE), float(chunk_index_tl.y * CHUNKSIZE));
+    vec2 chunk_center_tl = tile_base_tl + chunk_base_tl + vec2(CHUNKSIZE * 0.5);
+    vec2 delta_tl = vary_position.xz - chunk_center_tl;
+
+    float rad = CHUNKSIZE * 0.14;
+    float d_tl = length(delta_tl);
+    float inner = 1.0 - smoothstep(rad * 0.72, rad, d_tl);
+
+    vec3 badge_rgb = vec3(0.55, 0.55, 0.55);
+    if (n == 1)
+      badge_rgb = vec3(108.0, 151.0, 240.0) / 255.0;
+    else if (n == 2)
+      badge_rgb = vec3(100.0, 245.0, 101.0) / 255.0;
+    else if (n == 3)
+      badge_rgb = vec3(245.0, 166.0, 66.0) / 255.0;
+    else if (n == 4)
+      badge_rgb = vec3(245.0, 53.0, 50.0) / 255.0;
+
+    vec2 gn = delta_tl / (rad * 0.62);
+    float g = tex_layer_count_digit_alpha(gn, n);
+    float edge = smoothstep(rad * 0.95, rad * 1.02, d_tl);
+    float disk = (1.0 - edge) * inner;
+
+    vec3 base_mix = mix(out_color.rgb, badge_rgb, 0.88 * disk);
+    vec3 glyph = vec3(0.04, 0.04, 0.06);
+    out_color.rgb = mix(base_mix, glyph, g * disk * 0.92);
   }
 
   if (draw_shadows != 0)
@@ -477,18 +632,19 @@ void main()
   {
     vec4 color = vec4(0.0, 0.0, 0.0, 0.0);
 
-    color.a = contour_alpha(TILESIZE, vary_position.xz, fw.xz * 1.5);
-    color.g = color.a > 0.0 ? 0.8 : 0.0;
+    // fwidth scales screen-space line thickness; half multipliers = half as thick on screen
+    color.a = contour_alpha(TILESIZE, vary_position.xz, fw.xz * 0.75);
+    color.r = color.a > 0.0 ? 0.8 : 0.0;
 
     if(color.a == 0.0)
     {
-      color.a = contour_alpha(CHUNKSIZE, vary_position.xz, fw.xz);
-      color.r = color.a > 0.0 ? 0.8 : 0.0;
+      color.a = contour_alpha(CHUNKSIZE, vary_position.xz, fw.xz * 0.5);
+      color.b = color.a > 0.0 ? 0.8 : 0.0;
     }
     if(draw_hole_lines != 0 && color.a == 0.0)
     {
       color.a = contour_alpha(HOLESIZE, vary_position.xz, fw.xz * 0.75);
-      color.b = 0.8;
+      color.g = 0.8;
     }
 
     lines_drawn = color.a > 0.0;
@@ -541,6 +697,16 @@ void main()
 		  alpha = max(alpha, 1.0 - smoothstep(0.0, d, diff));
           out_color.rgb = mix(out_color.rgb, wireframe_color.rgb, wireframe_color.a *alpha);
 	  }
+
+  if (preview_pass != 0)
+  {
+    // Only draw the preview footprint (destination chunks).
+    if (instances[instanceID].AreaIDColor_Pad2_DrawSelection.g == 0)
+    {
+      discard;
+    }
+    out_color.a *= preview_alpha;
+  }
   }
 
   if (draw_impassible_climb != 0)

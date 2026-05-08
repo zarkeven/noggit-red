@@ -5,6 +5,7 @@ in vec2 uv1;
 in vec2 uv2;
 in float camera_dist;
 in vec3 norm;
+in vec3 world_pos;
 
 out vec4 out_color;
 
@@ -18,6 +19,16 @@ layout (std140) uniform lighting
     vec4 OceanColorDark;
     vec4 RiverColorLight;
     vec4 RiverColorDark;
+};
+
+layout (std140) uniform point_lights
+{
+  ivec4 meta; // x: count, y: enabled
+  vec4 position_radius[256];
+  vec4 color_intensity[256];
+  vec4 attenuation[256];
+  vec4 spot_dir_cos_inner[256];
+  vec4 spot_cos_outer_kind[256];
 };
 
 uniform vec4 mesh_color;
@@ -260,6 +271,37 @@ void main()
 
       currColor = mix(groundColor, skyColor, 0.5 + (0.5 * nDotL));
       lDiffuse = DiffuseColor_FogStart.xyz * nDotL;
+
+      if (meta.y != 0)
+      {
+        vec3 N = normalize(norm);
+        for (int i = 0; i < meta.x; ++i)
+        {
+          vec3 L = position_radius[i].xyz - world_pos;
+          float dist = length(L);
+          float radius = position_radius[i].w;
+          float start = max(0.0, attenuation[i].x);
+          float end = attenuation[i].y > 0.0 ? attenuation[i].y : radius;
+          if (dist > end)
+            continue;
+
+          float att = (end > start) ? (1.0 - smoothstep(start, end, dist)) : 1.0;
+          vec3 ldir = normalize(L);
+          float spot_mask = 1.0;
+          if (spot_cos_outer_kind[i].y > 0.5)
+          {
+            vec3 forward = spot_dir_cos_inner[i].xyz;
+            float cosTheta = dot(forward, -ldir);
+            float ci = spot_dir_cos_inner[i].w;
+            float co = spot_cos_outer_kind[i].x;
+            if (cosTheta < co)
+              continue;
+            spot_mask = smoothstep(co, ci, cosTheta);
+          }
+          float ndotl2 = max(dot(N, ldir), 0.0);
+          lDiffuse += color_intensity[i].xyz * (color_intensity[i].w * att * ndotl2 * spot_mask);
+        }
+      }
   }
   else
   {

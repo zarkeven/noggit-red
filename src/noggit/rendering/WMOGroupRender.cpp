@@ -8,6 +8,9 @@
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 
+#include <algorithm>
+#include <string>
+
 #include <math/frustum.hpp>
 
 #include <opengl/shader.hpp>
@@ -48,7 +51,7 @@ void WMOGroupRender::upload()
     std::uint32_t tex_array1 = 0;
     std::uint32_t array_index1 = 0;
 
-    bool use_tex2 = mat.shader == 6 || mat.shader == 5 || mat.shader == 3 || mat.shader == 21 || mat.shader == 23;
+    bool use_tex2 = mat.shader == 8 || mat.shader == 6 || mat.shader == 5 || mat.shader == 3 || mat.shader == 21 || mat.shader == 23;
 
     if (use_tex2)
     {
@@ -88,7 +91,7 @@ void WMOGroupRender::upload()
     WMOMaterial& mat(_wmo_group->wmo->materials.at(material_to_use));
 
     bool backface_cull = !mat.flags.unculled;
-    bool use_tex2 = mat.shader == 6 || mat.shader == 5 || mat.shader == 3 || mat.shader == 21 || mat.shader == 23;
+    bool use_tex2 = mat.shader == 8 || mat.shader == 6 || mat.shader == 5 || mat.shader == 3 || mat.shader == 21 || mat.shader == 23;
 
     bool create_draw_call = false;
     if (draw_call && draw_call->backface_cull == backface_cull && batch.index_start == draw_call->index_start + draw_call->index_count)
@@ -359,6 +362,7 @@ void WMOGroupRender::initRenderBatches()
 
   QSettings settings;
   bool modern_features = settings.value("modern_features", false).toBool();
+  bool log_wmo_terrain_blend = settings.value("log_wmo_terrain_blend", false).toBool();
 
   std::size_t batch_counter = 0;
   for (auto& batch : _wmo_group->_batches)
@@ -401,6 +405,12 @@ void WMOGroupRender::initRenderBatches()
       flags |= WMORenderBatchFlags::eWMOBatch_Unfogged;
     }
 
+    // wowdev WMO MOMT shader 8 TwoLayerTerrain — first layer uses terrain-style world XZ mapping
+    if (mat.shader == 8 && _wmo_group->header.flags.has_two_motv)
+    {
+      flags |= WMORenderBatchFlags::eWMOBatch_GroundProjectTex;
+    }
+
     std::uint32_t alpha_test;
 
     switch (mat.blend_mode)
@@ -422,6 +432,37 @@ void WMOGroupRender::initRenderBatches()
     }
 
     _render_batches[batch_counter] = WMORenderBatch{flags, mat.shader, 0, 0, 0, 0, alpha_test, 0};
+
+    if (log_wmo_terrain_blend && mat.shader == 16)
+    {
+      float min_a = 1.f;
+      float max_a = 0.f;
+      bool have_alpha = false;
+
+      if (!_wmo_group->_vertex_colors.empty()
+          && batch.vertex_end >= batch.vertex_start
+          && batch.vertex_end < _wmo_group->_vertex_colors.size())
+      {
+        for (std::size_t v = batch.vertex_start; v <= batch.vertex_end; ++v)
+        {
+          float const a = _wmo_group->_vertex_colors[v].w;
+          min_a = std::min(min_a, a);
+          max_a = std::max(max_a, a);
+          have_alpha = true;
+        }
+      }
+
+      LogDebug
+          << "[WMO terrain blend] shader=16"
+          << " wmo=\"" << _wmo_group->wmo->file_key().stringRepr() << "\""
+          << " group=\"" << _wmo_group->name << "\""
+          << " batch=" << batch_counter
+          << " material=" << material_to_use
+          << " mocv=" << int(_wmo_group->header.flags.has_vertex_color)
+          << " mocv2=" << int(_wmo_group->header.flags.use_mocv2_for_texture_blending)
+          << " alpha=" << (have_alpha ? (std::to_string(min_a) + ".." + std::to_string(max_a)) : std::string("<none>"))
+          << std::endl;
+    }
 
     batch_counter++;
   }

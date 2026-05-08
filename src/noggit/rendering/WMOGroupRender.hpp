@@ -38,7 +38,9 @@ namespace Noggit::Rendering
     eWMOBatch_HasMOCV = 0x2,
     eWMOBatch_Unlit = 0x4,
     eWMOBatch_Unfogged = 0x8,
-    eWMOBatch_Collision = 0x10
+    eWMOBatch_Collision = 0x10,
+    //! TwoLayerTerrain (shader 8): primary UV from world XZ (see wmo_vert.glsl).
+    eWMOBatch_GroundProjectTex = 0x20,
   };
 
   struct WMOCombinedDrawCall

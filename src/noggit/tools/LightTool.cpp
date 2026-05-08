@@ -23,7 +23,7 @@ namespace Noggit
 
     char const* LightTool::name() const
     {
-        return "Lightning Editor";
+        return "AreaLight Editor";
     }
 
     editing_mode LightTool::editingMode() const

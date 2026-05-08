@@ -7,16 +7,18 @@
 #include <QWidget>
 
 class MapView;
+namespace Noggit { class ChunkTool; }
 
 namespace Noggit::Ui::Tools::ChunkManipulator
 {
   class ChunkManipulatorPanel : public QWidget
   {
   public:
-    ChunkManipulatorPanel(MapView* map_view, QWidget* parent = nullptr);
+    ChunkManipulatorPanel(MapView* map_view, Noggit::ChunkTool* tool, QWidget* parent = nullptr);
 
   private:
     MapView* _map_view;
+    Noggit::ChunkTool* _tool;
 
   };
 

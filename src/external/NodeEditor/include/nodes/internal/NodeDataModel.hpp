@@ -192,6 +192,6 @@ private:
   NodeStyle _nodeStyle;
 
 protected:
-  Node* _node;
+  Node* _node = nullptr;
 };
 }

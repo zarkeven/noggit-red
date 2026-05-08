@@ -9,6 +9,7 @@
 #include <noggit/world_tile_update_queue.hpp>
 #include <noggit/world_model_instances_storage.hpp>
 #include <noggit/ContextObject.hpp>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -20,6 +21,11 @@ namespace Noggit
 {
   struct object_paste_params;
   struct VertexSelectionCache;
+}
+
+namespace Noggit::Ui::Tools::ChunkManipulator
+{
+  class ChunkClipboard;
 }
 
 namespace BlizzardDatabaseLib::Structures
@@ -45,12 +51,65 @@ class World
 {
   friend class Noggit::Rendering::WorldRender;
 
+public:
+  enum class MapLightType : std::uint8_t
+  {
+    Point = 0,
+    Spot = 1,
+  };
+
+  struct PointLight
+  {
+    std::uint32_t id = 0;
+    glm::vec3 position;
+    glm::vec3 color;
+    float attenuation_start = 0.f;
+    float attenuation_end = 0.f;
+    float intensity = 1.f;
+    std::uint16_t tile_x = 0;
+    std::uint16_t tile_y = 0;
+
+    MapLightType light_type = MapLightType::Point;
+    //! Euler radians (MSLT / MPL rotation); used for spot axis and point cookie viz.
+    glm::vec3 rotation_radians { 0.f };
+    //! MSLT `spotlightRadius` (world units along cone axis).
+    float spotlight_radius = 15.f;
+    //! Editor-only: ImGuizmo scale for spots (defaults to 1). Effective cone radius uses `spotlight_radius * max(scale)`.
+    glm::vec3 spot_gizmo_scale { 1.f, 1.f, 1.f };
+    float inner_angle = 0.5235987755982989f;  // ~30°
+    float outer_angle = 0.7853981633974483f;  // ~45°
+
+    std::int16_t mlta_index = -1;
+    //! Legacy / unused at runtime; cookie is @ref cookie_file_data_id. Kept for clipboard compat.
+    std::int16_t texture_index = -1;
+    //! Light cookie texture FileDataID for MPL3/MSLT `MTEX`; 0 = none.
+    std::uint32_t cookie_file_data_id = 0;
+    //! When true, flicker comes from MLTA row fields below (loaded from `_lgt` MLTA chunk).
+    bool mlta_active = false;
+    float mlta_amplitude = 0.f;
+    float mlta_frequency = 0.f;
+    int mlta_function = 0;
+
+    std::uint16_t mpl3_flags = 0;
+    float mpl3_scale = 0.5f;
+
+    // Matches MapUpconverter LightInfo.json "FlickerMode": 0 off, 1 sine, 2 noise, 3 harsh step.
+    // Intensity/speed follow the same 0..100 / arbitrary speed semantics as the converter docs.
+    std::uint8_t flicker_mode = 0;
+    float flicker_intensity = 25.f;
+    float flicker_speed = 15.f;
+    std::uint32_t flicker_seed = 1u;
+  };
+
 protected:
   std::unordered_set<unsigned int> selected_uids; // fast lookup
   std::vector<selection_type> _current_selection;
   // std::unordered_map<std::string, std::vector<ModelInstance*>> _models_by_filename;
   Noggit::world_model_instances_storage _model_instance_storage;
   Noggit::world_tile_update_queue _tile_update_queue;
+
+  std::vector<PointLight> _point_lights;
+  std::optional<std::size_t> _selected_point_light_index;
 public:
   std::vector<selection_group> _selection_groups;
 
@@ -71,6 +130,7 @@ public:
   std::string basename;
 
   explicit World(const std::string& name, int map_id, Noggit::NoggitRenderContext context, bool create_empty = false);
+  ~World();
 
   void LoadSavedSelectionGroups();
 
@@ -110,6 +170,26 @@ protected:
 public:
 
   Noggit::Rendering::WorldRender* renderer();
+
+  [[nodiscard]] Noggit::Ui::Tools::ChunkManipulator::ChunkClipboard* chunkClipboard() const noexcept
+  {
+    return _chunk_clipboard.get();
+  }
+
+  std::vector<PointLight> const& pointLights() const { return _point_lights; }
+  std::vector<PointLight>& pointLights() { return _point_lights; }
+
+  std::optional<std::size_t> selectedPointLightIndex() const { return _selected_point_light_index; }
+  void selectedPointLightIndex(std::optional<std::size_t> index) { _selected_point_light_index = index; }
+
+  //! ADT tile indices (0..63) and MCNK indices (0..15) for a world position.
+  static void worldPosToAdtMcnk(glm::vec3 const& pos, std::uint16_t& out_adt_x, std::uint16_t& out_adt_z, int& out_mcnk_x, int& out_mcnk_z);
+
+  [[nodiscard]] std::size_t pointLightsInAdtCount(std::uint16_t adt_x, std::uint16_t adt_z, std::optional<std::size_t> exclude_index = std::nullopt) const;
+  [[nodiscard]] std::uint32_t effectivePointLightCapForAdt(std::uint16_t adt_x, std::uint16_t adt_z) const;
+
+  //! Non-empty if any ADT has more MPL2 lights than its NGPL cap (extras may be ignored by the client).
+  [[nodiscard]] std::string pointLightMpl2SaveOverflowReport() const;
 
   void update_selection_pivot();
   std::optional<glm::vec3> const& multi_select_pivot() const;
@@ -151,6 +231,8 @@ public:
   void set_selected_models_pos(glm::vec3 const& pos, bool change_height = true);
   void set_model_pos(selection_type entry, glm::vec3 const& pos, bool change_height = true);
   void rotate_selected_models(math::degrees rx, math::degrees ry, math::degrees rz, bool use_pivot);
+  //! World-up yaw + camera-right pitch (Ctrl+Alt+RMB), quaternion path; \a view_right from MapView tick \c dirRight.
+  void rotate_selected_models_view_screen(glm::vec3 view_right, float yaw, float pitch, bool use_pivot);
   void rotate_selected_models_randomly(float minX, float maxX, float minY, float maxY, float minZ, float maxZ);
   void set_selected_models_rotation(math::degrees rx, math::degrees ry, math::degrees rz);
 
@@ -212,10 +294,14 @@ public:
   std::vector<selected_object_type> getObjectsInRange(glm::vec3 const& pos, float radius, bool ignore_height = true, bool iter_wmos_ = true, bool iter_m2s = true);
   void changeShader(glm::vec3 const& pos, glm::vec4 const& color, float change, float radius, bool editMode);
   void stampShader(glm::vec3 const& pos, glm::vec4 const& color, float change, float radius, bool editMode, QImage* img, bool paint, bool use_image_colors);
+  void replaceShader(glm::vec3 const& pos, glm::vec4 const& color, float radius, QImage* img, bool use_image_mask, bool use_image_colors);
   glm::vec3 pickShaderColor(glm::vec3 const& pos);
   void flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
+  void flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
+  void applyTerrainRamp(glm::vec3 const& A, glm::vec3 const& B, float radius, float cap_len, float blend_strength);
   std::vector<std::pair<SceneObject*, float>> getObjectsGroundDistance(glm::vec3 const& pos, float radius, bool iter_wmos_, bool iter_m2s);
   void blurTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode);
+  void blurTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode);
   bool paintTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, scoped_blp_texture_reference texture);
   bool stampTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, scoped_blp_texture_reference texture, QImage* img, bool paint);
   bool sprayTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, float spraySize, float sprayPressure, scoped_blp_texture_reference texture);
@@ -432,6 +518,8 @@ protected:
   std::array<std::pair<std::pair<int, int>, MapTile*>, 64 * 64 > _loaded_tiles_buffer;
 
   Noggit::Rendering::WorldRender _renderer;
+
+  std::unique_ptr<Noggit::Ui::Tools::ChunkManipulator::ChunkClipboard> _chunk_clipboard;
 
   // Debug metrics
   unsigned _n_loaded_tiles = 0;

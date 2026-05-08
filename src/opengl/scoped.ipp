@@ -106,7 +106,7 @@ namespace OpenGL
                      //: type == GL_SHADER_STORAGE_BUFFER ? GL_SHADER_STORAGE_BUFFER_BINDING
                      : type == GL_TRANSFORM_FEEDBACK_BUFFER ? GL_TRANSFORM_FEEDBACK_BUFFER_BINDING
                      : type == GL_UNIFORM_BUFFER ? GL_UNIFORM_BUFFER_BINDING
-                     : type == GL_TEXTURE_BUFFER ? GL_TEXTURE_BINDING_BUFFER
+                     : type == GL_TEXTURE_BUFFER ? GL_TEXTURE_BUFFER_BINDING
                      : throw std::logic_error ("bad bind target")
                      , reinterpret_cast<GLint*> (&_old)
                      );
@@ -139,8 +139,11 @@ namespace OpenGL
     template<std::size_t count>
     void deferred_upload_buffers<count>::unload()
     {
-      gl.deleteBuffers(count, _buffers);
-      _buffer_generated = false;
+      if (_buffer_generated)
+      {
+        gl.deleteBuffers(count, _buffers);
+        _buffer_generated = false;
+      }
     }
 
     template<std::size_t count>
@@ -186,8 +189,11 @@ namespace OpenGL
     template<std::size_t count>
     void deferred_upload_vertex_arrays<count>::unload()
     {
-      gl.deleteVertexArray(count, _vertex_arrays);
-      _buffer_generated = false;
+      if (_buffer_generated)
+      {
+        gl.deleteVertexArray(count, _vertex_arrays);
+        _buffer_generated = false;
+      }
     }
 
     template<std::size_t count>

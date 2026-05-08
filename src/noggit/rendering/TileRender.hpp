@@ -5,7 +5,9 @@
 
 #include <noggit/rendering/BaseRender.hpp>
 #include <opengl/scoped.hpp>
+#include <cstdint>
 #include <array>
+#include <vector>
 
 namespace OpenGL::Scoped
 {
@@ -47,6 +49,17 @@ namespace Noggit::Rendering
     void setChunkGroundEffectColor(unsigned int chunkid, glm::vec3 color);
 
     void initChunkData(MapChunk* chunk);
+
+    /// Chunk Manipulator overlays (live, editor-only; does not persist).
+    /// \p selected_mask and \p preview_mask are indexed by chunk instance id (x*16 + z).
+    void setChunkManipulatorOverlays(std::array<std::uint8_t, 256> const& selected_mask,
+                                     std::array<std::uint8_t, 256> const& preview_mask);
+    void clearChunkManipulatorOverlays();
+
+    /// Upload a per-tile preview heightmap (height + placeholder normals) for specific chunk instances.
+    /// Expects each row to be RGBA float data of length `mapbufsize * 4` (mapbufsize is MCNK vertex count, 145).
+    void updateChunkManipulatorPreviewHeightmap(std::vector<std::pair<int, std::vector<float>>> const& rows);
+    void drawChunkManipulatorPreview(OpenGL::Scoped::use_program& mcnk_shader, float alpha);
 
     void setChunkDetaildoodadsExclusionData(MapChunk* chunk);
     void setChunkGroundEffectActiveData(MapChunk* chunk);
@@ -117,6 +130,13 @@ namespace Noggit::Rendering
 
     GLuint const& _chunk_instance_data_ubo = _buffers[0];
     OpenGL::ChunkInstanceDataUniformBlock _chunk_instance_data[256];
+
+    std::array<std::uint8_t, 256> _chunk_manip_selected{};
+    std::array<std::uint8_t, 256> _chunk_manip_preview{};
+    bool _chunk_manip_dirty = false;
+
+    GLuint _chunk_manip_preview_height_tex = 0;
+    bool _chunk_manip_preview_height_ready = false;
 
   };
 }

@@ -19,9 +19,23 @@ layout (std140) uniform lighting
   vec4 RiverColorDark;
 };
 
+layout (std140) uniform point_lights
+{
+  ivec4 meta; // x: count, y: enabled
+  vec4 position_radius[256];
+  vec4 color_intensity[256];
+  vec4 attenuation[256];
+  vec4 spot_dir_cos_inner[256];
+  vec4 spot_cos_outer_kind[256];
+};
+
 uniform vec3 camera;
 uniform sampler2DArray texture_samplers[15];
 uniform vec3 ambient_color;
+uniform sampler2D terrain_blend_color;
+uniform vec2 terrain_blend_origin_xz;
+uniform float terrain_blend_inv_size;
+uniform int wmo_terrain_blend_enabled;
 
 in vec3 f_position;
 in vec3 f_normal;
@@ -30,7 +44,7 @@ in vec2 f_texcoord_2;
 in vec4 f_vertex_color;
 
 flat in uint flags;
-flat in uint shader;
+flat in uint wmo_batch_shader;
 flat in uint tex_array0;
 flat in uint tex_array1;
 flat in uint tex0;
@@ -143,6 +157,37 @@ vec3 apply_lighting(vec3 material)
 
     currColor = mix(groundColor, skyColor, 0.5 + (0.5 * nDotL));
     lDiffuse = diffuse_term * nDotL;
+
+    if (meta.y != 0)
+    {
+      vec3 N = normalize(f_normal);
+      for (int i = 0; i < meta.x; ++i)
+      {
+        vec3 L = position_radius[i].xyz - f_position;
+        float dist = length(L);
+        float radius = position_radius[i].w;
+        float start = max(0.0, attenuation[i].x);
+        float end = attenuation[i].y > 0.0 ? attenuation[i].y : radius;
+        if (dist > end)
+          continue;
+
+        float att = (end > start) ? (1.0 - smoothstep(start, end, dist)) : 1.0;
+        vec3 ldir = normalize(L);
+        float spot_mask = 1.0;
+        if (spot_cos_outer_kind[i].y > 0.5)
+        {
+          vec3 forward = spot_dir_cos_inner[i].xyz;
+          float cosTheta = dot(forward, -ldir);
+          float ci = spot_dir_cos_inner[i].w;
+          float co = spot_cos_outer_kind[i].x;
+          if (cosTheta < co)
+            continue;
+          spot_mask = smoothstep(co, ci, cosTheta);
+        }
+        float ndotl2 = max(dot(N, ldir), 0.0);
+        lDiffuse += color_intensity[i].xyz * (color_intensity[i].w * att * ndotl2 * spot_mask);
+      }
+    }
   }
   else
   {
@@ -179,24 +224,49 @@ void main()
 
 
   // see: https://github.com/Deamon87/WebWowViewerCpp/blob/master/wowViewerLib/src/glsl/wmoShader.glsl
-  if(shader == 3) // Env
+  if(wmo_batch_shader == 3) // Env
   {
     vec3 env = tex_2.rgb * tex.rgb;
     out_color = vec4(apply_lighting(tex.rgb) + env, 1.);
   }
-  else if(shader == 5) // EnvMetal
+  else if(wmo_batch_shader == 5) // EnvMetal
   {
     vec3 env = tex_2.rgb * tex.rgb * tex.a;
     out_color = vec4(apply_lighting(tex.rgb) + env, 1.);
   }
-  else if(shader == 6) // TwoLayerDiffuse
+  else if(wmo_batch_shader == 6) // TwoLayerDiffuse
   {
     vec3 layer2 = mix(tex.rgb, tex_2.rgb, tex_2.a);
     out_color = vec4(apply_lighting(mix(layer2, tex.rgb, vertex_color.a)), 1.);
   }
-  else if (shader == 21 || shader == 23)
+  else if(wmo_batch_shader == 8) // TwoLayerTerrain (MapObjTwoLayerTerrain; vertex projects tex layer 1 onto world XZ)
+  {
+    vec3 layer2 = mix(tex.rgb, tex_2.rgb, tex_2.a);
+    out_color = vec4(apply_lighting(mix(layer2, tex.rgb, vertex_color.a)), 1.);
+  }
+  else if (wmo_batch_shader == 21 || wmo_batch_shader == 23)
   {
     out_color = vec4(apply_lighting(tex_2.rgb), 1.);
+  }
+  else if (wmo_batch_shader == 16) // DiffuseTerrain (blend WMO with terrain)
+  {
+    vec3 wmo_albedo = tex.rgb;
+
+    // Blend mask from vertex color alpha (often sourced from MOCV2 alpha).
+    float blend = clamp(vertex_color.a, 0.0, 1.0);
+
+    if (wmo_terrain_blend_enabled != 0 && terrain_blend_inv_size > 0.0 && blend > 0.0001)
+    {
+      vec2 uv = (f_position.xz - terrain_blend_origin_xz) * terrain_blend_inv_size;
+      // Outside the baked terrain region: fall back to plain WMO.
+      if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
+      {
+        vec3 terrain_albedo = texture(terrain_blend_color, uv).rgb;
+        wmo_albedo = mix(wmo_albedo, terrain_albedo, blend);
+      }
+    }
+
+    out_color = vec4(apply_lighting(wmo_albedo), 1.);
   }
   else // default shader, used for shader 0,1,2,4 (Diffuse, Specular, Metal, Opaque)
   {

@@ -97,7 +97,7 @@ vec2 rot2(vec2 p, float degree)
 void main()
 {
   // lava || slime
-  if(type == 2 || type == 3)
+  if(type == 2u || type == 3u)
   {
     out_color = get_tex_color(tex_coord_ + vec2(anim_uv.x*animtime / 2880.0, anim_uv.y*animtime / 2880.0), tex_array, tex_frame);
   }
@@ -106,7 +106,7 @@ void main()
     vec2 uv = rot2(tex_coord_ * anim_uv.x, anim_uv.y);
 
     vec4 texel = get_tex_color(uv, tex_array, tex_frame);
-    vec4 lerp = (type == 1)
+    vec4 lerp = (type == 1u)
               ? mix (OceanColorLight, OceanColorDark, depth_)
               : mix (RiverColorLight, RiverColorDark, depth_)
               ;

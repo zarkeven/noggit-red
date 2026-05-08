@@ -146,7 +146,9 @@ namespace Noggit::Rendering::Primitives
   {
   public:
       void initSpline();
-      void draw(glm::mat4x4 const& mvp, std::vector<glm::vec3> const& points, glm::vec4 const& color, bool spline);
+      //! \param draw_mode OpenGL primitive, e.g. \c GL_LINE_STRIP (default) or \c GL_LINES for independent segments.
+      void draw(glm::mat4x4 const& mvp, std::vector<glm::vec3> const& points, glm::vec4 const& color, bool spline,
+                unsigned int draw_mode = 0x0003 /* GL_LINE_STRIP */);
       void unload();
 
   private:

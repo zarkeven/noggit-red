@@ -6,17 +6,76 @@
 #include <noggit/ui/tools/ActionHistoryNavigator/ActionHistoryNavigator.hpp>
 #include <noggit/ui/tools/ViewToolbar/Ui/ViewToolbar.hpp>
 #include <noggit/World.h>
+#include <algorithm>
 
 #include <QCheckBox>
 #include <QDialog>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainter>
+#include <QPixmap>
+#include <QtGui/QIconEngine>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QtCore/QSettings>
 
 using namespace Noggit::Ui;
 using namespace Noggit::Ui::Tools::ViewToolbar::Ui;
+
+namespace
+{
+  /// Matches FontAwesomeIconEngine / FontNoggitIconEngine: checked actions use WindowText (toolbar highlight).
+  class TextureLayerOverlayIconEngine final : public QIconEngine
+  {
+  public:
+    QIconEngine* clone() const override
+    {
+      return new TextureLayerOverlayIconEngine();
+    }
+
+    void paint(QPainter* painter, QRect const& rect, QIcon::Mode mode, QIcon::State state) override
+    {
+      painter->save();
+      painter->setRenderHint(QPainter::Antialiasing, true);
+
+      auto* temp_btn = new FontAwesomeButtonStyle();
+      temp_btn->ensurePolished();
+      QColor const pen_color =
+        (state == QIcon::On)
+          ? temp_btn->palette().color(QPalette::WindowText)
+          : temp_btn->palette().color(QPalette::Disabled, QPalette::WindowText);
+      delete temp_btn;
+
+      int const inset = qMax(2, rect.width() / 11);
+      painter->setPen(QPen(pen_color, 1.5));
+      painter->setBrush(Qt::NoBrush);
+      painter->drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset), 2, 2);
+
+      QRect const inner = rect.adjusted(rect.width() / 4, rect.height() / 4,
+                                          -rect.width() / 4, -rect.height() / 4);
+      static FontAwesomeIcon const eye_icon(FontAwesome::eye);
+      eye_icon.paint(painter, inner, Qt::AlignCenter, mode, state);
+
+      painter->restore();
+    }
+
+    QPixmap pixmap(QSize const& size, QIcon::Mode mode, QIcon::State state) override
+    {
+      QPixmap pm(size);
+      pm.fill(Qt::transparent);
+      QPainter p(&pm);
+      paint(&p, QRect(QPoint(0, 0), size), mode, state);
+      return pm;
+    }
+  };
+
+  QIcon texture_layer_overlay_tool_icon()
+  {
+    static QIcon const cached(new TextureLayerOverlayIconEngine());
+    return cached;
+  }
+}
 
 class SliderAction : public QWidgetAction
 {
@@ -158,7 +217,9 @@ ViewToolbar::ViewToolbar(MapView *mapView, ViewToolbar *tb)
     add_tool_icon(mapView, &mapView->_draw_contour, tr("Contours"), FontNoggit::VISIBILITY_CONTOURS, tb);
     add_tool_icon(mapView, &mapView->_draw_climb, tr("Climb"), FontNoggit::VISIBILITY_CLIMB, tb, tb->_climb_secondary_tool);
     add_tool_icon(mapView, &mapView->_draw_vertex_color, tr("Vertex Color"), FontNoggit::VISIBILITY_VERTEX_PAINTER, tb);
+    add_tool_icon(mapView, &mapView->_draw_tileset, tr("Tileset"), FontNoggit::TOOL_TEXTURE_PAINT, tb);
     add_tool_icon(mapView, &mapView->_draw_baked_shadows, tr("Baked Shadows"), FontNoggit::VISIBILITY_BAKED_SHADOWS, tb); // TODO : better icon
+    add_tool_icon(mapView, &mapView->_draw_texture_layer_count_overlay, tr("Texture layer count per chunk"), texture_layer_overlay_tool_icon(), tb);
 
     addSeparator();
 
@@ -166,6 +227,8 @@ ViewToolbar::ViewToolbar(MapView *mapView, ViewToolbar *tb)
     add_tool_icon(mapView, &mapView->_draw_fog, tr("Fog"), FontNoggit::VISIBILITY_FOG, tb);
     add_tool_icon(mapView, &mapView->_draw_mfbo, tr("Flight bounds\nCurrently doesn't work !"), FontNoggit::VISIBILITY_FLIGHT_BOUNDS, tb);
     // add_tool_icon(mapView, &mapView->_draw_lights_zones, tr("Light zones"), FontNoggit::VISIBILITY_LIGHT, tb);
+    add_tool_icon(mapView, &mapView->_draw_point_lights, tr("Point/Spot Lights"), FontNoggit::VISIBILITY_LIGHT, tb);
+    add_tool_icon(mapView, &mapView->_draw_point_light_spheres, tr("Point/Spot Light Visualization"), FontAwesomeIcon(FontAwesome::circle), tb);
     addSeparator();
 
     // Hole lines always on
@@ -204,7 +267,6 @@ ViewToolbar::ViewToolbar(MapView *mapView, ViewToolbar *tb)
     undo_stack_btn->setIcon(FontAwesomeIcon(FontAwesome::undo));
     undo_stack_btn->setToolTip("History");
     addWidget(undo_stack_btn);
-
 
     auto undo_stack_popup = new QDialog(this);
     undo_stack_popup->setMinimumWidth(160);
@@ -395,10 +457,9 @@ void ViewToolbar::setCurrentMode(MapView* mapView, editing_mode mode)
         if (_flatten_secondary_tool.size() > 0)
         {
             setupWidget(_flatten_secondary_tool);
-            if (!use_classic_ui)
-                mapView->getLeftSecondaryToolbar()->show();
-            else
-                mapView->getLeftSecondaryToolbar()->hide();
+            // Raise/Lower are shown on the viewport overlay (same row as the object gizmo bar).
+            // Hiding this strip avoids duplicate controls and fixes "classic UI" where these were hidden entirely.
+            mapView->getLeftSecondaryToolbar()->hide();
         }
         break;
     case editing_mode::paint:
@@ -477,6 +538,38 @@ void ViewToolbar::add_tool_icon(MapView* mapView,
     action->setChecked(view_state->get());
 }
 
+void ViewToolbar::add_tool_icon(MapView* mapView,
+                                Noggit::BoolToggleProperty* view_state,
+                                const QString& name,
+                                const QIcon& icon,
+                                ViewToolbar* sec_tool_bar,
+                                QVector<QWidgetAction*> sec_action_bar)
+{
+    auto action = addAction(icon, name);
+    connect (action, &QAction::triggered, [action, view_state] () {
+        action->setChecked(!view_state->get());
+        view_state->set(!view_state->get());
+    });
+
+    connect (action, &QAction::hovered, [mapView, sec_tool_bar, sec_action_bar] () {
+        sec_tool_bar->clear();
+        mapView->getSecondaryToolBar()->hide();
+
+        if (sec_action_bar.size() > 0)
+        {
+            sec_tool_bar->setupWidget(sec_action_bar);
+            mapView->getSecondaryToolBar()->show();
+        }
+    });
+
+    connect (view_state, &Noggit::BoolToggleProperty::changed, [action, view_state] () {
+        action->setChecked(view_state->get());
+    });
+
+    action->setCheckable(true);
+    action->setChecked(view_state->get());
+}
+
 void ViewToolbar::setupWidget(QVector<QWidgetAction *> _to_setup, bool ignoreSeparator)
 {
     clear();
@@ -497,11 +590,57 @@ void ViewToolbar::nextFlattenMode()
     CheckBoxAction* _raise_option = static_cast<SubToolBarAction*>(_flatten_secondary_tool[0])->GET<CheckBoxAction*>(raise_index);
     CheckBoxAction* _lower_option = static_cast<SubToolBarAction*>(_flatten_secondary_tool[0])->GET<CheckBoxAction*>(lower_index);
 
-    QSignalBlocker const raise_lock(_raise_option);
-    QSignalBlocker const lower_lock(_lower_option);
+    QSignalBlocker const raise_lock(_raise_option->checkbox());
+    QSignalBlocker const lower_lock(_lower_option->checkbox());
 
-    _raise_option->setChecked(true);
-    _lower_option->setChecked(true);
+    _raise_option->checkbox()->setChecked(true);
+    _lower_option->checkbox()->setChecked(true);
+    emit updateStateRaise(true);
+    emit updateStateLower(true);
+}
+
+bool ViewToolbar::flattenRaiseChecked()
+{
+  if (_flatten_secondary_tool.empty() || raise_index < 0)
+    return true;
+  auto* sub = static_cast<SubToolBarAction*>(_flatten_secondary_tool[0]);
+  auto* a = sub->GET<CheckBoxAction*>(raise_index);
+  return a && a->checkbox()->isChecked();
+}
+
+bool ViewToolbar::flattenLowerChecked()
+{
+  if (_flatten_secondary_tool.empty() || lower_index < 0)
+    return true;
+  auto* sub = static_cast<SubToolBarAction*>(_flatten_secondary_tool[0]);
+  auto* a = sub->GET<CheckBoxAction*>(lower_index);
+  return a && a->checkbox()->isChecked();
+}
+
+void ViewToolbar::setFlattenRaiseChecked(bool v)
+{
+  if (_flatten_secondary_tool.empty() || raise_index < 0)
+    return;
+  auto* sub = static_cast<SubToolBarAction*>(_flatten_secondary_tool[0]);
+  auto* a = sub->GET<CheckBoxAction*>(raise_index);
+  if (!a)
+    return;
+  QSignalBlocker const b(a->checkbox());
+  a->checkbox()->setChecked(v);
+  emit updateStateRaise(v);
+}
+
+void ViewToolbar::setFlattenLowerChecked(bool v)
+{
+  if (_flatten_secondary_tool.empty() || lower_index < 0)
+    return;
+  auto* sub = static_cast<SubToolBarAction*>(_flatten_secondary_tool[0]);
+  auto* a = sub->GET<CheckBoxAction*>(lower_index);
+  if (!a)
+    return;
+  QSignalBlocker const b(a->checkbox());
+  a->checkbox()->setChecked(v);
+  emit updateStateLower(v);
 }
 
 bool ViewToolbar::drawOnlyInsideSphereLight()

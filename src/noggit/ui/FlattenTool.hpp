@@ -79,6 +79,7 @@ namespace Noggit
       QButtonGroup* _type_button_box;
       Noggit::Ui::Tools::UiCommon::ExtendedSlider* _radius_slider;
       Noggit::Ui::Tools::UiCommon::ExtendedSlider* _speed_slider;
+      QCheckBox* _fast_blur_chkbox = nullptr;
 
       QGroupBox* _angle_group;
       QSlider* _angle_slider;

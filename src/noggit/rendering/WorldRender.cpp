@@ -1,6 +1,9 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include "WorldRender.hpp"
+#include <noggit/errorHandling.h>
+#include <noggit/Log.h>
+#include <noggit/rendering/PointLightFlicker.hpp>
 #include <external/PNG2BLP/Png2Blp.h>
 #include <external/tracy/Tracy.hpp>
 #include <math/frustum.hpp>
@@ -16,19 +19,117 @@
 #include <noggit/ModelInstance.h>
 #include <noggit/project/CurrentProject.hpp>
 #include <noggit/World.h>
+#include <noggit/ui/tools/ChunkManipulator/ChunkClipboard.hpp>
 
 #include <noggit/ui/MinimapCreator.hpp>
 
+#include <opengl/scoped.hpp>
 #include <opengl/shader.hpp>
+#include <opengl/types.hpp>
 
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QListWidget>
+#include <QOpenGLContext>
 #include <QOpenGLFramebufferObjectFormat>
+#include <QOpenGLFramebufferObject>
 #include <QSettings>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <chrono>
+#include <vector>
+
+#include <glm/gtc/constants.hpp>
+#include <glm/gtx/euler_angles.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+namespace
+{
+  struct MccvVizInstance
+  {
+    glm::vec4 pos;
+    glm::vec4 color;
+  };
+
+  static constexpr std::size_t kMaxMccvVizInstances = 12288u;
+  static constexpr float kMccvVizBallScale = 6.f;
+
+  // Saves/restores GL_COLOR_WRITEMASK for a depth-only prepass.
+  struct scoped_color_mask
+  {
+    GLboolean prev[4]{};
+
+    scoped_color_mask (GLboolean r, GLboolean g, GLboolean b, GLboolean a)
+    {
+      gl.getBooleanv (GL_COLOR_WRITEMASK, prev);
+      gl.colorMask (r, g, b, a);
+    }
+
+    ~scoped_color_mask()
+    {
+      gl.colorMask (prev[0], prev[1], prev[2], prev[3]);
+    }
+
+    scoped_color_mask (scoped_color_mask const&) = delete;
+    scoped_color_mask& operator= (scoped_color_mask const&) = delete;
+  };
+
+  glm::vec3 map_light_forward (World::PointLight const& light)
+  {
+    glm::mat4 const R = glm::eulerAngleXYZ (light.rotation_radians.x
+                                           , light.rotation_radians.y
+                                           , light.rotation_radians.z);
+    return glm::normalize (glm::vec3 (R * glm::vec4 (0.f, 0.f, -1.f, 0.f)));
+  }
+
+  float spot_effective_cone_length (World::PointLight const& light)
+  {
+    float const mx = std::max ({ light.spot_gizmo_scale.x, light.spot_gizmo_scale.y, light.spot_gizmo_scale.z });
+    return std::max (light.spotlight_radius * mx, 0.5f);
+  }
+
+  void append_light_cone_lines (std::vector<glm::vec3>& out
+                               , glm::vec3 const& apex
+                               , glm::vec3 const& forward
+                               , float len
+                               , float outer_angle_rad
+                               , int circle_segments)
+  {
+    if (len < 1e-3f || outer_angle_rad < 1e-4f)
+      return;
+
+    glm::vec3 const f = glm::normalize (forward);
+    glm::vec3 up = std::abs (f.y) < 0.99f ? glm::vec3 (0.f, 1.f, 0.f) : glm::vec3 (1.f, 0.f, 0.f);
+    glm::vec3 const right = glm::normalize (glm::cross (up, f));
+    glm::vec3 const up_orth = glm::normalize (glm::cross (f, right));
+    float const r = len * std::tan (outer_angle_rad);
+    glm::vec3 const base_center = apex + f * len;
+
+    out.push_back (apex);
+    out.push_back (base_center);
+
+    for (int i = 0; i < circle_segments; ++i)
+    {
+      float const t0 = float(i) / float(circle_segments) * glm::two_pi<float>();
+      float const t1 = float(i + 1) / float(circle_segments) * glm::two_pi<float>();
+      glm::vec3 const p0 = base_center + right * (std::cos (t0) * r) + up_orth * (std::sin (t0) * r);
+      glm::vec3 const p1 = base_center + right * (std::cos (t1) * r) + up_orth * (std::sin (t1) * r);
+      out.push_back (p0);
+      out.push_back (p1);
+    }
+
+    for (int k = 0; k < 4; ++k)
+    {
+      float const t = float(k) / 4.f * glm::two_pi<float>();
+      glm::vec3 const p = base_center + right * (std::cos (t) * r) + up_orth * (std::sin (t) * r);
+      out.push_back (apex);
+      out.push_back (p);
+    }
+  }
+}
 
 using namespace Noggit::Rendering;
 
@@ -41,6 +142,173 @@ WorldRender::WorldRender(World* world)
 , directional_lightning(world->_settings->value("directional_lightning", true).toBool())
 , local_lightning(world->_settings->value("local_lightning", true).toBool())
 {
+}
+
+void WorldRender::upload()
+{
+  ZoneScoped;
+
+  if (_world->mapIndex.hasAGlobalWMO())
+  {
+    WMOInstance inst(_world->mWmoFilename, &_world->mWmoEntry, _world->_context);
+    _world->_model_instance_storage.add_wmo_instance(std::move(inst), false, false);
+  }
+  else
+  {
+    _horizon_render = std::make_unique<Noggit::map_horizon::render>(_world->horizon);
+  }
+
+  _skies = std::make_unique<Skies>(_world->mapIndex._map_id, _world->_context);
+  _outdoor_lighting = std::make_unique<OutdoorLighting>();
+
+  _buffers.upload();
+  _vertex_arrays.upload();
+
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _lighting_ubo);
+  gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::LightingUniformBlock), NULL, GL_DYNAMIC_DRAW);
+  gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::LIGHTING, _lighting_ubo, 0, sizeof(OpenGL::LightingUniformBlock));
+  gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _point_lights_ubo);
+  gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::PointLightsUniformBlock), NULL, GL_DYNAMIC_DRAW);
+  gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::POINT_LIGHTS, _point_lights_ubo, 0, sizeof(OpenGL::PointLightsUniformBlock));
+  gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  _mcnk_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("terrain_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("terrain_fs") },
+    });
+
+  {
+    OpenGL::Scoped::use_program mcnk_shader {*_mcnk_program.get()};
+
+    setupChunkBuffers();
+    setupChunkVAO(mcnk_shader);
+
+    mcnk_shader.bind_uniform_block("lighting", 1);
+    mcnk_shader.bind_uniform_block("overlay_params", 2);
+    mcnk_shader.bind_uniform_block("chunk_instances", 3);
+    mcnk_shader.bind_uniform_block("point_lights", 5);
+
+    gl.bindBuffer(GL_UNIFORM_BUFFER, _terrain_params_ubo);
+    gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::TerrainParamsUniformBlock), NULL, GL_STATIC_DRAW);
+    gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::TERRAIN_OVERLAYS, _terrain_params_ubo, 0, sizeof(OpenGL::TerrainParamsUniformBlock));
+    gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    mcnk_shader.uniform("heightmap", 0);
+    mcnk_shader.uniform("mccv", 1);
+    mcnk_shader.uniform("shadowmap", 2);
+    mcnk_shader.uniform("alphamap", 3);
+    mcnk_shader.uniform("stamp_brush", 4);
+    mcnk_shader.uniform("base_instance", 0);
+
+    std::vector<int> samplers {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    mcnk_shader.uniform("textures", samplers);
+  }
+
+  _m2_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("m2_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("m2_fs") },
+    });
+
+  _m2_instanced_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("m2_vs", {"instanced"}) },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("m2_fs") },
+    });
+
+  _m2_box_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("m2_box_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("m2_box_fs") },
+    });
+
+  _m2_ribbons_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("ribbon_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("ribbon_fs") },
+    });
+
+  _m2_particles_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("particle_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("particle_fs") },
+    });
+
+  _mfbo_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("mfbo_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("mfbo_fs") },
+    });
+
+  _wmo_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("wmo_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("wmo_fs") },
+    });
+
+  _liquid_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("liquid_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("liquid_fs") },
+    });
+
+  _occluder_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("occluder_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("occluder_fs") },
+    });
+
+  _liquid_texture_manager.upload();
+
+  setupOccluderBuffers();
+
+  {
+    OpenGL::Scoped::use_program m2_shader {*_m2_program.get()};
+    m2_shader.uniform("bone_matrices", 0);
+    m2_shader.uniform("tex1", 1);
+    m2_shader.uniform("tex2", 2);
+    m2_shader.uniform("terrain_uv_mask", 0);
+    m2_shader.bind_uniform_block("lighting", 1);
+    m2_shader.bind_uniform_block("point_lights", 5);
+  }
+
+  {
+    std::vector<int> samplers {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    OpenGL::Scoped::use_program wmo_program {*_wmo_program.get()};
+    wmo_program.uniform("render_batches_tex", 0);
+    wmo_program.uniform("texture_samplers", samplers);
+    wmo_program.bind_uniform_block("lighting", 1);
+    wmo_program.bind_uniform_block("point_lights", 5);
+  }
+
+  {
+    OpenGL::Scoped::use_program m2_shader_instanced {*_m2_instanced_program.get()};
+    m2_shader_instanced.bind_uniform_block("lighting", 1);
+    m2_shader_instanced.bind_uniform_block("point_lights", 5);
+    m2_shader_instanced.uniform("bone_matrices", 0);
+    m2_shader_instanced.uniform("tex1", 1);
+    m2_shader_instanced.uniform("tex2", 2);
+    m2_shader_instanced.uniform("terrain_uv_mask", 0);
+  }
+
+  {
+    OpenGL::Scoped::use_program liquid_render {*_liquid_program.get()};
+
+    setupLiquidChunkBuffers();
+    setupLiquidChunkVAO(liquid_render);
+
+    static std::vector<int> liquid_samplers {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+
+    liquid_render.bind_uniform_block("lighting", 1);
+    liquid_render.bind_uniform_block("liquid_layers_params", 4);
+    liquid_render.uniform("vertex_data", 0);
+    liquid_render.uniform("texture_samplers", liquid_samplers);
+  }
+
+  setupMccvVizBuffers();
 }
 
 void WorldRender::draw (glm::mat4x4 const& model_view
@@ -71,6 +339,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     bool render_local_lightning = render_settings.editing_mode == editing_mode::light ? true : local_lightning;
     _skies->update_sky_colors(camera_pos, daytime, !render_local_lightning);
     updateLightingUniformBlock(render_settings.draw_fog, camera_pos);
+    updatePointLightsUniformBlock(render_settings.draw_point_lights, camera_pos);
   }
   else
   {
@@ -94,6 +363,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     _terrain_params_ubo_data.draw_noeffectdoodad_overlay = false;
     _terrain_params_ubo_data.draw_only_normals = minimap_render_settings->draw_only_normals;
     _terrain_params_ubo_data.point_normals_up = minimap_render_settings->point_normals_up;
+    _terrain_params_ubo_data.draw_texture_layer_count_overlay = false;
+    _terrain_params_ubo_data.draw_tileset = true;
     _need_terrain_params_ubo_update = true;
   }
 
@@ -112,6 +383,87 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   if (_need_terrain_params_ubo_update)
     updateTerrainParamsUniformBlock();
 
+  // Chunk Manipulator: use the terrain selection overlay to tint selected chunks, and show paste footprint preview.
+  std::map<TileIndex, std::array<std::uint8_t, 256>> chunk_manip_sel_masks;
+  std::map<TileIndex, std::array<std::uint8_t, 256>> chunk_manip_prev_masks;
+  std::map<TileIndex, std::vector<std::pair<int, std::vector<float>>>> chunk_manip_prev_height_rows;
+  bool chunk_manip_has_any_overlay = false;
+  if (render_settings.draw_chunk_manipulator_selection && !render_settings.minimap_render
+      && render_settings.display_mode == display_mode::in_3D)
+  {
+    if (auto* clip = _world->chunkClipboard())
+    {
+      auto const& sel = clip->selectedChunks();
+      for (auto const& idx : sel)
+      {
+        if (!idx.tile_index.is_valid() || idx.x >= 16 || idx.z >= 16)
+          continue;
+        auto& m = chunk_manip_sel_masks[idx.tile_index];
+        m[idx.x * 16u + idx.z] = 1u;
+        chunk_manip_has_any_overlay = true;
+      }
+
+      if (clip->hasCachedCopy())
+      {
+        MapChunk* pivot_chunk = _world->getChunkAt(cursor_pos);
+        if (pivot_chunk)
+        {
+          TileIndex const pivot_ti = pivot_chunk->mt->index;
+          int const pivot_gx = static_cast<int>(pivot_ti.x) * 16 + pivot_chunk->px;
+          int const pivot_gz = static_cast<int>(pivot_ti.z) * 16 + pivot_chunk->py;
+
+          for (auto const& entry : clip->cachedChunks())
+          {
+            auto const& rel = entry.first;
+            auto const& cache = entry.second;
+            int const tgx = pivot_gx + rel.rel_x;
+            int const tgz = pivot_gz + rel.rel_z;
+            if (tgx < 0 || tgz < 0)
+              continue;
+            std::size_t const tile_x = static_cast<std::size_t>(tgx / 16);
+            std::size_t const tile_z = static_cast<std::size_t>(tgz / 16);
+            TileIndex const ti{ tile_x, tile_z };
+            if (!ti.is_valid())
+              continue;
+            unsigned const cx = static_cast<unsigned>(tgx % 16);
+            unsigned const cz = static_cast<unsigned>(tgz % 16);
+            if (cx >= 16 || cz >= 16)
+              continue;
+            auto& m = chunk_manip_prev_masks[ti];
+            m[cx * 16u + cz] = 1u;
+            chunk_manip_has_any_overlay = true;
+
+            if (cache.terrain_height)
+            {
+              // Build a heightmap row (RGBA32F) for this chunk instance:
+              // normal=(0,1,0), height=vertex.y from cached mVertices.
+              std::vector<float> row(static_cast<std::size_t>(mapbufsize) * 4u);
+              float const* src = reinterpret_cast<float const*>(cache.terrain_height->data());
+              float const paste_dy = clip->pasteTerrainHeightOffset();
+              for (int v = 0; v < mapbufsize; ++v)
+              {
+                float const h = src[v * 3 + 1] + paste_dy;
+                row[static_cast<std::size_t>(v) * 4 + 0] = 0.f;
+                row[static_cast<std::size_t>(v) * 4 + 1] = 1.f;
+                row[static_cast<std::size_t>(v) * 4 + 2] = 0.f;
+                row[static_cast<std::size_t>(v) * 4 + 3] = h;
+              }
+              chunk_manip_prev_height_rows[ti].emplace_back(static_cast<int>(cx * 16u + cz), std::move(row));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Enable the shader overlay only when the tool requests it.
+  if (_terrain_params_ubo_data.draw_selection_overlay != (render_settings.draw_chunk_manipulator_selection ? 1 : 0))
+  {
+    _terrain_params_ubo_data.draw_selection_overlay = render_settings.draw_chunk_manipulator_selection ? 1 : 0;
+    _need_terrain_params_ubo_update = true;
+    updateTerrainParamsUniformBlock();
+  }
+
   // Frustum culling
   _world->_n_loaded_tiles = 0;
   unsigned tile_counter = 0;
@@ -124,7 +476,6 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
     if (render_settings.minimap_render)
     {
-      auto& tile_extents = tile->getCombinedExtents();
       tile->calcCamDist(camera_pos);
       tile->renderer()->setFrustumCulled(false);
       tile->renderer()->setObjectsFrustumCullTest(2);
@@ -136,7 +487,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       continue;
     }
 
-    auto& tile_extents = tile->getCombinedExtents();
+    auto const tile_extents = tile->getTerrainWaterCullExtents();
     if (frustum.intersects(tile_extents[1], tile_extents[0]) || tile->getChunkUpdateFlags())
     {
       tile->calcCamDist(camera_pos);
@@ -191,11 +542,14 @@ void WorldRender::draw (glm::mat4x4 const& model_view
               return a.second->camDist() < b.second->camDist();
             });
 
-  // only draw the sky in 3D
-  if(!render_settings.minimap_render && render_settings.display_mode == display_mode::in_3D && render_settings.draw_sky)
+  // only draw the sky in 3D (requires m2 shader program)
+  if(!render_settings.minimap_render && render_settings.display_mode == display_mode::in_3D && render_settings.draw_sky
+     && _m2_program)
   {
     ZoneScopedN("World::draw() : Draw skies");
     OpenGL::Scoped::use_program m2_shader {*_m2_program.get()};
+    m2_shader.uniform("model_view", model_view);
+    m2_shader.uniform("projection", projection);
 
     bool hadSky = false;
 
@@ -269,7 +623,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   _world->_n_rendered_tiles = 0;
   _world->_n_rendered_objects = 0;
 
-  if (render_settings.draw_terrain)
+  if (render_settings.draw_terrain && _mcnk_program)
   {
     ZoneScopedN("World::draw() : Draw terrain");
 
@@ -277,8 +631,13 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
     {
       OpenGL::Scoped::use_program mcnk_shader{ *_mcnk_program.get() };
+      mcnk_shader.uniform("model_view", model_view);
+      mcnk_shader.uniform("projection", projection);
 
       mcnk_shader.uniform("enable_mists_heightmapping", modern_features);
+      mcnk_shader.uniform("albedo_only", 0);
+      mcnk_shader.uniform("preview_pass", 0);
+      mcnk_shader.uniform("preview_alpha", 1.0f);
       mcnk_shader.uniform("camera", glm::vec3(camera_pos.x, camera_pos.y, camera_pos.z));
       mcnk_shader.uniform("animtime", static_cast<int>(_world->animtime));
 
@@ -326,6 +685,27 @@ void WorldRender::draw (glm::mat4x4 const& model_view
         if (num_chunks_uploaded_alphamap > _frame_max_chunk_updates)
           skip_updates = true;
 
+        if (render_settings.draw_chunk_manipulator_selection && !render_settings.minimap_render
+            && render_settings.display_mode == display_mode::in_3D)
+        {
+          auto const it_sel = chunk_manip_sel_masks.find(tile->index);
+          auto const it_prev = chunk_manip_prev_masks.find(tile->index);
+          if (it_sel != chunk_manip_sel_masks.end() || it_prev != chunk_manip_prev_masks.end())
+          {
+            tile->renderer()->setChunkManipulatorOverlays(
+              it_sel != chunk_manip_sel_masks.end() ? it_sel->second : std::array<std::uint8_t, 256>{},
+              it_prev != chunk_manip_prev_masks.end() ? it_prev->second : std::array<std::uint8_t, 256>{});
+          }
+          else
+          {
+            tile->renderer()->clearChunkManipulatorOverlays();
+          }
+        }
+        else
+        {
+          tile->renderer()->clearChunkManipulatorOverlays();
+        }
+
         tile->renderer()->draw(
             mcnk_shader
             , camera_pos
@@ -335,6 +715,21 @@ void WorldRender::draw (glm::mat4x4 const& model_view
               && minimap_render_settings->selected_tiles.at(64 * tile->index.x + tile->index.z)
             , skip_updates
         );
+
+        // Chunk Manipulator live paste preview: draw ghost terrain using cached height rows (50% opacity).
+        if (render_settings.draw_chunk_manipulator_selection && !render_settings.minimap_render
+            && render_settings.display_mode == display_mode::in_3D)
+        {
+          auto it_rows = chunk_manip_prev_height_rows.find(tile->index);
+          if (it_rows != chunk_manip_prev_height_rows.end() && !it_rows->second.empty())
+          {
+            OpenGL::Scoped::bool_setter<GL_BLEND, GL_TRUE> const blend_on;
+            gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            tile->renderer()->updateChunkManipulatorPreviewHeightmap(it_rows->second);
+            tile->renderer()->drawChunkManipulatorPreview(mcnk_shader, 0.5f);
+          }
+        }
 
         num_chunks_uploaded_alphamap += tile->renderer()->numUploadedChunkAlphamaps();
 
@@ -349,7 +744,96 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       gl.bindVertexArray(0);
       gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     }
+
+    drawMccvVertexAltViz(model_view, projection, mvp, camera_pos, cursor_color, render_settings);
+    drawRampPreview(mvp, render_settings);
   }
+
+  // Terrain base-color lookup texture for WMO shader-16 blending (modern clients).
+  // Render top-down albedo into an FBO around the camera, then sample it in the WMO shader.
+  {
+    QSettings settings;
+    bool const wmo_terrain_blend = settings.value("wmo_terrain_blend", modern_features).toBool();
+
+    if (wmo_terrain_blend && modern_features && render_settings.draw_terrain && render_settings.draw_wmo && _mcnk_program)
+    {
+      glm::vec2 const center_xz(camera_pos.x, camera_pos.z);
+      float const move_thresh = _terrain_blend_world_size * 0.25f;
+      bool const moved =
+        glm::distance(center_xz, _terrain_blend_last_center_xz) > move_thresh || _terrain_blend_fbo == nullptr;
+
+      if (moved)
+      {
+        _terrain_blend_last_center_xz = center_xz;
+        _terrain_blend_origin_xz = center_xz - glm::vec2(_terrain_blend_world_size * 0.5f);
+        _terrain_blend_inv_size = (_terrain_blend_world_size > 1e-5f) ? (1.f / _terrain_blend_world_size) : 0.f;
+
+        if (!_terrain_blend_fbo)
+        {
+          QOpenGLFramebufferObjectFormat fmt;
+          fmt.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+          fmt.setInternalTextureFormat(GL_RGBA8);
+          _terrain_blend_fbo = std::make_unique<QOpenGLFramebufferObject>(_terrain_blend_tex_size, _terrain_blend_tex_size, fmt);
+          _terrain_blend_color_tex = _terrain_blend_fbo->texture();
+        }
+
+        GLint prev_viewport[4]{};
+        gl.getIntegerv(GL_VIEWPORT, prev_viewport);
+
+        _terrain_blend_fbo->bind();
+        gl.viewport(0, 0, _terrain_blend_tex_size, _terrain_blend_tex_size);
+        gl.disable(GL_BLEND);
+        gl.enable(GL_DEPTH_TEST);
+        gl.depthMask(GL_TRUE);
+        gl.clearColor(0.f, 0.f, 0.f, 1.f);
+        gl.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // Top-down ortho covering [_terrain_blend_origin_xz, origin+world_size].
+        glm::vec3 const eye(center_xz.x, camera_pos.y + 4096.f, center_xz.y);
+        glm::vec3 const target(center_xz.x, 0.f, center_xz.y);
+        glm::mat4 const bake_view = glm::lookAt(eye, target, glm::vec3(0.f, 0.f, -1.f));
+        float const half = _terrain_blend_world_size * 0.5f;
+        glm::mat4 const bake_proj = glm::ortho(-half, half, -half, half, 1.f, 16384.f);
+
+        OpenGL::Scoped::use_program mcnk_shader{ *_mcnk_program.get() };
+        mcnk_shader.uniform("model_view", bake_view);
+        mcnk_shader.uniform("projection", bake_proj);
+        mcnk_shader.uniform("enable_mists_heightmapping", modern_features);
+        mcnk_shader.uniform("albedo_only", 1);
+        mcnk_shader.uniform("preview_pass", 0);
+        mcnk_shader.uniform("preview_alpha", 1.0f);
+        mcnk_shader.uniform("draw_cursor_circle", 0);
+        mcnk_shader.uniform("camera", glm::vec3(eye.x, eye.y, eye.z));
+        mcnk_shader.uniform("animtime", static_cast<int>(_world->animtime));
+
+        gl.bindVertexArray(_mapchunk_vao);
+        gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, _mapchunk_index);
+
+        for (auto const& pair : _world->_loaded_tiles_buffer)
+        {
+          MapTile* tile = pair.second;
+          if (!tile)
+            break;
+          if (!tile->texturesFinishedLoading())
+            continue;
+          tile->renderer()->setOccluded(false);
+          tile->renderer()->draw(mcnk_shader, glm::vec3(center_xz.x, camera_pos.y, center_xz.y),
+                                 /*show_unpaintable_chunks*/ false,
+                                 /*draw_paintability_overlay*/ false,
+                                 /*is_selected*/ false,
+                                 /*skip_upload_alphamap*/ false);
+        }
+
+        gl.bindVertexArray(0);
+        gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+        _terrain_blend_fbo->release();
+        gl.viewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
+      }
+    }
+  }
+
+  drawChunkManipulatorSelection(model_view, projection, render_settings);
 
   if (render_settings.editing_mode == editing_mode::object && _world->has_multiple_model_selected())
   {
@@ -560,7 +1044,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
               render = true; // skip visibility checks
             }
           }
-          if (!render && tile->renderer()->objectsFrustumCullTest() > 1 || frustum.intersects(wmo_instance->getExtents()[1], wmo_instance->getExtents()[0]))
+          if ((!render && tile->renderer()->objectsFrustumCullTest() > 1)
+              || frustum.intersects(wmo_instance->getExtents()[1], wmo_instance->getExtents()[0]))
           {
             render = true;
           }
@@ -623,14 +1108,26 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
   }
 
-  // WMOs / map objects
-  if (render_settings.draw_wmo || _world->mapIndex.hasAGlobalWMO())
+  // WMOs / map objects (requires WMO program)
+  if ((render_settings.draw_wmo || _world->mapIndex.hasAGlobalWMO()) && _wmo_program)
   {
     ZoneScopedN("World::draw() : Draw WMOs");
     {
       OpenGL::Scoped::use_program wmo_program{*_wmo_program.get()};
+      wmo_program.uniform("model_view", model_view);
+      wmo_program.uniform("projection", projection);
 
       wmo_program.uniform("camera", glm::vec3(camera_pos.x, camera_pos.y, camera_pos.z));
+
+      QSettings settings;
+      bool const wmo_terrain_blend = settings.value("wmo_terrain_blend", modern_features).toBool();
+      wmo_program.uniform("wmo_terrain_blend_enabled", static_cast<int>(wmo_terrain_blend && _terrain_blend_color_tex != 0));
+      wmo_program.uniform("terrain_blend_origin_xz", _terrain_blend_origin_xz);
+      wmo_program.uniform("terrain_blend_inv_size", _terrain_blend_inv_size);
+      wmo_program.uniform("terrain_blend_color", 16);
+
+      gl.activeTexture(GL_TEXTURE0 + 16);
+      gl.bindTexture(GL_TEXTURE_2D, wmo_terrain_blend ? _terrain_blend_color_tex : 0);
 
       // make this check per WMO or global WMO with tiles may not work
       bool disable_cull = false;
@@ -640,7 +1137,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
           auto global_wmo = _world->_model_instance_storage.get_wmo_instance(_world->mWmoEntry.uniqueID);
           if (global_wmo.has_value())
           {
-            wmos_to_draw.push_back(global_wmo.value());
+            WMOInstance* const gw = global_wmo.value();
+            wmos_to_draw.push_back(gw);
             disable_cull = true;
           }
       }
@@ -727,33 +1225,36 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   // occlusion latency has 1-2 frames delay.
 
   constexpr bool occlusion_cull = true;
-  if (occlusion_cull)
+  if (occlusion_cull && _occluder_program)
   {
     OpenGL::Scoped::use_program occluder_shader{ *_occluder_program.get() };
-    gl.colorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-    gl.depthMask(GL_FALSE);
-    gl.bindVertexArray(_occluder_vao);
-    gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, _occluder_index);
-    gl.disable(GL_CULL_FACE); // TODO: figure out why indices are bad and we need this
+    occluder_shader.uniform("model_view", model_view);
+    occluder_shader.uniform("projection", projection);
 
-    for (auto const& pair : _world->_loaded_tiles_buffer)
     {
-      MapTile* tile = pair.second;
+      scoped_color_mask const no_color_write(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+      OpenGL::Scoped::depth_mask_setter<GL_FALSE> const no_depth_write;
+      gl.bindVertexArray(_occluder_vao);
+      gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, _occluder_index);
+      gl.disable(GL_CULL_FACE); // TODO: figure out why indices are bad and we need this
 
-      if (!tile)
+      for (auto const& pair : _world->_loaded_tiles_buffer)
       {
-        break;
+        MapTile* tile = pair.second;
+
+        if (!tile)
+        {
+          break;
+        }
+
+        tile->renderer()->setOccluded(!tile->renderer()->getTileOcclusionQueryResult(camera_pos));
+        tile->renderer()->doTileOcclusionQuery(occluder_shader);
       }
 
-      tile->renderer()->setOccluded(!tile->renderer()->getTileOcclusionQueryResult(camera_pos));
-      tile->renderer()->doTileOcclusionQuery(occluder_shader);
+      gl.enable(GL_CULL_FACE);
+      gl.bindVertexArray(0);
+      gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     }
-
-    gl.enable(GL_CULL_FACE);
-    gl.colorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    gl.depthMask(GL_TRUE);
-    gl.bindVertexArray(0);
-    gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
   }
 
 
@@ -783,8 +1284,9 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   }
 
   bool draw_doodads_wmo = render_settings.draw_wmo && render_settings.draw_wmo_doodads;
-  // M2s / models
-  if (render_settings.draw_models || draw_doodads_wmo || (render_settings.minimap_render && minimap_render_settings->use_filters))
+  // M2s / models (requires instanced program)
+  if ((render_settings.draw_models || draw_doodads_wmo || (render_settings.minimap_render && minimap_render_settings->use_filters))
+      && _m2_instanced_program)
   {
     ZoneScopedN("World::draw() : Draw M2s");
 
@@ -807,6 +1309,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
         model_render_state.tex_arrays = {0, 0};
         model_render_state.tex_indices = {0, 0};
         model_render_state.tex_unit_lookups = {0, 0};
+        m2_shader.uniform("model_view", model_view);
+        m2_shader.uniform("projection", projection);
         gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         gl.disable(GL_BLEND);
         gl.depthMask(GL_TRUE);
@@ -816,6 +1320,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
         m2_shader.uniform("unlit",  static_cast<int>(model_render_state.unlit));
         m2_shader.uniform("tex_unit_lookup_1", 0);
         m2_shader.uniform("tex_unit_lookup_2", 0);
+        m2_shader.uniform("terrain_uv_mask", 0);
         m2_shader.uniform("pixel_shader", 0);
 
         for (auto const& pair : models_to_draw)
@@ -851,23 +1356,48 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
           /*if (draw_hidden_models || !pair.first->is_hidden())*/ // now done when building models_to_draw
           {
-            pair.first->renderer()->draw( model_view
-                , pair.second
-                , m2_shader
-                , model_render_state
-                , frustum
-                , _cull_distance
-                , camera_pos
-                , _world->animtime
-                , render_settings.draw_models_with_box
-                , model_boxes_to_draw
-                , render_settings.display_mode
-                , false
-                , render_settings.draw_model_animations
-                , render_settings.editing_mode == editing_mode::object
-                , draw_animated_boxes
-            );
-            _world->_n_rendered_objects += pair.second.size();
+            try
+            {
+              pair.first->renderer()->draw( model_view
+                  , pair.second
+                  , m2_shader
+                  , model_render_state
+                  , frustum
+                  , _cull_distance
+                  , camera_pos
+                  , _world->animtime
+                  , render_settings.draw_models_with_box
+                  , model_boxes_to_draw
+                  , render_settings.display_mode
+                  , false
+                  , render_settings.draw_model_animations
+                  , render_settings.editing_mode == editing_mode::object
+                  , draw_animated_boxes
+                  , _world
+                  , !render_settings.minimap_render
+              );
+              _world->_n_rendered_objects += pair.second.size();
+            }
+            catch (std::exception const& e)
+            {
+              std::string const id = pair.first->file_key().hasFilepath()
+                ? pair.first->file_key().filepath()
+                : std::to_string(pair.first->file_key().fileDataID());
+              LogError << "WorldRender: model draw exception for '" << id << "': " << e.what() << std::endl;
+              LogMissingAsset(id, std::string("draw exception: ") + e.what());
+              pair.first->error_on_loading();
+              continue;
+            }
+            catch (...)
+            {
+              std::string const id = pair.first->file_key().hasFilepath()
+                ? pair.first->file_key().filepath()
+                : std::to_string(pair.first->file_key().fileDataID());
+              LogError << "WorldRender: model draw unknown exception for '" << id << "'" << std::endl;
+              LogMissingAsset(id, "draw unknown exception");
+              pair.first->error_on_loading();
+              continue;
+            }
           }
 
           // Draw animated bounding boxes for small animated models that move
@@ -944,7 +1474,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
     // draw model boxes with m2 box shader
     // if(draw_models_with_box || (draw_hidden_models && !model_boxes_to_draw.empty()))
-    if (!render_settings.minimap_render && !model_boxes_to_draw.empty())
+    if (!render_settings.minimap_render && !model_boxes_to_draw.empty() && _m2_box_program)
     {
       OpenGL::Scoped::use_program m2_box_shader{ *_m2_box_program.get() };
 
@@ -1017,17 +1547,6 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
   }
 
-  // set anim time only once per frame
-  {
-    OpenGL::Scoped::use_program water_shader {*_liquid_program.get()};
-    water_shader.uniform("camera", glm::vec3(camera_pos.x, camera_pos.y, camera_pos.z));
-    water_shader.uniform("animtime", _world->animtime);
-
-    if (render_settings.draw_wmo || _world->mapIndex.hasAGlobalWMO())
-    {
-      water_shader.uniform("use_transform", 1);
-    }
-  }
   /*
   // model particles
   if (draw_model_animations && !model_with_particles.empty())
@@ -1128,7 +1647,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
   }
 
-  if (render_settings.draw_water)
+  if (render_settings.draw_water && _liquid_program)
   {
     ZoneScopedN("World::draw() : Draw water");
 
@@ -1139,7 +1658,14 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
     gl.bindVertexArray(_liquid_chunk_vao);
 
-    water_shader.uniform ("use_transform", 0);
+    water_shader.uniform("model_view", model_view);
+    water_shader.uniform("projection", projection);
+    water_shader.uniform("camera", glm::vec3(camera_pos.x, camera_pos.y, camera_pos.z));
+    water_shader.uniform("animtime", _world->animtime);
+    // liquid_vert.glsl: when use_transform is 1 it multiplies by `transform`; we never set that for world ADT water,
+    // so leaving use_transform on breaks rendering whenever WMOs are drawn / global WMO maps.
+    water_shader.uniform("transform", glm::mat4x4(1.f));
+    water_shader.uniform("use_transform", 0);
 
     for (auto& pair : _world->_loaded_tiles_buffer)
     {
@@ -1169,7 +1695,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   gl.enable(GL_BLEND);
 
   // draw last because of the transparency
-  if (render_settings.draw_mfbo)
+  if (render_settings.draw_mfbo && _mfbo_program)
   {
     ZoneScopedN("World::draw() : Draw flight bounds");
     // don't write on the depth buffer
@@ -1313,215 +1839,405 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       }
     }
   }
+
+  // Draw point light visualization spheres after scene geometry so opaque draws do not
+  // stomp them. Use a depth prepass (color mask off, depth write on) then blended color
+  // (depth write off) so transparent fragments still participate in depth testing against
+  // the scene correctly (avoids "seeing through" opaque geometry).
+  if (render_settings.draw_point_light_spheres)
+  {
+    ZoneScopedN("World::draw() : Draw point light spheres");
+    float constexpr k_point_light_sphere_radius = 0.50f;
+
+    OpenGL::Scoped::bool_setter<GL_DEPTH_TEST, GL_TRUE> const enable_depth_test;
+    gl.depthFunc (GL_LEQUAL);
+
+    std::optional<std::size_t> const sel = _world->selectedPointLightIndex();
+
+    for (std::size_t li = 0; li < _world->_point_lights.size(); ++li)
+    {
+      auto const& light = _world->_point_lights[li];
+      float const sphere_alpha = (sel && *sel == li) ? 1.f : 0.5f;
+      float constexpr cone_alpha = 0.5f;
+
+      glm::vec4 const color = { light.color, 1.f };
+
+      {
+        OpenGL::Scoped::bool_setter<GL_BLEND, GL_FALSE> const disable_blend_prepass;
+        scoped_color_mask const no_color_write (GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        OpenGL::Scoped::depth_mask_setter<GL_TRUE> const write_depth_prepass;
+
+        _sphere_render.draw(
+            mvp,
+            light.position,
+            color,
+            k_point_light_sphere_radius,
+            32,
+            18,
+            1.f,
+            render_settings.draw_wireframe_light_sphere
+        );
+      }
+
+      {
+        OpenGL::Scoped::depth_mask_setter<GL_FALSE> const no_depth_write;
+        OpenGL::Scoped::bool_setter<GL_BLEND, GL_TRUE> const enable_blend;
+        gl.blendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        _sphere_render.draw(
+            mvp,
+            light.position,
+            color,
+            k_point_light_sphere_radius,
+            32,
+            18,
+            sphere_alpha,
+            render_settings.draw_wireframe_light_sphere
+        );
+      }
+
+      std::vector<glm::vec3> cone_lines;
+      if (light.light_type == World::MapLightType::Spot)
+      {
+        glm::vec3 const fwd = map_light_forward (light);
+        append_light_cone_lines (cone_lines
+                                , light.position
+                                , fwd
+                                , spot_effective_cone_length (light)
+                                , light.outer_angle
+                                , 24);
+      }
+
+      if (!cone_lines.empty())
+      {
+        OpenGL::Scoped::depth_mask_setter<GL_FALSE> const no_depth_write;
+        OpenGL::Scoped::bool_setter<GL_BLEND, GL_TRUE> const enable_blend;
+        gl.blendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        glm::vec4 const line_color { light.color, cone_alpha };
+        // One batched GL_LINES draw (append_light_cone_lines stores independent segment pairs).
+        // GL_LINES = 0x0001 — avoids dozens of Line::draw calls per light (each used to recompile shaders).
+        _line_render.draw (mvp, cone_lines, line_color, false, 0x0001);
+      }
+    }
+  }
 }
 
-void WorldRender::upload()
+void WorldRender::setupMccvVizBuffers()
 {
-  ZoneScoped;
+  ZoneScopedN("WorldRender::setupMccvVizBuffers");
 
-  if (_world->mapIndex.hasAGlobalWMO())
+  _mccv_viz_program.reset(
+    new OpenGL::program{
+        { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("mccv_viz_vs") },
+        { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("mccv_viz_fs") },
+    });
+
+  _mccv_crosshair_ndc_program.reset(
+    new OpenGL::program{
+        { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("mccv_crosshair_vs") },
+        { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("mccv_crosshair_fs") },
+    });
+
+  static constexpr glm::vec2 quad_verts[6] = {
+      { -1.f, -1.f }, { 1.f, -1.f }, { -1.f, 1.f },
+      { -1.f, 1.f },  { 1.f, -1.f }, { 1.f, 1.f },
+  };
+
+  gl.bufferData<GL_ARRAY_BUFFER>(_mccv_viz_quad_vbo, sizeof(quad_verts), quad_verts, GL_STATIC_DRAW);
+
+  glm::vec2 cross_init[2]{ { 0.f, 0.f }, { 0.f, 0.f } };
+  gl.bufferData<GL_ARRAY_BUFFER>(_mccv_viz_crosshair_vbo, sizeof(cross_init), cross_init, GL_DYNAMIC_DRAW);
+
   {
-    WMOInstance inst(_world->mWmoFilename, &_world->mWmoEntry, _world->_context);
+    OpenGL::Scoped::vao_binder const vao_bind(_mccv_viz_vao);
+    OpenGL::Scoped::use_program viz{ *_mccv_viz_program.get() };
 
-    _world->_model_instance_storage.add_wmo_instance(std::move(inst), false, false);
+    viz.attrib("quad_corner", _mccv_viz_quad_vbo, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    viz.attrib_divisor("quad_corner", 0, 1);
+
+    viz.attrib("instance_pos", _mccv_viz_instance_vbo, 4, GL_FLOAT, GL_FALSE, sizeof(MccvVizInstance), nullptr);
+    viz.attrib_divisor("instance_pos", 1, 1);
+
+    viz.attrib("instance_color", _mccv_viz_instance_vbo, 4, GL_FLOAT, GL_FALSE, sizeof(MccvVizInstance),
+               reinterpret_cast<void*>(sizeof(glm::vec4)));
+    viz.attrib_divisor("instance_color", 1, 1);
   }
-  else
+
   {
-    _horizon_render = std::make_unique<Noggit::map_horizon::render>(_world->horizon);
+    OpenGL::Scoped::vao_binder const vao_bind(_mccv_crosshair_vao);
+    OpenGL::Scoped::use_program ch{ *_mccv_crosshair_ndc_program.get() };
+    ch.attrib("ndc_pos", _mccv_viz_crosshair_vbo, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
   }
 
-  _skies = std::make_unique<Skies>(_world->mapIndex._map_id, _world->_context);
+  _mccv_viz_buffers_ready = true;
+}
 
-  _outdoor_lighting = std::make_unique<OutdoorLighting>();
+void WorldRender::drawMccvVertexAltViz ( glm::mat4x4 const& model_view
+                                       , glm::mat4x4 const& projection
+                                       , glm::mat4x4 const& mvp
+                                       , glm::vec3 const& camera_pos
+                                       , glm::vec4 const& cursor_color
+                                       , WorldRenderParams const& render_settings
+                                       )
+{
+  if (!render_settings.draw_mccv_vertex_alt_viz || render_settings.minimap_render)
+  {
+    return;
+  }
+  if (!_mccv_viz_buffers_ready || !_mccv_viz_program || !_mccv_crosshair_ndc_program)
+  {
+    return;
+  }
+  if (!render_settings.mccv_viz_hub_valid)
+  {
+    return;
+  }
 
-  _m2_program.reset
-    ( new OpenGL::program
-          { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("m2_vs") }
-              , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("m2_fs") }
+  ZoneScopedN("World::drawMccvVertexAltViz");
+
+  glm::vec3 const hub = render_settings.mccv_viz_hub;
+  float const r = std::max(0.01f, render_settings.mccv_viz_radius);
+  float const r2 = r * r;
+
+  float const point_radius =
+    kMccvVizBallScale
+    * glm::clamp(0.22f * glm::distance(camera_pos, hub) / 120.f, 0.12f, 1.6f);
+  // Camera-facing quads extend ~point_radius laterally; a tiny normal bump leaves half the disk
+  // below the surface. Lift along normal + toward the eye scales with disk size.
+  float const n_lift = glm::max(0.18f, 0.42f * point_radius);
+  float const v_lift = 0.52f * point_radius;
+
+  std::vector<MccvVizInstance> instances;
+  instances.reserve(4096);
+
+  for (MapTile* tile : _world->mapIndex.loaded_tiles())
+  {
+    if (!tile || !tile->finishedLoading())
+    {
+      continue;
+    }
+
+    std::vector<MapChunk*> const chunks = tile->chunks_in_range(hub, r);
+    for (MapChunk* chunk : chunks)
+    {
+      if (!chunk)
+      {
+        continue;
+      }
+
+      glm::vec3 const default_c(1.f, 1.f, 1.f);
+
+        for (int i = 0; i < mapbufsize; ++i)
+      {
+        glm::vec3 const& v = chunk->mVertices[i];
+        glm::vec2 const d(hub.x - v.x, hub.z - v.z);
+        if (glm::dot(d, d) > r2)
+        {
+          continue;
+        }
+
+        glm::vec3 const c = chunk->hasColors() ? chunk->mccv[i] : default_c;
+
+          // MCCV alt-viz needs a stable vertex normal. `MapChunk::mNormals` isn't
+          // consistently initialized, so validate it and fall back to a computed normal.
+          glm::vec3 n = chunk->mNormals[i];
+          float const nlen2 = glm::dot(n, n);
+          if (!std::isfinite(nlen2) || nlen2 < 1e-6f || nlen2 > 4.f)
+          {
+            glm::vec3 const P1 = chunk->getNeighborVertex(i, 0); // up_left
+            glm::vec3 const P2 = chunk->getNeighborVertex(i, 1); // up_right
+            glm::vec3 const P3 = chunk->getNeighborVertex(i, 2); // down_left
+            glm::vec3 const P4 = chunk->getNeighborVertex(i, 3); // down_right
+
+            glm::vec3 const N1 = glm::cross((P2 - v), (P1 - v));
+            glm::vec3 const N2 = glm::cross((P3 - v), (P2 - v));
+            glm::vec3 const N3 = glm::cross((P4 - v), (P3 - v));
+            glm::vec3 const N4 = glm::cross((P1 - v), (P4 - v));
+
+            glm::vec3 Norm = N1 + N2 + N3 + N4;
+            float const normlen2 = glm::dot(Norm, Norm);
+            if (!std::isfinite(normlen2) || normlen2 < 1e-10f)
+            {
+              Norm = glm::vec3(0.f, 1.f, 0.f);
+            }
+            else
+            {
+              Norm /= std::sqrt(normlen2);
+            }
+            n = Norm;
           }
-    );
-
-  _m2_instanced_program.reset
-      ( new OpenGL::program
-            { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("m2_vs", {"instanced"}) }
-                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("m2_fs") }
-            }
-      );
-
-  _m2_box_program.reset
-      ( new OpenGL::program
-            { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("m2_box_vs") }
-                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("m2_box_fs") }
-            }
-      );
-
-  _m2_ribbons_program.reset
-      ( new OpenGL::program
-            { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("ribbon_vs") }
-                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("ribbon_fs") }
-            }
-      );
-
-  _m2_particles_program.reset
-      ( new OpenGL::program
-            { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("particle_vs") }
-                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("particle_fs") }
-            }
-      );
-
-  _mcnk_program.reset
-      ( new OpenGL::program
-            { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("terrain_vs") }
-                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("terrain_fs") }
-            }
-      );
-
-  _mfbo_program.reset
-      ( new OpenGL::program
-            { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("mfbo_vs") }
-                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("mfbo_fs") }
-            }
-      );
-
-  _wmo_program.reset
-      ( new OpenGL::program
-            { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("wmo_vs") }
-                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("wmo_fs") }
-            }
-      );
-
-  _liquid_program.reset(
-      new OpenGL::program
-          { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("liquid_vs") }
-              , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("liquid_fs") }
+          else
+          {
+            // mNormals should already be unit-ish, but normalize anyway for stable lift scaling.
+            n /= std::sqrt(nlen2);
           }
-  );
 
-  _occluder_program.reset(
-      new OpenGL::program
-          { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("occluder_vs") }
-              , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("occluder_fs") }
+        glm::vec3 V = camera_pos - v;
+        float const vlen = glm::length(V);
+        if (vlen > 1e-4f)
+        {
+          V /= vlen;
+        }
+        else
+        {
+          V = n;
+        }
+        glm::vec3 const p = v + n * n_lift + V * v_lift;
+
+          if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+          {
+            continue;
           }
-  );
 
-  _liquid_texture_manager.upload();
+          instances.push_back({ glm::vec4(p, 1.f), glm::vec4(c, 0.95f) });
+        if (instances.size() >= kMaxMccvVizInstances)
+        {
+          goto mccv_gather_done;
+        }
+      }
+    }
+  }
+mccv_gather_done:
 
-  _buffers.upload();
-  _vertex_arrays.upload();
+  gl.enable(GL_BLEND);
+  gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  OpenGL::Scoped::bool_setter<GL_CULL_FACE, GL_FALSE> const cull_off;
+  OpenGL::Scoped::depth_mask_setter<GL_FALSE> const no_depth_write;
 
-  setupOccluderBuffers();
-
+  if (!instances.empty())
   {
-    OpenGL::Scoped::use_program m2_shader {*_m2_program.get()};
-    m2_shader.uniform("bone_matrices", 0);
-    m2_shader.uniform("tex1", 1);
-    m2_shader.uniform("tex2", 2);
+    gl.bufferData<GL_ARRAY_BUFFER>(_mccv_viz_instance_vbo,
+                                    static_cast<GLsizeiptr>(instances.size() * sizeof(MccvVizInstance)),
+                                    instances.data(),
+                                    GL_DYNAMIC_DRAW);
 
-    m2_shader.bind_uniform_block("matrices", 0);
-    gl.bindBuffer(GL_UNIFORM_BUFFER, _mvp_ubo);
-    gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::MVPUniformBlock), NULL, GL_DYNAMIC_DRAW);
-    gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::MVP, _mvp_ubo, 0, sizeof(OpenGL::MVPUniformBlock));
-    gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
+    OpenGL::Scoped::bool_setter<GL_DEPTH_TEST, GL_FALSE> const mccv_viz_no_depth;
 
-    m2_shader.bind_uniform_block("lighting", 1);
-    gl.bindBuffer(GL_UNIFORM_BUFFER, _lighting_ubo);
-    gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::LightingUniformBlock), NULL, GL_DYNAMIC_DRAW);
-    gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::LIGHTING, _lighting_ubo, 0, sizeof(OpenGL::LightingUniformBlock));
-    gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
+    OpenGL::Scoped::use_program viz{ *_mccv_viz_program.get() };
+    viz.uniform("model_view", model_view);
+    viz.uniform("projection", projection);
+    viz.uniform("camera_pos", camera_pos);
+    viz.uniform("point_radius", point_radius);
+
+    OpenGL::Scoped::vao_binder const vao_bind(_mccv_viz_vao);
+    gl.drawArraysInstanced(GL_TRIANGLES, 0, 6, static_cast<GLsizei>(instances.size()));
   }
 
   {
-    std::vector<int> samplers {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
-
-    OpenGL::Scoped::use_program wmo_program {*_wmo_program.get()};
-    wmo_program.uniform("render_batches_tex", 0);
-    wmo_program.uniform("texture_samplers", samplers);
-    wmo_program.bind_uniform_block("matrices", 0);
-    wmo_program.bind_uniform_block("lighting", 1);
+    glm::vec3 const to_cam = camera_pos - hub;
+    float const d = glm::length(to_cam);
+    glm::vec3 hub_mark = hub;
+    if (d > 1e-4f)
+    {
+      hub_mark += (to_cam / d) * glm::max(0.1f, 0.45f * point_radius);
+    }
+    else
+    {
+      hub_mark.y += glm::max(0.12f, 0.4f * point_radius);
+    }
+    float const s =
+      kMccvVizBallScale
+      * glm::clamp(0.24f * glm::distance(camera_pos, hub) / 100.f, 0.12f, 1.4f);
+    _sphere_render.draw(mvp, hub_mark, cursor_color, s);
   }
 
   {
-    OpenGL::Scoped::use_program mcnk_shader {*_mcnk_program.get()};
+    float const leg = 0.035f;
+    glm::vec2 const c = render_settings.mccv_viz_hub_ndc;
+    std::array<glm::vec2, 4> const verts = { {
+        { c.x - leg, c.y },
+        { c.x + leg, c.y },
+        { c.x, c.y - leg },
+        { c.x, c.y + leg },
+    } };
 
-    setupChunkBuffers();
-    setupChunkVAO(mcnk_shader);
+    gl.bufferData<GL_ARRAY_BUFFER>(_mccv_viz_crosshair_vbo, verts.size() * sizeof(glm::vec2), verts.data(), GL_DYNAMIC_DRAW);
 
-    mcnk_shader.bind_uniform_block("matrices", 0);
-    mcnk_shader.bind_uniform_block("lighting", 1);
-    mcnk_shader.bind_uniform_block("overlay_params", 2);
-    mcnk_shader.bind_uniform_block("chunk_instances", 3);
+    OpenGL::Scoped::bool_setter<GL_DEPTH_TEST, GL_FALSE> const no_depth;
+    OpenGL::Scoped::use_program ch{ *_mccv_crosshair_ndc_program.get() };
+    ch.uniform("color", glm::vec4(1.f, 1.f, 1.f, 1.f));
 
-    gl.bindBuffer(GL_UNIFORM_BUFFER, _terrain_params_ubo);
-    gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::TerrainParamsUniformBlock), NULL, GL_STATIC_DRAW);
-    gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::TERRAIN_OVERLAYS, _terrain_params_ubo, 0, sizeof(OpenGL::TerrainParamsUniformBlock));
-    gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
-
-    mcnk_shader.uniform("heightmap", 0);
-    mcnk_shader.uniform("mccv", 1);
-    mcnk_shader.uniform("shadowmap", 2);
-    mcnk_shader.uniform("alphamap", 3);
-    mcnk_shader.uniform("stamp_brush", 4);
-    mcnk_shader.uniform("base_instance", 0);
-
-    std::vector<int> samplers {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
-    mcnk_shader.uniform("textures", samplers);
-
+    OpenGL::Scoped::vao_binder const vao_bind(_mccv_crosshair_vao);
+    gl.lineWidth(2.f);
+    if (QOpenGLContext* ctx = QOpenGLContext::currentContext())
+    {
+      ctx->functions()->glDrawArrays(GL_LINES, 0, 4);
+    }
   }
 
+  gl.disable(GL_BLEND);
+}
+
+void WorldRender::drawRampPreview(glm::mat4x4 const& mvp, WorldRenderParams const& render_settings)
+{
+  if (!render_settings.draw_ramp_preview || render_settings.minimap_render)
   {
-    OpenGL::Scoped::use_program m2_shader_instanced {*_m2_instanced_program.get()};
-    m2_shader_instanced.bind_uniform_block("matrices", 0);
-    m2_shader_instanced.bind_uniform_block("lighting", 1);
-    m2_shader_instanced.uniform("bone_matrices", 0);
-    m2_shader_instanced.uniform("tex1", 1);
-    m2_shader_instanced.uniform("tex2", 2);
+    return;
   }
-
-  /*
+  if (render_settings.display_mode != display_mode::in_3D)
   {
-    OpenGL::Scoped::use_program particles_shader {*_m2_particles_program.get()};
-    particles_shader.uniform("tex", 0);
+    return;
   }
 
+  glm::vec3 const& A = render_settings.ramp_preview_a;
+  glm::vec3 const& B = render_settings.ramp_preview_b;
+  glm::vec2 const ab(B.x - A.x, B.z - A.z);
+  float const L = glm::length(ab);
+  if (L < 1e-3f || render_settings.ramp_preview_radius <= 0.f)
   {
-    OpenGL::Scoped::use_program ribbon_shader {*_m2_ribbons_program.get()};
-    ribbon_shader.uniform("tex", 0);
+    return;
   }
 
-   */
+  glm::vec2 const f2 = ab / L;
+  glm::vec3 const forward(f2.x, 0.f, f2.y);
+  glm::vec3 const r(-forward.z * render_settings.ramp_preview_radius, 0.f, forward.x * render_settings.ramp_preview_radius);
 
+  auto point_at = [&](float tAlong) -> glm::vec3
   {
-    OpenGL::Scoped::use_program liquid_render {*_liquid_program.get()};
+    glm::vec3 p = A + forward * tAlong;
+    p.y = glm::mix(A.y, B.y, tAlong / L);
+    return p;
+  };
 
-    setupLiquidChunkBuffers();
-    setupLiquidChunkVAO(liquid_render);
+  float const cap = std::min(render_settings.ramp_preview_cap_len, L * 0.45f);
+  float const t1 = cap;
+  float const t2 = L - cap;
 
-    static std::vector<int> samplers {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  glm::vec3 const cA0 = point_at(0.f) + r;
+  glm::vec3 const cB0 = point_at(L) + r;
+  glm::vec3 const cB1 = point_at(L) - r;
+  glm::vec3 const cA1 = point_at(0.f) - r;
 
-    liquid_render.bind_uniform_block("matrices", 0);
-    liquid_render.bind_uniform_block("lighting", 1);
-    liquid_render.bind_uniform_block("liquid_layers_params", 4);
-    liquid_render.uniform("vertex_data", 0);
-    liquid_render.uniform("texture_samplers", samplers);
+  glm::vec3 const C1 = point_at(t1);
+  glm::vec3 const i1a = C1 + r;
+  glm::vec3 const i1b = C1 - r;
+  glm::vec3 const C2 = point_at(t2);
+  glm::vec3 const i2a = C2 + r;
+  glm::vec3 const i2b = C2 - r;
 
-  }
+  glm::vec4 const col(1.f, 1.f, 1.f, 0.95f);
+  OpenGL::Scoped::bool_setter<GL_LINE_SMOOTH, GL_TRUE> const line_smooth;
+  gl.hint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+  gl.lineWidth(2.f);
 
-  {
-    OpenGL::Scoped::use_program mfbo_shader {*_mfbo_program.get()};
-    mfbo_shader.bind_uniform_block("matrices", 0);
-  }
+  std::vector<glm::vec3> const outer{ cA0, cB0, cB1, cA1, cA0 };
+  _line_render.draw(mvp, outer, col, false);
+  std::vector<glm::vec3> const cut1{ i1a, i1b };
+  _line_render.draw(mvp, cut1, col, false);
+  std::vector<glm::vec3> const cut2{ i2a, i2b };
+  _line_render.draw(mvp, cut2, col, false);
+}
 
-  {
-    OpenGL::Scoped::use_program m2_box_shader {*_m2_box_program.get()};
-    m2_box_shader.bind_uniform_block("matrices", 0);
-  }
-
-  {
-    OpenGL::Scoped::use_program occluder_shader {*_occluder_program.get()};
-    occluder_shader.bind_uniform_block("matrices", 0);
-  }
-
-
+void WorldRender::drawChunkManipulatorSelection ( glm::mat4x4 const& model_view
+                                                , glm::mat4x4 const& projection
+                                                , WorldRenderParams const& render_settings
+                                                )
+{
+  // Selection and preview are drawn as a terrain tint via the terrain shader (see TileRender overlay masks).
+  (void)model_view;
+  (void)projection;
+  (void)render_settings;
 }
 
 void WorldRender::unload()
@@ -1536,6 +2252,10 @@ void WorldRender::unload()
   _m2_box_program.reset();
   _wmo_program.reset();
   _liquid_program.reset();
+
+  _mccv_viz_program.reset();
+  _mccv_crosshair_ndc_program.reset();
+  _mccv_viz_buffers_ready = false;
 
   _cursor_render.unload();
   _sphere_render.unload();
@@ -1562,10 +2282,6 @@ void WorldRender::updateMVPUniformBlock(const glm::mat4x4& model_view, const glm
 
   _mvp_ubo_data.model_view = model_view;
   _mvp_ubo_data.projection = projection;
-
-  gl.bindBuffer(GL_UNIFORM_BUFFER, _mvp_ubo);
-  gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::MVPUniformBlock), &_mvp_ubo_data);
-
 }
 
 void WorldRender::updateLightingUniformBlock(bool draw_fog, glm::vec3 const& camera_pos)
@@ -1599,6 +2315,76 @@ void WorldRender::updateLightingUniformBlock(bool draw_fog, glm::vec3 const& cam
 
   gl.bindBuffer(GL_UNIFORM_BUFFER, _lighting_ubo);
   gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::LightingUniformBlock), &_lighting_ubo_data);
+}
+
+void WorldRender::updatePointLightsUniformBlock(bool enabled, glm::vec3 const& camera_pos)
+{
+  ZoneScoped;
+
+  _point_lights_ubo_data.meta = { 0, enabled ? 1 : 0, 0, 0 };
+
+  if (enabled)
+  {
+    // Hard cap at kMaxGpuPointLights; pick the closest lights to the camera so the set is stable
+    // and relevant. Do not cull by (camera ↔ light) distance: a light far from the camera can
+    // still illuminate terrain and models in front of the viewer within attenuation_end.
+    int count = 0;
+    float const flicker_t = _world->animtime * 0.001f;
+
+    std::vector<std::size_t> order;
+    {
+      std::size_t const n = _world->_point_lights.size();
+      order.resize (n);
+      for (std::size_t i = 0; i < n; ++i)
+        order[i] = i;
+      std::sort (order.begin(), order.end(),
+                 [&] (std::size_t a, std::size_t b)
+                 {
+                   return glm::distance (_world->_point_lights[a].position, camera_pos)
+                        < glm::distance (_world->_point_lights[b].position, camera_pos);
+                 });
+    }
+
+    for (std::size_t const li : order)
+    {
+      if (count >= OpenGL::kMaxGpuPointLights)
+        break;
+
+      auto const& light = _world->_point_lights[li];
+
+      float radius = std::max(0.0f, light.attenuation_end);
+      if (light.light_type == World::MapLightType::Spot)
+        radius = std::max (radius, spot_effective_cone_length (light));
+
+      float const flicker_mul = point_light_intensity_multiplier (light, flicker_t);
+      float const eff_intensity = light.intensity * flicker_mul;
+
+      _point_lights_ubo_data.position_radius[count] = { light.position, radius };
+      _point_lights_ubo_data.color_intensity[count] = { light.color, eff_intensity };
+      _point_lights_ubo_data.attenuation[count] = { light.attenuation_start, light.attenuation_end, 0.f, 0.f };
+
+      if (light.light_type == World::MapLightType::Spot)
+      {
+        glm::vec3 const fwd = map_light_forward (light);
+        float const ci = std::cos (light.inner_angle);
+        float const co = std::cos (light.outer_angle);
+        _point_lights_ubo_data.spot_dir_cos_inner[count] = { fwd, ci };
+        _point_lights_ubo_data.spot_cos_outer_kind[count] = { co, 1.f, 0.f, 0.f };
+      }
+      else
+      {
+        _point_lights_ubo_data.spot_dir_cos_inner[count] = { 0.f, 0.f, 1.f, 1.f };
+        _point_lights_ubo_data.spot_cos_outer_kind[count] = { -1.f, 0.f, 0.f, 0.f };
+      }
+
+      count++;
+    }
+
+    _point_lights_ubo_data.meta.x = count;
+  }
+
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _point_lights_ubo);
+  gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::PointLightsUniformBlock), &_point_lights_ubo_data);
 }
 
 void WorldRender::updateLightingUniformBlockMinimap(MinimapRenderSettings* settings)
@@ -1914,8 +2700,27 @@ void WorldRender::drawMinimap ( MapTile *tile
 
   if (mTile)
   {
+    using clock_t = std::chrono::steady_clock;
+
+    auto const start_wait = clock_t::now();
     mTile->wait_until_loaded();
+    auto const end_wait = clock_t::now();
+    auto const wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_wait - start_wait).count();
+    if (wait_ms >= 1000)
+    {
+      LogError << "Minimap: wait_until_loaded tile=(" << mTile->index.x << "," << mTile->index.z << ") took "
+               << wait_ms << " ms" << std::endl;
+    }
+
+    auto const start_children = clock_t::now();
     mTile->waitForChildrenLoaded();
+    auto const end_children = clock_t::now();
+    auto const children_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_children - start_children).count();
+    if (children_ms >= 1000)
+    {
+      LogError << "Minimap: waitForChildrenLoaded tile=(" << mTile->index.x << "," << mTile->index.z << ") took "
+               << children_ms << " ms" << std::endl;
+    }
 
   }
 
@@ -1954,6 +2759,7 @@ void WorldRender::drawMinimap ( MapTile *tile
   renderParams.draw_occlusion_boxes = false;
   renderParams.minimap_render = true;
   renderParams.draw_wmo_exterior = true;
+  renderParams.draw_chunk_manipulator_selection = false;
 
   draw(model_view, projection, glm::vec3(), glm::vec4(),
   glm::vec3(), camera_pos, settings, renderParams);
@@ -1987,9 +2793,25 @@ bool WorldRender::saveMinimap(TileIndex const& tile_idx, MinimapRenderSettings* 
   if (!_world->mapIndex.tileLoaded(tile_idx) && !_world->mapIndex.tileAwaitingLoading(tile_idx))
   {
     MapTile* tile = _world->mapIndex.loadTile(tile_idx);
+    auto const start_wait = std::chrono::steady_clock::now();
     tile->wait_until_loaded();
+    auto const end_wait = std::chrono::steady_clock::now();
+    auto const wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_wait - start_wait).count();
+    if (wait_ms >= 1000)
+    {
+      LogError << "Minimap: (save) wait_until_loaded tile=(" << tile_idx.x << "," << tile_idx.z << ") took "
+               << wait_ms << " ms" << std::endl;
+    }
     _world->wait_for_all_tile_updates();
+    auto const start_children = std::chrono::steady_clock::now();
     tile->waitForChildrenLoaded();
+    auto const end_children = std::chrono::steady_clock::now();
+    auto const children_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_children - start_children).count();
+    if (children_ms >= 1000)
+    {
+      LogError << "Minimap: (save) waitForChildrenLoaded tile=(" << tile_idx.x << "," << tile_idx.z << ") took "
+               << children_ms << " ms" << std::endl;
+    }
   }
 
   MapTile* mTile = _world->mapIndex.getTile(tile_idx);

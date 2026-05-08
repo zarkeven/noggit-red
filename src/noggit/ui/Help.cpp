@@ -261,6 +261,7 @@ namespace Noggit
       generate_hotkey_row({FontNoggit::mmb }, "\aMove object", object_layout);
       generate_hotkey_row({FontNoggit::alt, FontNoggit::mmb }, "\a+\aScale M2", object_layout);
       generate_hotkey_row({FontNoggit::shift, FontNoggit::ctrl, FontNoggit::alt, FontNoggit::lmb }, "\aor\aor\a+\aRotate object", object_layout);
+      generate_hotkey_row({FontNoggit::ctrl, FontNoggit::alt, FontNoggit::rmb }, "\a+\a+\aFree rotate (viewport)", object_layout);
       generate_hotkey_row({FontNoggit::ctrl }, "\a+   0 - 9        Change doodadset of selected WMO", object_layout);
       generate_hotkey_row({FontNoggit::ctrl, FontNoggit::r }, "\a+\aReset rotation", object_layout);
       generate_hotkey_row({FontNoggit::h }, "\aToggle selected model/wmo visibility", object_layout);

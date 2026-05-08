@@ -20,9 +20,20 @@ namespace OpenGL::Scoped
 
 class Model;
 class ModelInstance;
+class World;
 
 namespace Noggit::Rendering
 {
+  //! When valid, projected (ground lookup) passes sample layer 0 of the chunk under \a anchor_world
+  //! using UVs relative to \a chunk_corner_xz (typically MapChunk::xbase / zbase).
+  struct M2TerrainGroundBind
+  {
+    bool valid = false;
+    GLuint texture_array = 0;
+    GLint array_index = 0;
+    glm::vec2 chunk_corner_xz{};
+  };
+
   enum class M2Blend : uint16_t
   {
     Opaque,
@@ -63,10 +74,12 @@ namespace Noggit::Rendering
 
   enum class texture_unit_lookup : int
   {
-    environment,
-    t1,
-    t2,
-    none
+    environment = 0,
+    t1 = 1,
+    t2 = 2,
+    none = 3,
+    //! World XZ mapped UV for M2 batches flagged as projected (see ModelRenderPass::initUVTypes).
+    ground = 4,
   };
 
 
@@ -78,15 +91,17 @@ namespace Noggit::Rendering
     float ordering_thingy = 0.f;
     uint16_t index_start = 0, index_count = 0, vertex_start = 0, vertex_end = 0;
     uint16_t blend_mode = 0;
+    //! True when skin batch flags indicate a projected / ground decal path (see initUVTypes).
+    bool skin_projected = false;
     texture_unit_lookup tu_lookups[2];
     uint16_t textures[2];
     uint16_t uv_animations[2];
     std::optional<ModelPixelShader> pixel_shader;
 
 
-    bool prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model *m, OpenGL::M2RenderState& model_render_state);
+    bool prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model *m, OpenGL::M2RenderState& model_render_state, M2TerrainGroundBind const* terrain_ground);
     void afterDraw();
-    void bindTexture(size_t index, Model* m, OpenGL::M2RenderState& model_render_state, OpenGL::Scoped::use_program& m2_shader);
+    void bindTexture(size_t index, Model* m, OpenGL::M2RenderState& model_render_state, OpenGL::Scoped::use_program& m2_shader, M2TerrainGroundBind const* terrain_ground);
     void initUVTypes(Model* m);
 
     bool operator< (const ModelRenderPass& m) const;
@@ -113,6 +128,8 @@ namespace Noggit::Rendering
         , display_mode display
         , bool no_cull
         , bool animate
+        , World* world_for_terrain_projection = nullptr
+        , bool enable_terrain_texture_projection = false
     );
 
     void draw (glm::mat4x4 const& model_view
@@ -130,7 +147,11 @@ namespace Noggit::Rendering
         , bool animate
         , bool draw_fake_geometry_box
         , bool draw_animation_box
+        , World* world_for_terrain_projection = nullptr
+        , bool enable_terrain_texture_projection = false
     );
+
+    [[nodiscard]] bool hasTerrainGroundProjectionPasses() const;
 
     void drawParticles(glm::mat4x4 const& model_view
         , OpenGL::Scoped::use_program& particles_shader

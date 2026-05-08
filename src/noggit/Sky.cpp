@@ -1081,6 +1081,7 @@ bool Skies::draw(glm::mat4x4 const& model_view
         m2_shader.uniform("unlit",  static_cast<int>(model_render_state.unlit));
         m2_shader.uniform("tex_unit_lookup_1", 0);
         m2_shader.uniform("tex_unit_lookup_2", 0);
+        m2_shader.uniform("terrain_uv_mask", 0);
         m2_shader.uniform("pixel_shader", 0);
 
         int skyboxtime = animtime;
@@ -1128,6 +1129,7 @@ bool Skies::draw(glm::mat4x4 const& model_view
       m2_shader.uniform("unlit",  static_cast<int>(model_render_state.unlit));
       m2_shader.uniform("tex_unit_lookup_1", 0);
       m2_shader.uniform("tex_unit_lookup_2", 0);
+      m2_shader.uniform("terrain_uv_mask", 0);
       m2_shader.uniform("pixel_shader", 0);
     
       stars.model->renderer()->draw(model_view

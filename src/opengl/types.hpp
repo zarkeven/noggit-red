@@ -17,7 +17,8 @@ namespace OpenGL
     LIGHTING,
     TERRAIN_OVERLAYS,
     CHUNK_INSTANCE_DATA,
-    CHUNK_LIQUID_INSTANCE_INDEX
+    CHUNK_LIQUID_INSTANCE_INDEX,
+    POINT_LIGHTS
   };
 
   struct MVPUniformBlock
@@ -36,6 +37,29 @@ namespace OpenGL
     glm::vec4 OceanColorDark;
     glm::vec4 RiverColorLight;
     glm::vec4 RiverColorDark;
+  };
+
+  //! Must match point_lights UBO in terrain_frag / m2_frag / wmo_frag (std140).
+  static constexpr int kMaxGpuPointLights = 256;
+
+  struct PointLightsUniformBlock
+  {
+    // meta.x: count, meta.y: enabled (0/1)
+    glm::ivec4 meta = { 0, 0, 0, 0 };
+
+    // position_radius[i].xyz: world position, .w: attenuation_end
+    glm::vec4 position_radius[kMaxGpuPointLights] = {};
+
+    // color_intensity[i].xyz: RGB (0..1), .w: intensity
+    glm::vec4 color_intensity[kMaxGpuPointLights] = {};
+
+    // attenuation[i].x: attenuation_start, .y: attenuation_end
+    glm::vec4 attenuation[kMaxGpuPointLights] = {};
+
+    // Spot / point cookie: xyz = normalized forward (from light), w = cos(inner_angle).
+    glm::vec4 spot_dir_cos_inner[kMaxGpuPointLights] = {};
+    // x: cos(outer_angle), y: 1 = spot, 0 = point, zw unused.
+    glm::vec4 spot_cos_outer_kind[kMaxGpuPointLights] = {};
   };
 
   struct TerrainParamsUniformBlock
@@ -58,12 +82,13 @@ namespace OpenGL
     int climb_use_smooth_interpolation = false;
     float climb_value;
     int draw_vertex_color = true;
+    int draw_tileset = true;
     int draw_groundeffectid_overlay = false;
     int draw_groundeffect_layerid_overlay = false;
     int draw_noeffectdoodad_overlay = false;
     int draw_only_normals = false;
     int point_normals_up = false;
-    // int padding;
+    int draw_texture_layer_count_overlay = false;
   };
 
   struct ChunkInstanceDataUniformBlock

@@ -7,6 +7,9 @@
 #include "MapTile.h"
 #include <forward_list>
 
+#include <algorithm>
+#include <cmath>
+
 template<typename Fun>
 void World::for_all_chunks_on_tile (glm::vec3 const& pos, Fun&& fun)
 {
@@ -51,7 +54,9 @@ void World::for_chunk_at(glm::vec3 const& pos, Fun&& fun)
   if (tile && tile->finishedLoading())
   {
     mapIndex.setChanged(tile);
-    fun(tile->getChunk((pos.x - tile->xbase) / CHUNKSIZE, (pos.z - tile->zbase) / CHUNKSIZE));
+    int const cx = std::clamp(static_cast<int>(std::floor((pos.x - tile->xbase) / CHUNKSIZE)), 0, 15);
+    int const cz = std::clamp(static_cast<int>(std::floor((pos.z - tile->zbase) / CHUNKSIZE)), 0, 15);
+    fun(tile->getChunk(static_cast<unsigned int>(cx), static_cast<unsigned int>(cz)));
   }
 }
 
@@ -61,7 +66,9 @@ auto World::for_maybe_chunk_at(glm::vec3 const& pos, Fun&& fun) -> std::optional
   MapTile* tile (mapIndex.getTile (pos));
   if (tile && tile->finishedLoading())
   {
-    return fun (tile->getChunk ((pos.x - tile->xbase) / CHUNKSIZE, (pos.z - tile->zbase) / CHUNKSIZE));
+    int const cx = std::clamp(static_cast<int>(std::floor((pos.x - tile->xbase) / CHUNKSIZE)), 0, 15);
+    int const cz = std::clamp(static_cast<int>(std::floor((pos.z - tile->zbase) / CHUNKSIZE)), 0, 15);
+    return fun (tile->getChunk (static_cast<unsigned int>(cx), static_cast<unsigned int>(cz)));
   }
   else
   {

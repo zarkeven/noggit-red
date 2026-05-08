@@ -9,6 +9,7 @@
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QSpinBox>
 
 #ifdef USE_MYSQL_UID_STORAGE
 #include <mysql/mysql.h>
@@ -61,7 +62,7 @@ namespace Noggit
 
       connect(ui->wmvLogPathField, &QLineEdit::textChanged, [&](QString value)
               {
-                _settings->setValue("project/import_file", value);
+                _settings->setValue("project/wmv_log_file", value);
               }
       );
 
@@ -75,6 +76,29 @@ namespace Noggit
                 {
                   ui->wmvLogPathField->setText(result);
                 }
+              }
+      );
+
+      connect(ui->_epsilon_patches_path_browse, &QPushButton::clicked, [=]
+              {
+                QString const start = ui->_epsilon_patches_path_field->text();
+                auto result(QFileDialog::getExistingDirectory(
+                    nullptr, "Epsilon Patches directory", start.isEmpty() ? QDir::homePath() : start));
+
+                if (!result.isNull())
+                  ui->_epsilon_patches_path_field->setText(result);
+              }
+      );
+
+      connect(ui->_epsilon_patches_path_field, &QLineEdit::textChanged, [&](QString value)
+              {
+                _settings->setValue("integrations/epsilon_patches_path", value);
+              }
+      );
+
+      connect(ui->_epsilon_patch_name_field, &QLineEdit::textChanged, [&](QString value)
+              {
+                _settings->setValue("integrations/epsilon_patch_name", value);
               }
       );
 
@@ -214,6 +238,18 @@ namespace Noggit
       ui->_use_mclq_liquids_export->setChecked(_settings->value("use_mclq_liquids_export", false).toBool());
       ui->_theme->setCurrentText(_settings->value("theme", "Dark").toString());
       ui->_modern_features->setChecked(_settings->value("modern_features", false).toBool());
+      ui->_use_windows_ink->setChecked(_settings->value("tablet/use_windows_ink", true).toBool());
+      ui->_tablet_pressure_strength->setChecked(_settings->value("tablet/pressure_strength", true).toBool());
+      ui->_discord_rich_presence_cb->setChecked(_settings->value("integrations/discord_rich_presence", false).toBool());
+      ui->_discord_app_id_field->setText(_settings->value("integrations/discord_app_id", "959654402141085748").toString());
+      ui->_discord_large_image_key_field->setText(_settings->value("integrations/discord_large_image_key", "").toString());
+      ui->_discord_large_image_text_field->setText(_settings->value("integrations/discord_large_image_text", "Noggit Red").toString());
+
+      ui->_epsilon_integration_cb->setChecked(_settings->value("integrations/epsilon_enabled", false).toBool());
+      ui->_epsilon_patches_path_field->setText(_settings->value("integrations/epsilon_patches_path").toString());
+      ui->_epsilon_patch_name_field->setText(_settings->value("integrations/epsilon_patch_name").toString());
+      ui->_epsilon_starting_fdid_field->setValue(_settings->value("integrations/epsilon_starting_fdid", 5000000).toInt());
+      ui->_epsilon_wdt_fdid_field->setValue(_settings->value("integrations/epsilon_wdt_fdid", 0).toInt());
 
       ui->assetBrowserBgCol->setColor(_settings->value("assetBrowser/background_color",
         QVariant::fromValue(QColor(127, 127, 127))).value<QColor>());
@@ -306,7 +342,19 @@ namespace Noggit
       _settings->setValue("nativeMenubar", ui->_nativeMenubar->isChecked());
       _settings->setValue("classicUI", ui->_classic_ui->isChecked());
       _settings->setValue("modern_features", ui->_modern_features->isChecked());
+      _settings->setValue("tablet/use_windows_ink", ui->_use_windows_ink->isChecked());
+      _settings->setValue("tablet/pressure_strength", ui->_tablet_pressure_strength->isChecked());
       _settings->setValue("use_mclq_liquids_export", ui->_use_mclq_liquids_export->isChecked());
+      _settings->setValue("integrations/discord_rich_presence", ui->_discord_rich_presence_cb->isChecked());
+      _settings->setValue("integrations/discord_app_id", ui->_discord_app_id_field->text());
+      _settings->setValue("integrations/discord_large_image_key", ui->_discord_large_image_key_field->text());
+      _settings->setValue("integrations/discord_large_image_text", ui->_discord_large_image_text_field->text());
+
+      _settings->setValue("integrations/epsilon_enabled", ui->_epsilon_integration_cb->isChecked());
+      _settings->setValue("integrations/epsilon_patches_path", ui->_epsilon_patches_path_field->text());
+      _settings->setValue("integrations/epsilon_patch_name", ui->_epsilon_patch_name_field->text());
+      _settings->setValue("integrations/epsilon_starting_fdid", ui->_epsilon_starting_fdid_field->value());
+      _settings->setValue("integrations/epsilon_wdt_fdid", ui->_epsilon_wdt_fdid_field->value());
 
 #ifdef USE_MYSQL_UID_STORAGE
       _settings->setValue ("project/mysql/enabled", ui->MySQL_box->isChecked());

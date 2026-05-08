@@ -6,6 +6,7 @@
 #include <noggit/ui/tools/UiCommon/ExtendedSlider.hpp>
 #include <noggit/ui/tools/UiCommon/ImageMaskSelector.hpp>
 #include <noggit/World.h>
+#include <noggit/ActionManager.hpp>
 
 #include <qt-color-widgets/color_list_widget.hpp>
 #include <qt-color-widgets/color_selector.hpp>
@@ -91,6 +92,10 @@ namespace Noggit
       _use_image_colors->setChecked(true);
       layout->addRow("Use image colors", _use_image_colors);
 
+      _instant_replace_cb = new QCheckBox(QStringLiteral("Instant replace (no blending)"), this);
+      _instant_replace_cb->setToolTip(QStringLiteral("When enabled, painting will set vertex shading directly instead of blending toward it."));
+      layout->addRow(QStringLiteral("Mode:"), _instant_replace_cb);
+
       _color_palette = new color_widgets::ColorListWidget(this);
       _color_palette->setSizePolicy(QSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred));
       layout->addRow(_color_palette);
@@ -168,6 +173,21 @@ namespace Noggit
     void ShaderTool::changeShader
       (World* world, glm::vec3 const& pos, float dt, bool add)
     {
+      if (_instant_replace_cb && _instant_replace_cb->isChecked())
+      {
+        bool const use_mask = _image_mask_group && _image_mask_group->isEnabled();
+        if (add)
+        {
+          world->replaceShader(pos, _color, _radius_slider->value(), &_mask_image, use_mask, _use_image_colors->isChecked());
+        }
+        else
+        {
+          // Ctrl: instant remove vertex shading back to default (1,1,1).
+          world->replaceShader(pos, glm::vec4(0.5f, 0.5f, 0.5f, 1.0f), _radius_slider->value(), &_mask_image, use_mask, false);
+        }
+        return;
+      }
+
       if (!_image_mask_group->isEnabled())
       {
         world->changeShader (pos, _color, 2.0f*dt*_speed_slider->value(), _radius_slider->value(), add);
@@ -327,6 +347,7 @@ namespace Noggit
       json["mask_image"] = _image_mask_group->getImageMaskPath();
 
       json["use_image_colors"] = _use_image_colors->isChecked();
+      json["instant_replace"] = _instant_replace_cb ? _instant_replace_cb->isChecked() : false;
 
       return json;
     }
@@ -344,6 +365,8 @@ namespace Noggit
       _image_mask_group->setImageMask(json["mask_image"].toString());
 
       _use_image_colors->setChecked(json["use_image_colors"].toBool());
+      if (_instant_replace_cb)
+        _instant_replace_cb->setChecked(json["instant_replace"].toBool());
     }
 
   }

@@ -26,6 +26,13 @@ namespace Noggit::Application {
         std::string ApplicationProjectPath;
         std::string ApplicationThemePath;
         std::string ApplicationListFilePath;
+        //! Retail (CASC): if non-empty, download listfile CSV before opening storage (default: wowdev community listfile).
+        //! Use `%s` or `%1` for a build slug (e.g. wow.export); omit placeholders for a fixed URL.
+        std::string ApplicationListfileWowExportUrlTemplate =
+          "https://github.com/wowdev/wow-listfile/releases/latest/download/community_listfile.csv";
+        std::string ApplicationListfileWowExportBuild;
+        //! If true, re-download every project open; otherwise only when `listfile.csv` is missing in the project folder.
+        bool ApplicationListfileWowExportAlwaysDownload = false;
         std::string ApplicationDatabaseDefinitionsPath;
         std::string ApplicationNoggitDefinitionsPath = "noggit-definitions"; // default for compatibility with older config files
         NoggitApplicationGraphicsConfiguration GraphicsConfiguration;

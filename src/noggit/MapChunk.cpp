@@ -20,6 +20,8 @@
 #include <noggit/World.h>
 #include <util/sExtendableArray.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <QImage>
@@ -1012,6 +1014,77 @@ bool MapChunk::stampMCCV(glm::vec3 const& pos, glm::vec4 const& color, float cha
   return changed;
 }
 
+bool MapChunk::replaceMCCV(glm::vec3 const& pos, glm::vec4 const& color, float radius, QImage* img, bool use_image_mask, bool use_image_colors)
+{
+  bool changed = false;
+
+  if (!hasMCCV)
+  {
+    initMCCV();
+    changed = true;
+  }
+
+  for (int i = 0; i < mapbufsize; ++i)
+  {
+    float const dist = misc::dist(mVertices[i], pos);
+    if (dist > radius)
+      continue;
+
+    if (use_image_mask)
+    {
+      if (!img || img->isNull())
+        continue;
+
+      if (std::abs(pos.x - mVertices[i].x) > radius || std::abs(pos.z - mVertices[i].z) > radius)
+        continue;
+
+      glm::vec3 const diff{ mVertices[i] - pos };
+      int pixel_x = std::round(((diff.x + radius) / (2.f * radius)) * img->width());
+      int pixel_y = std::round(((diff.z + radius) / (2.f * radius)) * img->height());
+
+      if (pixel_x < 0 || pixel_x >= img->width() || pixel_y < 0 || pixel_y >= img->height())
+        continue;
+
+      if (use_image_colors)
+      {
+        QColor const image_color = img->pixelColor(pixel_x, pixel_y);
+        float const rx = static_cast<float>(image_color.redF()) / 0.5f;
+        float const gx = static_cast<float>(image_color.greenF()) / 0.5f;
+        float const bx = static_cast<float>(image_color.blueF()) / 0.5f;
+        mccv[i].x = std::clamp(rx, 0.f, 2.f);
+        mccv[i].y = std::clamp(gx, 0.f, 2.f);
+        mccv[i].z = std::clamp(bx, 0.f, 2.f);
+      }
+      else
+      {
+        QColor const mask_color = img->pixelColor(pixel_x, pixel_y);
+        float const image_factor = (mask_color.redF() + mask_color.greenF() + mask_color.blueF()) / 3.0f;
+        if (image_factor <= 0.001f)
+          continue;
+
+        mccv[i].x = std::clamp(color.x / 0.5f, 0.0f, 2.0f);
+        mccv[i].y = std::clamp(color.y / 0.5f, 0.0f, 2.0f);
+        mccv[i].z = std::clamp(color.z / 0.5f, 0.0f, 2.0f);
+      }
+    }
+    else
+    {
+      mccv[i].x = std::clamp(color.x / 0.5f, 0.0f, 2.0f);
+      mccv[i].y = std::clamp(color.y / 0.5f, 0.0f, 2.0f);
+      mccv[i].z = std::clamp(color.z / 0.5f, 0.0f, 2.0f);
+    }
+
+    changed = true;
+  }
+
+  if (changed)
+  {
+    registerChunkUpdate(ChunkUpdateFlags::MCCV);
+  }
+
+  return changed;
+}
+
 void MapChunk::update_vertex_colors()
 {
   if (_chunk_update_flags & ChunkUpdateFlags::MCCV)
@@ -1054,6 +1127,11 @@ bool MapChunk::flattenTerrain ( glm::vec3 const& pos
                               , math::degrees orientation
                               )
 {
+  if (BrushType == eFlattenType_Smooth_Inner)
+  {
+    return smooth_inner_vertices(pos, remain, radius);
+  }
+
   bool changed (false);
 
   for (int i(0); i < mapbufsize; ++i)
@@ -1085,6 +1163,20 @@ bool MapChunk::flattenTerrain ( glm::vec3 const& pos
 		  continue;
 	  }
 
+    if (BrushType == eFlattenType_Hill)
+    {
+      // Flat-top hill profile: full influence in the center, then smooth falloff to the edge.
+      // Cross-section is an ease-in/out ramp to a plateau, matching the user's sketch.
+      float const t = std::clamp(dist / radius, 0.f, 1.f);
+      float const plateau = 0.45f;
+      float const u = std::clamp((t - plateau) / (1.f - plateau), 0.f, 1.f);
+      float const smooth = u * u * (3.f - 2.f * u);
+      float const falloff = 1.f - smooth;
+      mVertices[i].y = glm::mix(mVertices[i].y, ah, remain * falloff);
+      changed = true;
+      continue;
+    }
+
     mVertices[i].y = glm::mix
       ( 
         mVertices[i].y
@@ -1107,6 +1199,178 @@ bool MapChunk::flattenTerrain ( glm::vec3 const& pos
   return changed;
 }
 
+bool MapChunk::flattenTerrainFast ( glm::vec3 const& pos
+                                  , float remain
+                                  , float radius
+                                  , int BrushType
+                                  , flatten_mode const& mode
+                                  , glm::vec3 const& origin
+                                  , math::degrees angle
+                                  , math::degrees orientation
+                                  )
+{
+  if (BrushType == eFlattenType_Smooth_Inner)
+  {
+    constexpr float k_inner_boost = 8.f;
+    return smooth_inner_vertices(pos, std::min(1.f, remain * k_inner_boost), radius);
+  }
+
+  bool changed (false);
+  float const radius_sq = radius * radius;
+  float const inv_radius = (radius > 1e-5f) ? (1.f / radius) : 0.f;
+  constexpr float k_fast_flatten_mix = 10.f;
+
+  float const cos_ori = glm::cos(math::radians(orientation)._);
+  float const sin_ori = glm::sin(math::radians(orientation)._);
+  float const tan_ang = glm::tan(math::radians(angle)._);
+
+  for (int i(0); i < mapbufsize; ++i)
+  {
+    glm::vec3 const& vtx = mVertices[i];
+    float const dx = vtx.x - pos.x;
+    float const dz = vtx.z - pos.z;
+    float const dist_sq = dx * dx + dz * dz;
+    if (dist_sq >= radius_sq)
+      continue;
+
+    float const dist = std::sqrt(dist_sq);
+
+    float const ah(origin.y
+        + ((vtx.x - origin.x) * cos_ori + (vtx.z - origin.z) * sin_ori) * tan_ang
+    );
+
+    if ((!mode.lower && ah < vtx.y)
+        || (!mode.raise && ah > vtx.y)
+        )
+    {
+      continue;
+    }
+
+    if (BrushType == eFlattenType_Origin)
+    {
+      mVertices[i].y = origin.y;
+      changed = true;
+      continue;
+    }
+
+    if (BrushType == eFlattenType_Hill)
+    {
+      float const t = std::clamp(dist * inv_radius, 0.f, 1.f);
+      float const plateau = 0.45f;
+      float const u = std::clamp((t - plateau) / (1.f - plateau), 0.f, 1.f);
+      float const smooth = u * u * (3.f - 2.f * u);
+      float const falloff = 1.f - smooth;
+      float const w = std::min(1.f, remain * falloff * k_fast_flatten_mix);
+      mVertices[i].y = glm::mix(mVertices[i].y, ah, w);
+      changed = true;
+      continue;
+    }
+
+    float t = BrushType == eFlattenType_Flat ? remain
+            : BrushType == eFlattenType_Linear ? remain * (1.f - dist * inv_radius)
+            : BrushType == eFlattenType_Smooth ? pow (remain, 1.f + dist * inv_radius)
+            : throw std::logic_error ("bad brush type");
+
+    t = std::min(1.f, t * k_fast_flatten_mix);
+    mVertices[i].y = glm::mix(mVertices[i].y, ah, t);
+    changed = true;
+  }
+
+  if (changed)
+  {
+    registerChunkUpdate(ChunkUpdateFlags::VERTEX);
+  }
+
+  return changed;
+}
+
+namespace
+{
+  float ramp_smoothstep01(float edge0, float edge1, float x)
+  {
+    if (edge1 <= edge0)
+      return x >= edge1 ? 1.f : 0.f;
+    float const t = std::clamp((x - edge0) / (edge1 - edge0), 0.f, 1.f);
+    return t * t * (3.f - 2.f * t);
+  }
+}
+
+bool MapChunk::applyTerrainRamp(glm::vec3 const& A, glm::vec3 const& B, float radius, float cap_len, float blend_strength)
+{
+  glm::vec2 const a2(A.x, A.z);
+  glm::vec2 const b2(B.x, B.z);
+  glm::vec2 const ab = b2 - a2;
+  float const Lxz = glm::length(ab);
+  if (Lxz < 1e-4f || radius <= 0.f)
+  {
+    return false;
+  }
+
+  float const cap = std::min(cap_len, Lxz * 0.45f);
+  float const cap_frac = cap / Lxz;
+
+  float const blend = std::clamp(blend_strength, 0.f, 1.f);
+  float const user_apply = 1.f - blend;
+
+  bool changed = false;
+
+  for (int i = 0; i < mapbufsize; ++i)
+  {
+    glm::vec3& vtx = mVertices[i];
+    glm::vec2 const p(vtx.x, vtx.z);
+
+    float const ab_len2 = glm::dot(ab, ab);
+    float const t = glm::clamp(glm::dot(p - a2, ab) / ab_len2, 0.f, 1.f);
+    glm::vec2 const closest = a2 + ab * t;
+
+    float const dist_perp = glm::distance(p, closest);
+    if (dist_perp > radius)
+    {
+      continue;
+    }
+
+    float const s = t;
+    float const h_ramp = glm::mix(A.y, B.y, s);
+
+    float w_long = 1.f;
+    if (cap_frac > 1e-5f)
+    {
+      if (s < cap_frac)
+      {
+        w_long = s / cap_frac;
+      }
+      else if (s > 1.f - cap_frac)
+      {
+        w_long = (1.f - s) / cap_frac;
+      }
+    }
+
+    float const dist_norm = dist_perp / radius;
+    float const w_lat = 1.f - ramp_smoothstep01(0.85f, 1.f, dist_norm);
+
+    float const w = w_long * w_lat * user_apply;
+    if (w <= 1e-6f)
+    {
+      continue;
+    }
+
+    float const new_y = glm::mix(vtx.y, h_ramp, w);
+    if (std::abs(new_y - vtx.y) < 1e-5f)
+    {
+      continue;
+    }
+    vtx.y = new_y;
+    changed = true;
+  }
+
+  if (changed)
+  {
+    registerChunkUpdate(ChunkUpdateFlags::VERTEX);
+  }
+
+  return changed;
+}
+
 bool MapChunk::blurTerrain ( glm::vec3 const& pos
                            , float remain
                            , float radius
@@ -1117,9 +1381,15 @@ bool MapChunk::blurTerrain ( glm::vec3 const& pos
 {
   bool changed = false;
 
-  if (BrushType == eFlattenType_Origin)
+  if (BrushType == eFlattenType_Origin || BrushType == eFlattenType_Smooth_Inner)
   {
     return false;
+  }
+
+  // Hill is a flatten profile; blur should behave like Smooth.
+  if (BrushType == eFlattenType_Hill)
+  {
+    BrushType = eFlattenType_Smooth;
   }
 
   for (int i (0); i < mapbufsize; ++i)
@@ -1183,6 +1453,115 @@ bool MapChunk::blurTerrain ( glm::vec3 const& pos
       );
 
     changed = true;
+  }
+
+  if (changed)
+  {
+    registerChunkUpdate(ChunkUpdateFlags::VERTEX);
+  }
+
+  return changed;
+}
+
+bool MapChunk::blurTerrainFast (glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode)
+{
+  bool changed = false;
+
+  // Keep behavior consistent with regular blur for unsupported types.
+  if (BrushType == eFlattenType_Origin || BrushType == eFlattenType_Smooth_Inner)
+    return false;
+
+  // Hill is meaningful for flatten, but blur should behave like Smooth.
+  if (BrushType == eFlattenType_Hill)
+    BrushType = eFlattenType_Smooth;
+
+  // Fast path: no O(radius^2) world sampling. Each vertex blends toward the mean height of its
+  // four cardinal neighbors (same as one Laplacian smoothing step), which is nearly constant cost
+  // and stays usable at very large brush radii. Stronger mix cap so one stroke settles quickly.
+  float const radius_sq = radius * radius;
+  float const inv_radius = (radius > 1e-5f) ? (1.f / radius) : 0.f;
+  constexpr float k_fast_mix_scale = 14.f;
+
+  for (int i (0); i < mapbufsize; ++i)
+  {
+    glm::vec3 const& vtx = mVertices[i];
+    float const dx = vtx.x - pos.x;
+    float const dz = vtx.z - pos.z;
+    float const dist_sq = dx * dx + dz * dz;
+    if (dist_sq >= radius_sq)
+      continue;
+
+    float const dist = std::sqrt(dist_sq);
+
+    float sum_y = 0.f;
+    for (unsigned dir = 0; dir < 4; ++dir)
+      sum_y += getNeighborVertex(i, dir).y;
+    float const target = 0.25f * sum_y;
+
+    float& y = mVertices[i].y;
+    if ((target > y && !mode.raise) || (target < y && !mode.lower))
+      continue;
+
+    float t = BrushType == eFlattenType_Flat ? remain
+            : BrushType == eFlattenType_Linear ? remain * (1.f - dist * inv_radius)
+            : BrushType == eFlattenType_Smooth ? pow (remain, 1.f + dist * inv_radius)
+            : throw std::logic_error ("bad brush type");
+
+    t = std::min(1.f, t * k_fast_mix_scale);
+    y = glm::mix(y, target, t);
+
+    changed = true;
+  }
+
+  if (changed)
+    registerChunkUpdate(ChunkUpdateFlags::VERTEX);
+
+  return changed;
+}
+
+bool MapChunk::smooth_inner_vertices(glm::vec3 const& pos, float remain, float radius)
+{
+  bool changed = false;
+
+  for (int z = 0; z < 8; ++z)
+  {
+    for (int x = 0; x < 8; ++x)
+    {
+      int const id = (z * 17 + 9) + x;
+
+      glm::vec3& v_pos = mVertices[id];
+      float const dist(misc::dist(v_pos, pos));
+
+      if (dist < radius)
+      {
+        glm::vec3 const& v00 = mVertices[id - 9];
+        glm::vec3 const& v10 = mVertices[id - 8];
+        glm::vec3 const& v11 = mVertices[id + 9];
+        glm::vec3 const& v01 = mVertices[id + 8];
+
+        glm::vec3 const d0 = v00 - v11;
+        glm::vec3 const d1 = v01 - v10;
+        float const dst_0 = glm::dot(d0, d0);
+        float const dst_1 = glm::dot(d1, d1);
+
+        float target;
+
+        if (dst_0 < dst_1)
+        {
+          target = (v00.y + v11.y) * 0.5f;
+        }
+        else
+        {
+          target = (v01.y + v10.y) * 0.5f;
+        }
+
+        float const diff = target - v_pos.y;
+
+        v_pos.y += diff * remain;
+
+        changed = true;
+      }
+    }
   }
 
   if (changed)

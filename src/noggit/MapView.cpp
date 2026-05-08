@@ -2,11 +2,13 @@
 #include <noggit/DBC.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapView.h>
+#include <noggit/MapHeaders.h>
 #include <noggit/Misc.h>
 #include <noggit/ModelManager.h> // ModelManager
 #include <noggit/TextureManager.h> // TextureManager, Texture
 #include <noggit/WMOInstance.h> // WMOInstance
 #include <noggit/World.h>
+#include <noggit/rendering/PointLightFlicker.hpp>
 #include <noggit/MapTile.h>
 #include <noggit/map_index.hpp>
 #include <noggit/TabletManager.hpp>
@@ -23,6 +25,7 @@
 #include <noggit/ui/RotationEditor.h>
 #include <noggit/ui/TexturePicker.h>
 #include <noggit/ui/TexturingGUI.h>
+#include <noggit/ui/RampCreationTool.hpp>
 #include <noggit/ui/Toolbar.h> // Noggit::Ui::toolbar
 #include <noggit/ui/Water.h>
 #include <noggit/ui/ZoneIDBrowser.h>
@@ -36,6 +39,9 @@
 #include <noggit/ui/texture_palette_small.hpp>
 #include <noggit/ui/MinimapCreator.hpp>
 #include <noggit/project/CurrentProject.hpp>
+#include <noggit/integrations/DiscordRichPresence.hpp>
+#include <noggit/integrations/EpsilonPatchExporter.hpp>
+#include <noggit/application/NoggitApplication.hpp>
 #include <opengl/scoped.hpp>
 #include <noggit/ui/tools/ViewToolbar/Ui/ViewToolbar.hpp>
 #include <noggit/ui/tools/AssetBrowser/Ui/AssetBrowser.hpp>
@@ -50,8 +56,25 @@
 #include <external/tracy/Tracy.hpp>
 #include <noggit/ui/object_palette.hpp>
 #include <external/glm/gtc/type_ptr.hpp>
+#include <external/glm/gtc/matrix_transform.hpp>
+#include <external/glm/gtx/euler_angles.hpp>
+#include <external/glm/gtx/matrix_decompose.hpp>
 #include <external/qtimgui/QtImGui.h>
 #include <opengl/types.hpp>
+#include <qt-color-widgets/color_selector.hpp>
+
+#include <QAbstractButton>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QGroupBox>
+#include <QLabel>
+#include <QListWidget>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QVBoxLayout>
+#include <QSignalBlocker>
+#include <QtCore/QRandomGenerator>
+#include <filesystem>
 #include <limits>
 #include <variant>
 #include <noggit/Selection.h>
@@ -71,11 +94,15 @@
 #include <noggit/tools/MinimapTool.hpp>
 #include <noggit/tools/StampTool.hpp>
 #include <noggit/tools/LightTool.hpp>
+#include <noggit/tools/PointLightTool.hpp>
 #include <noggit/tools/ScriptingTool.hpp>
 #include <noggit/tools/ChunkTool.hpp>
 #include <noggit/tools/AreaTriggerTool.hpp>
 #include <noggit/StringHash.hpp>
 #include <noggit/application/NoggitApplication.hpp>
+#include <noggit/ActionManager.hpp>
+#include <noggit/errorHandling.h>
+#include <noggit/Log.h>
 
 #ifdef USE_MYSQL_UID_STORAGE
 #include <mysql/mysql.h>
@@ -95,6 +122,7 @@
 
 #include "revision.h"
 
+#include <QtCore/QCoreApplication>
 #include <QtCore/QTimer>
 #include <QtGui/QMouseEvent>
 #include <QtWidgets/QApplication>
@@ -111,6 +139,7 @@
 #include <QScrollBar>
 #include <QDateTime>
 #include <QCursor>
+#include <QEvent>
 #include <QFileDialog>
 #include <QProgressDialog>
 #include <QClipboard>
@@ -120,6 +149,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <cstring>
+#include <exception>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -256,6 +288,7 @@ void MapView::set_editing_mode(editing_mode mode)
 
     _asset_browser_dock->hide();
     _viewport_overlay_ui->gizmoBar->hide();
+    _viewport_overlay_ui->flattenRaiseLowerBar->hide();
   }
 
   auto previous_mode = _left_sec_toolbar->getCurrentMode();
@@ -302,6 +335,13 @@ void MapView::set_editing_mode(editing_mode mode)
   }
 
   terrainMode = mode;
+
+  if (mode != editing_mode::point_light)
+  {
+    _world->selectedPointLightIndex(std::nullopt);
+    clearPointLightPropertyEditFallback();
+  }
+
   _toolbar->check_tool (mode);
   this->activateWindow();
 
@@ -325,8 +365,24 @@ void MapView::setToolPropertyWidgetVisibility(editing_mode mode)
   case editing_mode::object:
     _asset_browser_dock->setVisible(!ui_hidden && _settings->value("map_view/asset_browser", false).toBool());
     _viewport_overlay_ui->gizmoBar->setVisible(!ui_hidden);
+    _viewport_overlay_ui->flattenRaiseLowerBar->setVisible(false);
     break;
+
+  case editing_mode::flatten_blur:
+    _viewport_overlay_ui->gizmoBar->setVisible(false);
+    _viewport_overlay_ui->flattenRaiseLowerBar->setVisible(!ui_hidden);
+    if (!ui_hidden)
+    {
+      QSignalBlocker const br(_viewport_overlay_ui->flattenRaiseToggle);
+      QSignalBlocker const bl(_viewport_overlay_ui->flattenLowerToggle);
+      _viewport_overlay_ui->flattenRaiseToggle->setChecked(_left_sec_toolbar->flattenRaiseChecked());
+      _viewport_overlay_ui->flattenLowerToggle->setChecked(_left_sec_toolbar->flattenLowerChecked());
+    }
+    break;
+
   default:
+    _viewport_overlay_ui->gizmoBar->setVisible(false);
+    _viewport_overlay_ui->flattenRaiseLowerBar->setVisible(false);
     break;
   }
 
@@ -433,6 +489,45 @@ void MapView::setupViewportOverlay()
   _viewport_overlay_ui->gizmoScaleButton->setIcon(Noggit::Ui::FontNoggitIcon(Noggit::Ui::FontNoggit::Icons::GIZMO_SCALE));
   _viewport_overlay_ui->gizmoTranslateButton->setIcon(Noggit::Ui::FontNoggitIcon(Noggit::Ui::FontNoggit::Icons::GIZMO_TRANSLATE));
 
+  _viewport_overlay_ui->flattenBarIconLabel->setPixmap(
+    Noggit::Ui::FontNoggitIcon(Noggit::Ui::FontNoggit::Icons::TOOL_FLATTEN_BLUR).pixmap(QSize(20, 20)));
+  _viewport_overlay_ui->flattenRaiseLowerBar->setFixedHeight(30);
+  _viewport_overlay_ui->flattenRaiseLowerBar->setStyleSheet(QStringLiteral(
+    "QWidget#flattenRaiseLowerBar {"
+    "  background-color: #2a2a2d;"
+    "  border: 1px solid #141416;"
+    "  border-radius: 2px;"
+    "}"
+    "QLabel#flattenBarIconLabel {"
+    "  background: transparent;"
+    "  padding: 0px;"
+    "}"
+    "QFrame#flattenBarVLine1, QFrame#flattenBarVLine2 {"
+    "  background-color: #1c1c1f;"
+    "  border: none;"
+    "  max-width: 1px;"
+    "  min-width: 1px;"
+    "}"
+    "QCheckBox#flattenRaiseToggle, QCheckBox#flattenLowerToggle {"
+    "  color: #e6e6e6;"
+    "  spacing: 5px;"
+    "  background: transparent;"
+    "  padding: 0px 8px;"
+    "  font-size: 12px;"
+    "}"
+    "QCheckBox#flattenRaiseToggle::indicator, QCheckBox#flattenLowerToggle::indicator {"
+    "  width: 14px;"
+    "  height: 14px;"
+    "  border: 1px solid #5a5a62;"
+    "  border-radius: 2px;"
+    "  background: #3c3c42;"
+    "}"
+    "QCheckBox#flattenRaiseToggle::indicator:checked, QCheckBox#flattenLowerToggle::indicator:checked {"
+    "  background: #4a4a52;"
+    "  border: 1px solid #707078;"
+    "}"
+  ));
+
   connect(this, &MapView::resized
     ,[this]()
           {
@@ -477,6 +572,9 @@ void MapView::setupViewportOverlay()
   connect(_viewport_overlay_ui->gizmoScaleButton, &QPushButton::clicked, [this]() {
       updateGizmoOverlay(ImGuizmo::OPERATION::SCALE);
     });
+
+  // Keep overlay control in sync with the property default (gizmo on by default).
+  _viewport_overlay_ui->gizmoVisibleButton->setChecked(_gizmo_on.get());
 }
 
 void MapView::updateGizmoOverlay(ImGuizmo::OPERATION operation)
@@ -694,6 +792,8 @@ void MapView::setupToolbars()
   _left_sec_toolbar = new Noggit::Ui::Tools::ViewToolbar::Ui::ViewToolbar(this, terrainMode);
   connect(this, &QObject::destroyed, _left_sec_toolbar, &QObject::deleteLater);
   left_sec_toolbar_layout->addWidget( _left_sec_toolbar);
+  // Hide the extra left secondary toolbar strip by default.
+  _left_sec_toolbar->hide();
 
   auto top_toolbar_layout = new QVBoxLayout(_viewport_overlay_ui->upperToolbarHolder);
   top_toolbar_layout->setContentsMargins(5, 0, 5, 0);
@@ -709,6 +809,24 @@ void MapView::setupToolbars()
 
   top_toolbar_layout->addWidget( _view_toolbar);
   sec_toolbar_layout->addWidget( _secondary_toolbar);
+
+  // Flatten / Blur: Raise + Lower on the viewport (left of the object gizmo bar). Keeps controls visible for classic UI too.
+  connect(_viewport_overlay_ui->flattenRaiseToggle, &QAbstractButton::toggled, this,
+          [this](bool on) { _left_sec_toolbar->setFlattenRaiseChecked(on); });
+  connect(_viewport_overlay_ui->flattenLowerToggle, &QAbstractButton::toggled, this,
+          [this](bool on) { _left_sec_toolbar->setFlattenLowerChecked(on); });
+  connect(_left_sec_toolbar, &Noggit::Ui::Tools::ViewToolbar::Ui::ViewToolbar::updateStateRaise, this,
+          [this](bool on)
+          {
+            QSignalBlocker const b(_viewport_overlay_ui->flattenRaiseToggle);
+            _viewport_overlay_ui->flattenRaiseToggle->setChecked(on);
+          });
+  connect(_left_sec_toolbar, &Noggit::Ui::Tools::ViewToolbar::Ui::ViewToolbar::updateStateLower, this,
+          [this](bool on)
+          {
+            QSignalBlocker const b(_viewport_overlay_ui->flattenLowerToggle);
+            _viewport_overlay_ui->flattenLowerToggle->setChecked(on);
+          });
 }
 
 void MapView::setupMainToolbar()
@@ -844,6 +962,201 @@ void MapView::invalidate()
     _needs_redraw = true;
 }
 
+std::optional<std::size_t> MapView::resolvePointLightPropertyEditIndex(QListWidget* panel_point_list) const
+{
+  if (!_world)
+    return std::nullopt;
+  auto const& lights = _world->pointLights();
+  if (panel_point_list)
+  {
+    int const r = panel_point_list->currentRow();
+    if (r >= 0 && r < static_cast<int>(lights.size()))
+      return static_cast<std::size_t>(r);
+  }
+  if (auto const w = _world->selectedPointLightIndex();
+      w.has_value() && *w < lights.size())
+    return *w;
+  if (_point_light_property_edit_fallback.has_value()
+      && *_point_light_property_edit_fallback < lights.size())
+    return *_point_light_property_edit_fallback;
+  return std::nullopt;
+}
+
+void MapView::setPointLightPropertyEditFallback(std::optional<std::size_t> row_index)
+{
+  if (!row_index.has_value() || !_world || *row_index >= _world->pointLights().size())
+  {
+    _point_light_property_edit_fallback.reset();
+    return;
+  }
+  _point_light_property_edit_fallback = row_index;
+}
+
+void MapView::clearPointLightPropertyEditFallback()
+{
+  _point_light_property_edit_fallback.reset();
+}
+
+bool MapView::pointLightViewportTransformBlocked() const noexcept
+{
+  return _point_light_gizmo_edit_action || _point_light_numpad_edit_action || _point_light_mmb_edit_action;
+}
+
+void MapView::touchPointLightPropertyUndoBatch()
+{
+  if (!_world)
+    return;
+  bool const have_edit_target =
+      (_world->selectedPointLightIndex().has_value()
+       && *_world->selectedPointLightIndex() < _world->pointLights().size())
+      || (_point_light_property_edit_fallback.has_value()
+          && *_point_light_property_edit_fallback < _world->pointLights().size());
+  if (!have_edit_target)
+    return;
+
+  if (_point_light_gizmo_edit_action || _point_light_numpad_edit_action)
+    return;
+
+  if (NOGGIT_CUR_ACTION)
+  {
+    if (!_point_light_property_undo_session
+        || (NOGGIT_CUR_ACTION->getFlags() & Noggit::ActionFlags::ePOINT_LIGHTS_CHANGED) == 0
+        || NOGGIT_CUR_ACTION->getModalityControllers() != Noggit::ActionModalityControllers::eNONE)
+      return;
+
+    _point_light_property_undo_timer.start(400);
+    return;
+  }
+
+  if (Noggit::Action* const action = NOGGIT_ACTION_MGR->beginAction(this,
+                                                                    Noggit::ActionFlags::ePOINT_LIGHTS_CHANGED,
+                                                                    Noggit::ActionModalityControllers::eNONE))
+  {
+    action->registerPointLightsChange();
+    _point_light_property_undo_session = true;
+    _point_light_property_undo_timer.start(400);
+  }
+}
+
+void MapView::flushPointLightPropertyUndoBatch()
+{
+  if (_point_light_property_undo_timer.isActive())
+    _point_light_property_undo_timer.stop();
+
+  if (!_point_light_property_undo_session)
+    return;
+
+  if (NOGGIT_CUR_ACTION
+      && (NOGGIT_CUR_ACTION->getFlags() & Noggit::ActionFlags::ePOINT_LIGHTS_CHANGED)
+      && NOGGIT_CUR_ACTION->getModalityControllers() == Noggit::ActionModalityControllers::eNONE)
+  {
+    NOGGIT_ACTION_MGR->endAction();
+  }
+
+  _point_light_property_undo_session = false;
+}
+
+void MapView::recordPointLightListChange(std::function<void()> mut)
+{
+  flushPointLightPropertyUndoBatch();
+
+  if (NOGGIT_CUR_ACTION)
+  {
+    mut();
+    return;
+  }
+
+  if (Noggit::Action* const action = NOGGIT_ACTION_MGR->beginAction(this,
+                                                                    Noggit::ActionFlags::ePOINT_LIGHTS_CHANGED,
+                                                                    Noggit::ActionModalityControllers::eNONE))
+  {
+    action->registerPointLightsChange();
+    mut();
+    NOGGIT_ACTION_MGR->endAction();
+  }
+  else
+  {
+    mut();
+  }
+}
+
+void MapView::setPointLightGizmoSuppressedForColorPick(bool suppressed)
+{
+  if (_point_light_suppress_gizmo_for_color_pick == suppressed)
+    return;
+  _point_light_suppress_gizmo_for_color_pick = suppressed;
+  if (suppressed && _point_light_gizmo_edit_action)
+  {
+    if (NOGGIT_CUR_ACTION)
+      NOGGIT_ACTION_MGR->endAction();
+    _point_light_gizmo_edit_action = false;
+  }
+  invalidate();
+}
+
+bool MapView::pointLightColorDialogOwnedByRegisteredPicker(QWidget* dialog) const
+{
+  QWidget* p = dialog->parentWidget();
+  while (p)
+  {
+    for (auto const& reg : _point_light_color_pickers)
+      if (reg && p == reg.data())
+        return true;
+    p = p->parentWidget();
+  }
+  return false;
+}
+
+void MapView::registerPointLightColorPicker(QWidget* picker)
+{
+  if (!picker)
+    return;
+  for (auto const& existing : _point_light_color_pickers)
+    if (existing && existing.data() == picker)
+      return;
+
+  _point_light_color_pickers.emplace_back(picker);
+  picker->installEventFilter(this);
+  connect(picker, &QObject::destroyed, this, [this](QObject* o) {
+    auto* dead = static_cast<QWidget*>(o);
+    _point_light_color_pickers.erase(
+      std::remove_if(_point_light_color_pickers.begin(), _point_light_color_pickers.end(),
+                     [dead](QPointer<QWidget> const& ptr) { return !ptr || ptr.data() == dead; }),
+      _point_light_color_pickers.end());
+  });
+}
+
+bool MapView::eventFilter(QObject* watched, QEvent* event)
+{
+  // Only hide the point-light gizmo while a modal QColorDialog opened from our pickers is visible.
+  // (Do not suppress on every click on the color widget — that hid the gizmo for all panel use.)
+  if (event->type() == QEvent::Show)
+  {
+    auto* const win = qobject_cast<QWidget*>(watched);
+    if (win && win->isWindow()
+        && std::strcmp(win->metaObject()->className(), "QColorDialog") == 0
+        && pointLightColorDialogOwnedByRegisteredPicker(win))
+    {
+      _point_light_active_color_dialog = win;
+      setPointLightGizmoSuppressedForColorPick(true);
+    }
+  }
+  else if (event->type() == QEvent::Hide)
+  {
+    auto* const win = qobject_cast<QWidget*>(watched);
+    if (win && win->isWindow()
+        && std::strcmp(win->metaObject()->className(), "QColorDialog") == 0
+        && _point_light_suppress_gizmo_for_color_pick)
+    {
+      if (_point_light_active_color_dialog && watched != _point_light_active_color_dialog)
+        return false;
+      _point_light_active_color_dialog.clear();
+      setPointLightGizmoSuppressedForColorPick(false);
+    }
+  }
+  return false;
+}
+
 void MapView::selectObjects(std::array<glm::vec2, 2> selection_box, float depth)
 {
     _world->select_objects_in_area(selection_box, !_mod_shift_down, _model_view, _projection, width(), height(), depth, _camera.position);
@@ -949,6 +1262,8 @@ void MapView::setupFileMenu()
                  clipboard->setText(port_command.str().c_str(), QClipboard::Clipboard);
                }
   );
+
+  ADD_ACTION_NS (file_menu, "Ramp Creation Tool", [this] { ensureRampToolWindow(); });
 
 }
 
@@ -1891,6 +2206,13 @@ void MapView::setupViewMenu()
           _world->renderer()->markTerrainParamsUniformBlockDirty();
       });
 
+  ADD_TOGGLE_POST(view_menu, "Tileset", Qt::SHIFT | Qt::Key_F5, _draw_tileset,
+      [=]
+      {
+          _world->renderer()->getTerrainParamsUniformBlock()->draw_tileset = _draw_tileset.get();
+          _world->renderer()->markTerrainParamsUniformBlockDirty();
+      });
+
   ADD_TOGGLE_POST(view_menu, "Baked Shadows", Qt::SHIFT | Qt::Key_F4, _draw_baked_shadows,
       [=]
       {
@@ -2154,6 +2476,7 @@ void MapView::setupHotkeys()
                   alloff_contour = _draw_contour.get();
                   alloff_climb = _draw_climb.get();
                   alloff_vertex_color = _draw_vertex_color.get();
+                  alloff_tileset = _draw_tileset.get();
                   alloff_baked_shadows = _draw_baked_shadows.get();
                   alloff_wmo = _draw_wmo.get();
                   alloff_fog = _draw_fog.get();
@@ -2164,6 +2487,7 @@ void MapView::setupHotkeys()
                   _draw_contour.set (true);
                   _draw_climb.set (false);
                   _draw_vertex_color.set(true);
+                  _draw_tileset.set(true);
                   _draw_baked_shadows.set(false);
                   _draw_wmo.set (false);
                   _draw_terrain.set (true);
@@ -2176,6 +2500,7 @@ void MapView::setupHotkeys()
                   _draw_contour.set (alloff_contour);
                   _draw_climb.set(alloff_climb);
                   _draw_vertex_color.set(alloff_vertex_color);
+                  _draw_tileset.set(alloff_tileset);
                   _draw_baked_shadows.set(alloff_baked_shadows);
                   _draw_wmo.set (alloff_wmo);
                   _draw_terrain.set (alloff_terrain);
@@ -2342,6 +2667,8 @@ void MapView::setupHotkeys()
   addHotkey(Qt::Key_F, MOD_none, "setAreaId"_hash);
 
   addHotkey(Qt::Key_Delete, MOD_none, "deleteSelection"_hash);
+
+  addHotkey(Qt::Key_V, MOD_none, "chunkManipulatorPaste"_hash);
 }
 
 void MapView::setupMinimap()
@@ -2437,6 +2764,7 @@ void MapView::createGUI()
   _tools.emplace_back(std::make_unique<Noggit::MinimapTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::StampTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::LightTool>(this))->setupUi(_tool_panel_dock);
+  _tools.emplace_back(std::make_unique<Noggit::PointLightTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::ScriptingTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::ChunkTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::AreaTriggerTool>(this))->setupUi(_tool_panel_dock);
@@ -2524,6 +2852,22 @@ MapView::MapView( math::degrees camera_yaw0
   , _tablet_manager(Noggit::TabletManager::instance()),
     _project(Project)
 {
+  using clock_t = std::chrono::steady_clock;
+  auto const t0 = clock_t::now();
+  LogError << "MapView::MapView: begin" << std::endl;
+
+  // Bruteforce a stable QOpenGLWidget format before the context is created.
+  // Disable MSAA to avoid format/driver instability during early uploads.
+  {
+    QSurfaceFormat fmt = QSurfaceFormat::defaultFormat();
+    fmt.setRenderableType(QSurfaceFormat::OpenGL);
+    fmt.setProfile(QSurfaceFormat::CoreProfile);
+    fmt.setVersion(4, 1);
+    fmt.setDepthBufferSize(24);
+    fmt.setSamples(0);
+    setFormat(fmt);
+  }
+
   setWindowTitle ("Noggit Studio Red - " STRPRODUCTVER);
   setFocusPolicy (Qt::StrongFocus);
   setMouseTracking (true);
@@ -2533,6 +2877,9 @@ MapView::MapView( math::degrees camera_yaw0
   setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
 
   _world->LoadSavedSelectionGroups(); // not doing this in world constructor because noggit loads world twice
+  LogError << "MapView::MapView: after LoadSavedSelectionGroups (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
 
   _context = Noggit::NoggitRenderContext::MAP_VIEW;
   _transform_gizmo.setWorld(_world.get());
@@ -2606,6 +2953,18 @@ MapView::MapView( math::degrees camera_yaw0
 
   _startup_time.start();
 
+  _discord_rich_presence_enabled = _settings->value("integrations/discord_rich_presence", false).toBool();
+  _discord_rich_presence_app_id = _settings->value("integrations/discord_app_id", "959654402141085748").toString().toStdString();
+  _discord_rich_presence_large_image_key = _settings->value("integrations/discord_large_image_key", "").toString().toStdString();
+  _discord_rich_presence_large_image_text = _settings->value("integrations/discord_large_image_text", "Noggit Red").toString().toStdString();
+  _discord_rich_presence_start_ts = std::nullopt;
+  _discord_last_map.clear();
+  _discord_last_tool.clear();
+  Noggit::Integrations::DiscordRichPresence::instance().configure(_discord_rich_presence_enabled, _discord_rich_presence_app_id);
+  Noggit::Integrations::DiscordRichPresence::instance().setAssets(
+    Noggit::Integrations::DiscordAssets{ _discord_rich_presence_large_image_key, _discord_rich_presence_large_image_text }
+  );
+
   int _fps_limit = _settings->value("fps_limit", 60).toInt();
   int _frametime = static_cast<int>((1.f / static_cast<float>(_fps_limit)) * 1000.f);
   std::cout << "FPS limit is set to : " << _fps_limit << " (" << _frametime << ")" << std::endl;
@@ -2631,11 +2990,44 @@ MapView::MapView( math::degrees camera_yaw0
           update();
       });
 
+  _point_light_property_undo_timer.setSingleShot(true);
+  connect(&_point_light_property_undo_timer, &QTimer::timeout, this, [this] {
+    flushPointLightPropertyUndoBatch();
+  });
+
   // reduce frame rate in background
   connect(QGuiApplication::instance(), SIGNAL(applicationStateChanged(Qt::ApplicationState)),
       this, SLOT(onApplicationStateChanged(Qt::ApplicationState)));
 
+  LogError << "MapView::MapView: before createGUI (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
   createGUI();
+  LogError << "MapView::MapView: after createGUI (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
+
+  connect(&_draw_tileset, &Noggit::BoolToggleProperty::changed, this, [this](bool)
+  {
+    _world->renderer()->getTerrainParamsUniformBlock()->draw_tileset = _draw_tileset.get();
+    _world->renderer()->markTerrainParamsUniformBlockDirty();
+  });
+
+  connect(&_draw_texture_layer_count_overlay, &Noggit::BoolToggleProperty::changed, this, [this](bool)
+  {
+    _world->renderer()->getTerrainParamsUniformBlock()->draw_texture_layer_count_overlay =
+      _draw_texture_layer_count_overlay.get();
+    _world->renderer()->markTerrainParamsUniformBlockDirty();
+  });
+
+  if (QCoreApplication* app = QCoreApplication::instance())
+    app->installEventFilter(this);
+
+  _tablet_pressure_strength = _settings->value("tablet/pressure_strength", true).toBool();
+
+  LogError << "MapView::MapView: end (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
 }
 
 void MapView::tabletEvent(QTabletEvent* event)
@@ -2712,6 +3104,10 @@ void MapView::on_uid_fix_fail()
 
 void MapView::initializeGL()
 {
+  using clock_t = std::chrono::steady_clock;
+  auto const t0 = clock_t::now();
+  LogError << "MapView::initializeGL: begin" << std::endl;
+
   bool uid_warning = false;
 
   OpenGL::context::scoped_setter const _ (::gl, context());
@@ -2723,6 +3119,9 @@ void MapView::initializeGL()
   if (_uid_fix == uid_fix_mode::max_uid)
   {
     _world->mapIndex.searchMaxUID();
+    LogError << "MapView::initializeGL: after searchMaxUID (ms="
+             << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+             << ")" << std::endl;
   }
   else if (_uid_fix == uid_fix_mode::fix_all_fail_on_model_loading_error)
   {
@@ -2733,12 +3132,18 @@ void MapView::initializeGL()
       on_uid_fix_fail();
       return;
     }
+    LogError << "MapView::initializeGL: after fixUIDs(fail_on_error) (ms="
+             << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+             << ")" << std::endl;
   }
   else if (_uid_fix == uid_fix_mode::fix_all_fuckporting_edition)
   {
     auto result = _world->mapIndex.fixUIDs (_world.get(), false);
 
     uid_warning = result == uid_fix_status::done_with_errors;
+    LogError << "MapView::initializeGL: after fixUIDs(fuckporting) (ms="
+             << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+             << ")" << std::endl;
   }
 
   _uid_fix = uid_fix_mode::none;
@@ -2747,6 +3152,9 @@ void MapView::initializeGL()
   {
     move_camera_with_auto_height (_camera.position);
   }
+  LogError << "MapView::initializeGL: after move_camera_with_auto_height (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
 
   if (uid_warning)
   {
@@ -2761,15 +3169,24 @@ void MapView::initializeGL()
   }
 
   _imgui_context = QtImGui::initialize(this);
+  LogError << "MapView::initializeGL: after QtImGui::initialize (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
 
   emit resized();
 
   _last_opengl_context = context();
 
   _world->renderer()->upload();
+  LogError << "MapView::initializeGL: after renderer()->upload (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
   onSettingsSave();
 
   _buffers.upload();
+  LogError << "MapView::initializeGL: after _buffers.upload (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
 
   gl.bufferData<GL_PIXEL_PACK_BUFFER>(_buffers[0], 4, nullptr, GL_DYNAMIC_READ);
   gl.bufferData<GL_PIXEL_PACK_BUFFER>(_buffers[1], 4, nullptr, GL_DYNAMIC_READ);
@@ -2777,6 +3194,10 @@ void MapView::initializeGL()
   connect(context(), &QOpenGLContext::aboutToBeDestroyed, [this](){ emit aboutToLooseContext(); });
 
   _gl_initialized = true;
+
+  LogError << "MapView::initializeGL: end (ms="
+           << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
+           << ")" << std::endl;
 }
 
 void MapView::paintGL()
@@ -2784,6 +3205,12 @@ void MapView::paintGL()
   ZoneScoped;
 
   static bool lock = false;
+  static bool logged_once = false;
+  if (!logged_once)
+  {
+    logged_once = true;
+    LogError << "MapView::paintGL: first entry" << std::endl;
+  }
 
   if (lock)
     return;
@@ -2819,19 +3246,49 @@ void MapView::paintGL()
   OpenGL::context::scoped_setter const _(::gl, context());
   makeCurrent();
 
+  Noggit::register_crash_render_stage("MapView::paintGL:after_makeCurrent");
   gl.clear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
   {
     lock = true;
-    draw_map();
-    activeTool()->postRender();
+    try
+    {
+      Noggit::register_crash_render_stage("MapView::paintGL:draw_map");
+      LogError << "MapView::paintGL: before draw_map" << std::endl;
+      draw_map();
+      Noggit::register_crash_render_stage("MapView::paintGL:postRender");
+      LogError << "MapView::paintGL: after draw_map" << std::endl;
+      activeTool()->postRender();
+    }
+    catch (std::exception const& e)
+    {
+      LogError << "MapView::paintGL: caught std::exception during draw_map/postRender: " << e.what() << std::endl;
+      try
+      {
+        std::cerr.flush();
+      }
+      catch (...)
+      {
+      }
+    }
+    catch (...)
+    {
+      LogError << "MapView::paintGL: caught non-std exception during draw_map/postRender" << std::endl;
+      try
+      {
+        std::cerr.flush();
+      }
+      catch (...)
+      {
+      }
+    }
     lock = false;
     tick (now - _last_update);
   }
 
   _last_update = now;
 
-  if (_gizmo_on.get() && _world->has_selection())
+  if (_gizmo_on.get() && _world->has_selection() && !_world->selectedPointLightIndex().has_value())
   {
     ImGui::SetCurrentContext(_imgui_context);
     QtImGui::newFrame();
@@ -2914,6 +3371,158 @@ void MapView::paintGL()
 
   }
 
+  // Point light gizmo: only in the point light tool (world pick is gated there too).
+  if (terrainMode == editing_mode::point_light && _gizmo_on.get() && _world->selectedPointLightIndex().has_value()
+      && !_point_light_suppress_gizmo_for_color_pick
+      && _display_mode == display_mode::in_3D)
+  {
+    flushPointLightPropertyUndoBatch();
+    ImGui::SetCurrentContext(_imgui_context);
+    QtImGui::newFrame();
+
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::SetNextWindowPos(ImVec2(-100.f, -100.f));
+    // No p_open: this host window is only a draw target; a bool would let ImGui dismiss it on some IO paths.
+    ImGui::Begin("PointLightGizmo", nullptr, ImGuiWindowFlags_::ImGuiWindowFlags_NoTitleBar
+                                                  | ImGuiWindowFlags_::ImGuiWindowFlags_NoBackground);
+
+    ImGuizmo::SetID(static_cast<int>(Noggit::Ui::Tools::ViewportGizmo::GizmoContext::MAP_VIEW) + 1337);
+    ImGuizmo::SetDrawlist();
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetScaleGizmoAxisLock(true);
+    ImGuizmo::BeginFrame();
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+
+    auto& lights = _world->pointLights();
+    auto idx = *_world->selectedPointLightIndex();
+    if (idx < lights.size())
+    {
+      auto& l = lights[idx];
+
+      glm::mat4x4 const rot_m = glm::eulerAngleXYZ (l.rotation_radians.x
+                                                    , l.rotation_radians.y
+                                                    , l.rotation_radians.z);
+      glm::mat4x4 object_matrix;
+      if (l.light_type == World::MapLightType::Spot)
+      {
+        glm::vec3 const s = glm::max (l.spot_gizmo_scale, glm::vec3 (0.01f));
+        object_matrix = glm::translate (glm::mat4x4 (1.f), l.position) * rot_m * glm::scale (glm::mat4x4 (1.f), s);
+      }
+      else
+      {
+        object_matrix = glm::translate (glm::mat4x4 (1.f), l.position) * rot_m;
+      }
+      glm::mat4x4 delta_matrix = glm::mat4x4(1.f);
+
+      ImGuizmo::OPERATION op = _gizmo_operation;
+      if (l.light_type == World::MapLightType::Point)
+        op = ImGuizmo::OPERATION::TRANSLATE;
+
+      ImGuizmo::Manipulate(glm::value_ptr(_model_view), glm::value_ptr(_projection),
+                           op, _gizmo_mode,
+                           glm::value_ptr(object_matrix), glm::value_ptr(delta_matrix), nullptr);
+
+      // Used on the next LMB path before this frame's Manipulate runs again (see doSelection).
+      _point_light_gizmo_was_over = ImGuizmo::IsOver();
+
+      bool const using_gizmo = ImGuizmo::IsUsing();
+
+      if (using_gizmo)
+      {
+        if (!_point_light_gizmo_edit_action && !NOGGIT_CUR_ACTION && !_point_light_numpad_edit_action
+            && !_point_light_mmb_edit_action)
+        {
+          if (Noggit::Action* action = NOGGIT_ACTION_MGR->beginAction(this, Noggit::ActionFlags::ePOINT_LIGHTS_CHANGED,
+                                                                    Noggit::ActionModalityControllers::eLMB))
+          {
+            action->registerPointLightsChange();
+            _point_light_gizmo_edit_action = true;
+          }
+        }
+
+        // Match ViewportGizmo::handleTransformGizmo: decompose delta_matrix only and apply increments.
+        // Full-matrix decompose reintroduced unstable euler extraction (jitter / spasms while translating).
+        glm::vec3 new_scale;
+        glm::quat new_orientation;
+        glm::vec3 new_translation;
+        glm::vec3 new_skew_;
+        glm::vec4 new_perspective_;
+        glm::decompose(delta_matrix, new_scale, new_orientation, new_translation, new_skew_, new_perspective_);
+        new_orientation = glm::conjugate(new_orientation);
+
+        ImGuizmo::OPERATION const apply_op = (l.light_type == World::MapLightType::Point)
+                                                 ? ImGuizmo::OPERATION::TRANSLATE
+                                                 : op;
+
+        bool changed = false;
+        switch (apply_op)
+        {
+          case ImGuizmo::OPERATION::TRANSLATE:
+            if (new_translation.x != 0.0f || new_translation.y != 0.0f || new_translation.z != 0.0f)
+            {
+              l.position += new_translation;
+              l.tile_x = static_cast<std::uint16_t>(std::clamp(int(l.position.x / TILESIZE), 0, 63));
+              l.tile_y = static_cast<std::uint16_t>(std::clamp(int(l.position.z / TILESIZE), 0, 63));
+              changed = true;
+            }
+            break;
+          case ImGuizmo::OPERATION::ROTATE:
+            if (l.light_type == World::MapLightType::Spot)
+            {
+              // Same early-out and euler path as ViewportGizmo (single-selection branch).
+              if (new_orientation.x != -0.0f || new_orientation.y != -0.0f || new_orientation.z != -0.0f)
+              {
+                glm::vec3 rot_euler = glm::eulerAngles(new_orientation);
+                rot_euler *= -1.f;
+                rot_euler *= 57.2957795f;
+                l.rotation_radians.x += glm::radians(rot_euler.x);
+                l.rotation_radians.y += glm::radians(rot_euler.y);
+                l.rotation_radians.z += glm::radians(rot_euler.z);
+                changed = true;
+              }
+            }
+            break;
+          case ImGuizmo::OPERATION::SCALE:
+            if (l.light_type == World::MapLightType::Spot)
+            {
+              if (new_scale.x != 1.0f || new_scale.y != 1.0f || new_scale.z != 1.0f)
+              {
+                // Single-selection object gizmo assigns uniform scale from delta; spots keep per-axis.
+                l.spot_gizmo_scale = glm::max(new_scale, glm::vec3(0.01f));
+                changed = true;
+              }
+            }
+            break;
+          default:
+            break;
+        }
+
+        if (changed)
+          invalidate();
+      }
+      else if (_point_light_gizmo_edit_action)
+      {
+        if (NOGGIT_CUR_ACTION)
+          NOGGIT_ACTION_MGR->endAction();
+        _point_light_gizmo_edit_action = false;
+      }
+    }
+    else
+    {
+      _point_light_gizmo_was_over = false;
+    }
+
+    ImGui::End();
+
+    ImGui::Render();
+  }
+  else
+  {
+    _point_light_gizmo_was_over = false;
+  }
+
   if (_world->uid_duplicates_found() && !_uid_duplicate_warning_shown)
   {
     _uid_duplicate_warning_shown = true;
@@ -2941,9 +3550,19 @@ void MapView::resizeGL (int width, int height)
 
 MapView::~MapView()
 {
+  Noggit::Integrations::DiscordRichPresence::instance().shutdown();
+
   makeCurrent();
 
   _destroying = true;
+
+  if (QCoreApplication* app = QCoreApplication::instance())
+    app->removeEventFilter(this);
+  for (auto const& ptr : _point_light_color_pickers)
+    if (ptr)
+      ptr->removeEventFilter(this);
+  _point_light_color_pickers.clear();
+  _point_light_active_color_dialog.clear();
 
   _main_window->removeToolBar(_main_window->_app_toolbar);
 
@@ -2979,6 +3598,7 @@ MapView::~MapView()
   TextureManager::report();
   WMOManager::report();
 
+  flushPointLightPropertyUndoBatch();
   NOGGIT_ACTION_MGR->disconnect();
 
   _buffers.unload();
@@ -2991,6 +3611,31 @@ void MapView::tick (float dt)
 	_mod_ctrl_down = QApplication::keyboardModifiers().testFlag(Qt::ControlModifier);
 	_mod_alt_down = QApplication::keyboardModifiers().testFlag(Qt::AltModifier);
 	_mod_num_down = QApplication::keyboardModifiers().testFlag(Qt::KeypadModifier);
+
+  if (_discord_rich_presence_enabled && !_discord_rich_presence_app_id.empty())
+  {
+    if (!_discord_rich_presence_start_ts.has_value())
+      _discord_rich_presence_start_ts = static_cast<std::int64_t>(QDateTime::currentSecsSinceEpoch());
+
+    std::string const map_name = _world ? _world->basename : std::string{};
+    std::string const tool_name = activeTool() ? std::string(activeTool()->name()) : std::string{};
+
+    if (map_name != _discord_last_map || tool_name != _discord_last_tool)
+    {
+      _discord_last_map = map_name;
+      _discord_last_tool = tool_name;
+
+      Noggit::Integrations::DiscordActivity activity;
+      // Match UI mockup:
+      // Line 2 (details): "In Map- <MapName>"
+      // Line 3 (state):   "In Tool- <ToolName>"
+      activity.details = map_name.empty() ? "In Map- (none)" : ("In Map- " + map_name);
+      activity.state = tool_name.empty() ? "In Tool- (none)" : ("In Tool- " + tool_name);
+      activity.tool.clear();
+      activity.start_timestamp_unix = *_discord_rich_presence_start_ts;
+      Noggit::Integrations::DiscordRichPresence::instance().setActivity(std::move(activity));
+    }
+  }
 
 	unsigned action_modality = 0;
 	if (_mod_shift_down)
@@ -3007,12 +3652,63 @@ void MapView::tick (float dt)
     action_modality |= Noggit::ActionModalityControllers::eLMB;
   if (rightMouse)
     action_modality |= Noggit::ActionModalityControllers::eRMB;
+  if (middleMouse)
+    action_modality |= Noggit::ActionModalityControllers::eMMB;
 
   action_modality |= activeTool()->actionModality();
   // if (keyx != 0 || keyy != 0 || keyz != 0)
   //   action_modality |= Noggit::ActionModalityControllers::eTRANSLATE;
 
   NOGGIT_ACTION_MGR->endActionOnModalityMismatch(action_modality);
+
+  // Numpad movement for selected point lights (same keys/modifiers as object selection move), point light tool only.
+  if (_mod_num_down && terrainMode == editing_mode::point_light)
+  {
+    flushPointLightPropertyUndoBatch();
+    auto idx_opt = _world->selectedPointLightIndex();
+    if (idx_opt.has_value())
+    {
+      auto& lights = _world->pointLights();
+      auto idx = *idx_opt;
+      if (idx < lights.size())
+      {
+        bool const moving_keys = (_point_light_keyx != 0.0f || _point_light_keyz != 0.0f);
+        if (moving_keys && !NOGGIT_CUR_ACTION && !_point_light_gizmo_edit_action && !_point_light_mmb_edit_action)
+        {
+          if (Noggit::Action* action = NOGGIT_ACTION_MGR->beginAction(this, Noggit::ActionFlags::ePOINT_LIGHTS_CHANGED,
+                                                                      Noggit::ActionModalityControllers::eNUM))
+          {
+            action->registerPointLightsChange();
+            _point_light_numpad_edit_action = true;
+          }
+        }
+
+        if (moving_keys)
+        {
+          float numpad_moveratio = 0.001f;
+          if (_mod_ctrl_down && _mod_shift_down)
+            numpad_moveratio += 0.5f;
+          else if (_mod_shift_down)
+            numpad_moveratio += 0.05f;
+          else if (_mod_ctrl_down)
+            numpad_moveratio += 0.005f;
+
+          auto& l = lights[idx];
+          glm::vec3 const try_pos{ l.position.x + _point_light_keyx * numpad_moveratio
+                                  , l.position.y
+                                  , l.position.z + _point_light_keyz * numpad_moveratio };
+          l.position = try_pos;
+          l.tile_x = static_cast<std::uint16_t>(std::clamp(int(l.position.x / TILESIZE), 0, 63));
+          l.tile_y = static_cast<std::uint16_t>(std::clamp(int(l.position.z / TILESIZE), 0, 63));
+          invalidate();
+        }
+      }
+    }
+  }
+  else
+  {
+    _point_light_numpad_edit_action = false;
+  }
 
   // start unloading tiles
   _world->mapIndex.enterTile (TileIndex (_camera.position));
@@ -3145,6 +3841,37 @@ void MapView::tick (float dt)
     }
   }
 
+  // Point light MMB: snap to terrain/object under cursor (like ObjectTool + move model to cursor), point light tool only.
+  // Shift+MMB: keep XZ, set Y from the hit under the cursor (vertical follow).
+  if (terrainMode == editing_mode::point_light && _display_mode == display_mode::in_3D && middleMouse && !_locked_cursor_mode.get()
+      && !_point_light_suppress_gizmo_for_color_pick && _world->selectedPointLightIndex().has_value())
+  {
+    auto idx_opt = _world->selectedPointLightIndex();
+    auto& lights = _world->pointLights();
+    if (idx_opt && *idx_opt < lights.size())
+    {
+      flushPointLightPropertyUndoBatch();
+      if (!_point_light_mmb_edit_action && !NOGGIT_CUR_ACTION && !_point_light_gizmo_edit_action
+          && !_point_light_numpad_edit_action)
+      {
+        if (Noggit::Action* action = NOGGIT_ACTION_MGR->beginAction(this, Noggit::ActionFlags::ePOINT_LIGHTS_CHANGED,
+                                                                    Noggit::ActionModalityControllers::eMMB))
+        {
+          action->registerPointLightsChange();
+          _point_light_mmb_edit_action = true;
+        }
+      }
+
+      auto& l = lights[*idx_opt];
+      glm::vec3 const try_pos = _mod_shift_down ? glm::vec3(l.position.x, _cursor_pos.y, l.position.z) : _cursor_pos;
+
+      l.position = try_pos;
+      l.tile_x = static_cast<std::uint16_t>(std::clamp(int(l.position.x / TILESIZE), 0, 63));
+      l.tile_y = static_cast<std::uint16_t>(std::clamp(int(l.position.z / TILESIZE), 0, 63));
+      invalidate();
+    }
+  }
+
   // _minimap->update(); // causes massive performance issues, should only be done when moving
   Noggit::TickParameters tickParams
   {
@@ -3162,7 +3889,14 @@ void MapView::tick (float dt)
       .dirRight = dirRight,
   };
 
-  activeTool()->onTick(dt, tickParams);
+  float effective_dt = dt;
+  if (_tablet_pressure_strength && _tablet_manager && _tablet_manager->isActive())
+  {
+    float const p = static_cast<float>(std::clamp(_tablet_manager->pressure(), 0.0, 1.0));
+    effective_dt *= p;
+  }
+
+  activeTool()->onTick(effective_dt, tickParams);
 
   auto currentSelection = _world->current_selection();
   if (_world->has_selection())
@@ -3367,20 +4101,175 @@ selection_result MapView::intersect_result(bool terrain_only)
   return std::move(results);
 }
 
+math::ray MapView::intersect_ray_from_pixel(QPointF const& mouse_px) const
+{
+  float mx = mouse_px.x(), mz = mouse_px.y();
+
+  if (_display_mode == display_mode::in_3D)
+  {
+    glm::mat4x4 const invertedViewMatrix = glm::inverse(_projection * _model_view);
+    auto normalisedView = invertedViewMatrix * normalized_device_coords(static_cast<int>(mx), static_cast<int>(mz));
+
+    auto pos = glm::vec3(normalisedView.x / normalisedView.w, normalisedView.y / normalisedView.w, normalisedView.z / normalisedView.w);
+
+    return { _camera.position, pos - _camera.position };
+  }
+  else
+  {
+    glm::vec3 const pos
+    ( _camera.position.x - (width() * 0.5f - mx) * _2d_zoom
+    , _camera.position.y
+    , _camera.position.z - (height() * 0.5f - mz) * _2d_zoom
+    );
+
+    return { pos, glm::vec3(0.f, -1.f, 0.f) };
+  }
+}
+
+selection_result MapView::intersect_result(bool terrain_only, QPoint const& mouse_px) const
+{
+  selection_result results
+  ( _world->intersect
+    ( glm::transpose(_model_view)
+    , intersect_ray_from_pixel(mouse_px)
+    , terrain_only
+    , terrainMode == editing_mode::object || terrainMode == editing_mode::minimap
+    , _draw_terrain.get()
+    , _draw_wmo.get()
+    , _draw_models.get()
+    , _draw_hidden_models.get()
+    , _draw_wmo_exterior.get()
+    , _draw_model_animations.get()
+    )
+  );
+
+  std::sort ( results.begin()
+            , results.end()
+            , [](selection_entry const& lhs, selection_entry const& rhs)
+              {
+                return lhs.first < rhs.first;
+              }
+            );
+
+  return results;
+}
+
+bool MapView::screenNearSelectedPointLight(QPointF mouse_px) const
+{
+  auto const sel = _world->selectedPointLightIndex();
+  if (!sel || *sel >= _world->pointLights().size())
+    return false;
+
+  auto const& l = _world->pointLights()[*sel];
+  glm::vec4 const clip = _projection * _model_view * glm::vec4(l.position, 1.0f);
+  if (clip.w <= 0.0f)
+    return false;
+
+  glm::vec3 const ndc = glm::vec3(clip) / clip.w;
+  if (ndc.x < -1.2f || ndc.x > 1.2f || ndc.y < -1.2f || ndc.y > 1.2f)
+    return false;
+
+  float const sx = (ndc.x * 0.5f + 0.5f) * static_cast<float>(width());
+  float const sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(height());
+
+  float const dx = sx - static_cast<float>(mouse_px.x());
+  float const dy = sy - static_cast<float>(mouse_px.y());
+  float const dist_px = std::sqrt(dx * dx + dy * dy);
+
+  // ImGuizmo translation arrows extend well beyond the light's screen-space pick disc.
+  static constexpr float k_slop_px = 120.f;
+  return dist_px <= k_slop_px;
+}
+
 void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
 {
   if (_world->get_selected_model_count() && _gizmo_on.get() && (_transform_gizmo.isUsing() || _transform_gizmo.isOver()))
     return;
 
+  // Point lights are only selectable in the point light tool (see set_editing_mode for clear on mode change).
+  if (terrainMode == editing_mode::point_light && !mouseMove && _display_mode == display_mode::in_3D
+      && !_transform_gizmo.isUsing() && !ImGuizmo::IsUsing())
+  {
+    auto& lights = _world->pointLights();
+
+    // Screen-space pick: project each light to pixels and pick the closest one under mouse.
+    float best_px = std::numeric_limits<float>::max();
+    float best_depth = std::numeric_limits<float>::max();
+    std::optional<std::size_t> best_idx = std::nullopt;
+
+    for (std::size_t i = 0; i < lights.size(); ++i)
+    {
+      auto const& l = lights[i];
+
+      glm::vec4 const clip = _projection * _model_view * glm::vec4(l.position, 1.0f);
+      if (clip.w <= 0.0f)
+        continue;
+
+      glm::vec3 const ndc = glm::vec3(clip) / clip.w;
+      if (ndc.x < -1.2f || ndc.x > 1.2f || ndc.y < -1.2f || ndc.y > 1.2f)
+        continue;
+
+      float const sx = (ndc.x * 0.5f + 0.5f) * static_cast<float>(width());
+      float const sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(height());
+
+      float const dx = sx - static_cast<float>(_last_mouse_pos.x());
+      float const dy = sy - static_cast<float>(_last_mouse_pos.y());
+      float const dist_px = std::sqrt(dx * dx + dy * dy);
+
+      float const pick_px = std::clamp(l.attenuation_end * 0.6f, 10.0f, 30.0f);
+      if (dist_px <= pick_px)
+      {
+        if (dist_px < best_px || (dist_px == best_px && ndc.z < best_depth))
+        {
+          best_px = dist_px;
+          best_depth = ndc.z;
+          best_idx = i;
+        }
+      }
+    }
+
+    if (best_idx.has_value())
+    {
+      _world->selectedPointLightIndex(best_idx);
+      setPointLightPropertyEditFallback(*best_idx);
+      _world->reset_selection();
+      invalidate();
+      return;
+    }
+
+    // Click missed every light's pick radius (arrows are off-center), but may still be on the gizmo.
+    // Skip world raycast for this click so terrain/objects behind the gizmo do not clear the selection.
+    // Shift/Ctrl still run full picking so additive/chunk-range selection is unchanged.
+    bool const mod_multiselect = _mod_shift_down || _mod_ctrl_down;
+    if (!mod_multiselect
+        && _gizmo_on.get()
+        && _world->selectedPointLightIndex().has_value()
+        && !_point_light_suppress_gizmo_for_color_pick
+        && (_point_light_gizmo_was_over || screenNearSelectedPointLight(_last_mouse_pos)))
+    {
+      return;
+    }
+  }
+
   selection_result results(intersect_result(selectTerrainOnly));
 
   if (results.empty())
   {
-    _world->reset_selection();
+    if (!mouseMove)
+    {
+      _world->reset_selection();
+      _world->selectedPointLightIndex(std::nullopt);
+      clearPointLightPropertyEditFallback();
+    }
   }
   else
   {
     auto const& hit (results.front().second);
+    if (!mouseMove)
+    {
+      _world->selectedPointLightIndex(std::nullopt);
+      clearPointLightPropertyEditFallback();
+    }
 
     if (terrainMode == editing_mode::object || terrainMode == editing_mode::minimap)
     {
@@ -3411,7 +4300,7 @@ void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
           _world->range_add_to_selection(_cursor_pos, radius, true);
         }
       }
-      else if (!_mod_space_down && !_mod_alt_down && !_mod_ctrl_down)
+      else if (!_mod_space_down && !_mod_alt_down && !_mod_ctrl_down && !mouseMove)
       {
         // objectEditor->update_selection(_world.get());
         _world->reset_selection();
@@ -3547,6 +4436,8 @@ glm::mat4x4 MapView::projection() const
 void MapView::draw_map()
 {
   ZoneScoped;
+
+  Noggit::register_crash_render_stage("MapView::draw_map:enter");
   //! \ todo: make the current tool return the radius
   float radius = 0.0f, inner_radius = 0.0f, angle = 0.0f, orientation = 0.0f;
   glm::vec3 ref_pos;
@@ -3585,7 +4476,11 @@ void MapView::draw_map()
   if (!(_world->has_selection()
     || _locked_cursor_mode.get()))
   {
-    doSelection(true);
+    // When a point light is selected, world selection is often still empty; treat per-frame picking as hover-only
+    // (mouseMove=true) so empty ray hits do not clear the light every frame. World point-light picking itself is
+    // only active in editing_mode::point_light (see doSelection).
+    bool const hover_only = _world->selectedPointLightIndex().has_value();
+    doSelection(true, hover_only);
   }
 
   if (_camera_moved_since_last_draw)
@@ -3606,6 +4501,9 @@ void MapView::draw_map()
   renderParams.draw_only_inside_light_sphere = _left_sec_toolbar->drawOnlyInsideSphereLight();
   renderParams.draw_wireframe_light_sphere = _left_sec_toolbar->drawWireframeSphereLight();
   renderParams.alpha_light_sphere = _left_sec_toolbar->getAlphaSphereLight();
+  renderParams.draw_point_lights = _draw_point_lights.get();
+  renderParams.draw_point_light_spheres = _draw_point_light_spheres.get();
+  renderParams.point_light_sphere_opacity = _point_light_sphere_opacity;
   renderParams.inner_radius_ratio = inner_radius;
   renderParams.angle = angle;
   renderParams.orientation = orientation;
@@ -3631,12 +4529,54 @@ void MapView::draw_map()
   renderParams.display_mode = _display_mode;
   renderParams.draw_occlusion_boxes = _draw_occlusion_boxes.get();
   renderParams.minimap_render = false;
+  renderParams.draw_chunk_manipulator_selection = (terrainMode == editing_mode::chunk);
   renderParams.draw_wmo_exterior = _draw_wmo_exterior.get();
   renderParams.render_select_m2_aabb = _render_m2_aabb;
   renderParams.render_select_m2_collission_bbox = _render_m2_collission_bbox;
   renderParams.render_select_wmo_aabb = _render_wmo_aabb;
   renderParams.render_select_wmo_groups_bounds = _render_wmo_groups_bounds;
 
+  if (terrainMode == editing_mode::mccv && _mod_alt_down && _draw_terrain.get())
+  {
+    // tick() runs after draw_map(), so _cursor_pos can lag _last_mouse_pos by a frame.
+    // Refresh here so the hub / NDC crosshair match the current ray hit (same rules as tick() for mccv).
+    {
+      auto cur_action = NOGGIT_CUR_ACTION;
+      if (((cur_action && !cur_action->getBlockCursor()) || !cur_action) && !_locked_cursor_mode.get())
+      {
+        update_cursor_pos();
+      }
+    }
+
+    glm::vec4 const clip = _projection * _model_view * glm::vec4(_cursor_pos, 1.f);
+    if (clip.w > 1e-4f)
+    {
+      glm::vec3 const ndc = glm::vec3(clip) / clip.w;
+      renderParams.draw_mccv_vertex_alt_viz = true;
+      renderParams.mccv_viz_hub = _cursor_pos;
+      renderParams.mccv_viz_radius = radius;
+      renderParams.mccv_viz_hub_valid = true;
+      renderParams.mccv_viz_hub_ndc = glm::vec2(ndc.x, ndc.y);
+    }
+  }
+
+  if (_ramp_tool_window && _ramp_tool_window->isVisible()
+      && _ramp_point_a && _ramp_point_b
+      && _display_mode == display_mode::in_3D && _draw_terrain.get())
+  {
+    glm::vec2 const rd(_ramp_point_b->x - _ramp_point_a->x, _ramp_point_b->z - _ramp_point_a->z);
+    float const r_tool = _ramp_tool_window->radius();
+    if (glm::length(rd) > 1e-2f && r_tool > 0.f)
+    {
+      renderParams.draw_ramp_preview = true;
+      renderParams.ramp_preview_a = *_ramp_point_a;
+      renderParams.ramp_preview_b = *_ramp_point_b;
+      renderParams.ramp_preview_radius = r_tool;
+      renderParams.ramp_preview_cap_len = _ramp_tool_window->capLength();
+    }
+  }
+
+  Noggit::register_crash_render_stage("MapView::draw_map:WorldRender::draw");
   _world->renderer()->draw (
                   _model_view
                 , _projection
@@ -3647,9 +4587,12 @@ void MapView::draw_map()
                 , &minimapRenderSettings
                 , renderParams
                 );
+  Noggit::register_crash_render_stage("MapView::draw_map:WorldRender::draw_done");
 
   // reset after each world::draw call
   _camera_moved_since_last_draw = false;
+
+  Noggit::register_crash_render_stage("MapView::draw_map:exit");
 }
 
 void MapView::keyPressEvent (QKeyEvent *event)
@@ -3885,8 +4828,16 @@ void MapView::focusOutEvent (QFocusEvent*)
 
   leftMouse = false;
   rightMouse = false;
+  middleMouse = false;
   look = false;
   freelook = false;
+
+  if (_point_light_mmb_edit_action)
+  {
+    if (NOGGIT_CUR_ACTION)
+      NOGGIT_ACTION_MGR->endAction();
+    _point_light_mmb_edit_action = false;
+  }
 
   activeTool()->onFocusLost();
 }
@@ -3988,6 +4939,8 @@ void MapView::mousePressEvent(QMouseEvent* event)
     _tablet_manager->setIsActive(false);
   }
 
+  _last_mouse_pos = event->pos();
+
   makeCurrent();
   OpenGL::context::scoped_setter const _(::gl, context());
 
@@ -4005,10 +4958,20 @@ void MapView::mousePressEvent(QMouseEvent* event)
   {
   case Qt::LeftButton:
     leftMouse = true;
+    // Commit world pick for point lights only in the point light tool (per-frame hover uses mouseMove=true there).
+    if (_display_mode == display_mode::in_3D && !_locked_cursor_mode.get()
+        && terrainMode == editing_mode::point_light)
+    {
+      doSelection(true, false);
+    }
     break;
 
   case Qt::RightButton:
     rightMouse = true;
+    break;
+
+  case Qt::MiddleButton:
+    middleMouse = true;
     break;
 
   default:
@@ -4064,12 +5027,20 @@ void MapView::mouseReleaseEvent (QMouseEvent* event)
   makeCurrent();
   OpenGL::context::scoped_setter const _(::gl, context());
 
+  _last_mouse_pos = event->pos();
+
   activeTool()->onMouseRelease(
   {
       .button = event->button(),
       .mouse_position = event->pos(),
       .mod_ctrl_down = _mod_ctrl_down,
   });
+
+  if (event->button() == Qt::LeftButton && _display_mode == display_mode::in_3D
+      && !ImGuizmo::IsUsing() && _ramp_pick_target != 0)
+  {
+    tryRampTerrainPick(event->pos(), event->button());
+  }
 
   switch (event->button())
   {
@@ -4081,6 +5052,8 @@ void MapView::mouseReleaseEvent (QMouseEvent* event)
       strafing = 0;
       moving = 0;
     }
+
+    // World point-light picking is handled in MapView::doSelection() when terrainMode == editing_mode::point_light.
 
     if (terrainMode == editing_mode::minimap )
     {
@@ -4126,6 +5099,16 @@ void MapView::mouseReleaseEvent (QMouseEvent* event)
 
 
 
+    break;
+
+  case Qt::MiddleButton:
+    middleMouse = false;
+    if (_point_light_mmb_edit_action)
+    {
+      if (NOGGIT_CUR_ACTION)
+        NOGGIT_ACTION_MGR->endAction();
+      _point_light_mmb_edit_action = false;
+    }
     break;
 
   default:
@@ -4213,6 +5196,16 @@ void MapView::save(save_mode mode)
     // write wdl, we update wdl data prior in the mapIndex saving fucntions above
     _world->horizon.save_wdl(_world.get());
 
+    if (auto const epsilon_cfg = Noggit::Integrations::EpsilonPatchExporter::load_config_from_settings())
+    {
+      if (auto* const app = Noggit::Application::NoggitApplication::instance();
+          app && app->hasClientData())
+      {
+        Noggit::Integrations::EpsilonPatchExporter::instance().export_map (
+          *epsilon_cfg, _world->basename, app->clientData());
+      }
+    }
+
     for (auto&& dbc : _dirty_dbcs)
     {
       dbc->save();
@@ -4242,10 +5235,56 @@ void MapView::addHotkey(Qt::Key key, size_t modifiers, std::function<void()> fun
 
 void MapView::addHotkey(Qt::Key key, size_t modifiers, StringHash hotkeyName)
 {
-  hotkeys.emplace_front (key, modifiers
-      , [=] { activeTool()->onHotkeyPress(hotkeyName); }
-      , [=] { return activeTool()->hotkeyCondition(hotkeyName); }
-      , [=] { activeTool()->onHotkeyRelease(hotkeyName); });
+  // Compare raw hashes: StringHash::operator== is consteval and cannot be used from non-consteval lambdas (MSVC).
+  std::uint64_t const name = hotkeyName.hash;
+  constexpr std::uint64_t h_move_down = "moveSelectedDown"_hash.hash;
+  constexpr std::uint64_t h_move_up = "moveSelectedUp"_hash.hash;
+  constexpr std::uint64_t h_move_left = "moveSelectedLeft"_hash.hash;
+  constexpr std::uint64_t h_move_right = "moveSelectedRight"_hash.hash;
+
+  auto const is_point_light_numpad_move = [=]()
+  {
+    if (terrainMode != editing_mode::point_light || !_world || !_world->selectedPointLightIndex().has_value())
+      return false;
+
+    return name == h_move_down || name == h_move_up || name == h_move_left || name == h_move_right;
+  };
+
+  auto const apply_point_light_move_axis = [=](bool press)
+  {
+    if (name == h_move_down)
+      _point_light_keyx = press ? 1.f : 0.f;
+    else if (name == h_move_up)
+      _point_light_keyx = press ? -1.f : 0.f;
+    else if (name == h_move_left)
+      _point_light_keyz = press ? 1.f : 0.f;
+    else if (name == h_move_right)
+      _point_light_keyz = press ? -1.f : 0.f;
+  };
+
+  hotkeys.emplace_front(
+      key,
+      modifiers,
+      [=]
+      {
+        if (is_point_light_numpad_move())
+          apply_point_light_move_axis(true);
+        else
+          activeTool()->onHotkeyPress(hotkeyName);
+      },
+      [=]
+      {
+        if (is_point_light_numpad_move())
+          return true;
+        return activeTool()->hotkeyCondition(hotkeyName);
+      },
+      [=]
+      {
+        if (is_point_light_numpad_move())
+          apply_point_light_move_axis(false);
+        else
+          activeTool()->onHotkeyRelease(hotkeyName);
+      });
 }
 
 void MapView::unloadOpenglData()
@@ -4321,6 +5360,164 @@ void MapView::cursorPosition(glm::vec3 position)
     _cursor_pos = position;
 }
 
+void MapView::setRampPickTarget(int which)
+{
+  _ramp_pick_target = std::clamp(which, 0, 2);
+  if (_ramp_tool_window)
+  {
+    _ramp_tool_window->refreshPointLabels();
+  }
+  invalidate();
+}
+
+int MapView::rampPickTarget() const
+{
+  return _ramp_pick_target;
+}
+
+std::optional<glm::vec3> MapView::rampPointA() const
+{
+  return _ramp_point_a;
+}
+
+std::optional<glm::vec3> MapView::rampPointB() const
+{
+  return _ramp_point_b;
+}
+
+void MapView::clearRampPoints()
+{
+  _ramp_point_a.reset();
+  _ramp_point_b.reset();
+  _ramp_pick_target = 0;
+}
+
+void MapView::ensureRampToolWindow()
+{
+  if (!_ramp_tool_window)
+  {
+    _ramp_tool_window = new Noggit::Ui::RampCreationTool(this, _main_window);
+    QObject::connect(_ramp_tool_window, &QObject::destroyed, this, [this]
+    {
+      _ramp_tool_window = nullptr;
+    });
+    QObject::connect(_ramp_tool_window, &Noggit::Ui::RampCreationTool::createRampRequested,
+                     this, &MapView::onRampCreateRequested);
+  }
+  _ramp_tool_window->refreshPointLabels();
+  _ramp_tool_window->show();
+  _ramp_tool_window->raise();
+  _ramp_tool_window->activateWindow();
+}
+
+void MapView::tryRampTerrainPick(QPoint const& mouse_px, Qt::MouseButton button)
+{
+  if (button != Qt::LeftButton || _ramp_pick_target == 0)
+  {
+    return;
+  }
+  if (!_draw_terrain.get())
+  {
+    return;
+  }
+
+  selection_result const results = intersect_result(true, mouse_px);
+  if (results.empty())
+  {
+    return;
+  }
+
+  auto const& hit = results.front().second;
+  if (hit.index() != eEntry_MapChunk)
+  {
+    return;
+  }
+
+  glm::vec3 const pos = std::get<selected_chunk_type>(hit).position;
+  if (_ramp_pick_target == 1)
+  {
+    _ramp_point_a = pos;
+  }
+  else if (_ramp_pick_target == 2)
+  {
+    _ramp_point_b = pos;
+  }
+  _ramp_pick_target = 0;
+
+  if (_ramp_tool_window)
+  {
+    _ramp_tool_window->refreshPointLabels();
+  }
+  invalidate();
+}
+
+void MapView::onRampCreateRequested()
+{
+  if (!_ramp_tool_window || !_ramp_point_a || !_ramp_point_b)
+  {
+    return;
+  }
+
+  glm::vec2 const d(_ramp_point_b->x - _ramp_point_a->x, _ramp_point_b->z - _ramp_point_a->z);
+  if (glm::length(d) < 1e-2f)
+  {
+    QMessageBox::warning(this, tr("Ramp"), tr("Start and end are too close in XZ."));
+    return;
+  }
+
+  float const r = _ramp_tool_window->radius();
+  if (r <= 0.f)
+  {
+    return;
+  }
+
+  if (NOGGIT_CUR_ACTION)
+  {
+    QMessageBox::information(this, tr("Ramp"), tr("Finish the current action before creating a ramp."));
+    return;
+  }
+
+  makeCurrent();
+  OpenGL::context::scoped_setter const _(::gl, context());
+
+  if (Noggit::Action* action = NOGGIT_ACTION_MGR->beginAction(this, Noggit::ActionFlags::eCHUNKS_TERRAIN,
+                                                               Noggit::ActionModalityControllers::eNONE))
+  {
+    _world->applyTerrainRamp(*_ramp_point_a, *_ramp_point_b, r,
+                             _ramp_tool_window->capLength(), _ramp_tool_window->blendStrength());
+    NOGGIT_ACTION_MGR->endAction();
+  }
+
+  invalidate();
+}
+
+void MapView::runFixAllTerrainGapsUndoable()
+{
+  if (NOGGIT_CUR_ACTION)
+  {
+    QMessageBox::information(this, tr("Fix gaps"), tr("Finish the current action before fixing seams."));
+    return;
+  }
+  if (_display_mode != display_mode::in_3D)
+  {
+    QMessageBox::information(this, tr("Fix gaps"), tr("Switch to 3D view to fix terrain seams."));
+    return;
+  }
+
+  makeCurrent();
+  OpenGL::context::scoped_setter const _(::gl, context());
+
+  if (Noggit::Action* action = NOGGIT_ACTION_MGR->beginAction(this, Noggit::ActionFlags::eCHUNKS_TERRAIN,
+                                                               Noggit::ActionModalityControllers::eNONE))
+  {
+    (void)action;
+    _world->fixAllGaps();
+    NOGGIT_ACTION_MGR->endAction();
+  }
+
+  invalidate();
+}
+
 void MapView::enableGizmoBar()
 {
   _viewport_overlay_ui->gizmoBar->show();
@@ -4348,8 +5545,11 @@ void MapView::setDbcDirty(DBCFile* dbc)
 void MapView::onSettingsSave()
 {
   _classic_ui = _settings->value("classicUI", false).toBool();
+  _tablet_pressure_strength = _settings->value("tablet/pressure_strength", true).toBool();
 
   OpenGL::TerrainParamsUniformBlock* params = _world->renderer()->getTerrainParamsUniformBlock();
+  params->draw_tileset = _draw_tileset.get();
+  params->draw_texture_layer_count_overlay = _draw_texture_layer_count_overlay.get();
   params->wireframe_type = _settings->value("wireframe/type", false).toBool();
   params->wireframe_radius = _settings->value("wireframe/radius", 1.5f).toFloat();
   params->wireframe_width = _settings->value ("wireframe/width", 1.f).toFloat();
@@ -4399,6 +5599,35 @@ void MapView::onSettingsSave()
 
   auto app_config = Noggit::Application::NoggitApplication::instance()->getConfiguration();
   app_config->modern_features = _settings->value("modern_features", false).toBool();
+
+  bool const new_discord_enabled = _settings->value("integrations/discord_rich_presence", false).toBool();
+  std::string const new_discord_app_id = _settings->value("integrations/discord_app_id", "959654402141085748").toString().toStdString();
+  std::string const new_discord_large_key = _settings->value("integrations/discord_large_image_key", "").toString().toStdString();
+  std::string const new_discord_large_text = _settings->value("integrations/discord_large_image_text", "Noggit Red").toString().toStdString();
+
+  if (new_discord_enabled != _discord_rich_presence_enabled
+   || new_discord_app_id != _discord_rich_presence_app_id
+   || new_discord_large_key != _discord_rich_presence_large_image_key
+   || new_discord_large_text != _discord_rich_presence_large_image_text)
+  {
+    _discord_rich_presence_enabled = new_discord_enabled;
+    _discord_rich_presence_app_id = new_discord_app_id;
+    _discord_rich_presence_large_image_key = new_discord_large_key;
+    _discord_rich_presence_large_image_text = new_discord_large_text;
+    _discord_rich_presence_start_ts = std::nullopt;
+    _discord_last_map.clear();
+    _discord_last_tool.clear();
+
+    if (_discord_rich_presence_enabled)
+    {
+      Noggit::Integrations::DiscordRichPresence::instance().configure(true, _discord_rich_presence_app_id);
+      Noggit::Integrations::DiscordRichPresence::instance().setAssets(
+        Noggit::Integrations::DiscordAssets{ _discord_rich_presence_large_image_key, _discord_rich_presence_large_image_text }
+      );
+    }
+    else
+      Noggit::Integrations::DiscordRichPresence::instance().shutdown();
+  }
 
 }
 

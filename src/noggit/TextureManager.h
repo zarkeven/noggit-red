@@ -148,13 +148,18 @@ namespace Noggit
     OpenGL::Scoped::deferred_upload_buffers<3> _buffers;
 
     bool _uploaded = false;
+    bool _cpu_fallback = false;
+
+    bool upload_gl();
+    static QPixmap blp_to_pixmap_cpu (std::string const& blp_filename, int width, int height);
+
+    QPixmap* render_blp_to_pixmap_impl ( std::string const& blp_filename, int width, int height);
 
   public:
     static BLPRenderer& getInstance();
 
     QPixmap* render_blp_to_pixmap ( std::string const& blp_filename, int width = -1, int height = -1);
     void unload();
-    void upload();
 
   };
 

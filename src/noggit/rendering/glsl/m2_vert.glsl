@@ -1,6 +1,10 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 #version 330 core
 
+// Match MapHeaders.h / terrain_vert.glsl: ADT tile and MCNK outer size in world yards.
+const float kWoWTilesize = 533.33333;
+const float kWoWChunksize = kWoWTilesize / 16.0;
+
 in vec4 pos;
 in vec3 normal;
 in vec2 texcoord1;
@@ -20,12 +24,11 @@ out vec2 uv1;
 out vec2 uv2;
 out float camera_dist;
 out vec3 norm;
+out vec3 world_pos;
 
-layout (std140) uniform matrices
-{
-  mat4 model_view;
-  mat4 projection;
-};
+uniform mat4 model_view;
+uniform mat4 projection;
+
 
 uniform int tex_unit_lookup_1;
 uniform int tex_unit_lookup_2;
@@ -34,6 +37,10 @@ uniform mat4 tex_matrix_1;
 uniform mat4 tex_matrix_2;
 
 uniform bool anim_bones;
+
+// Bit 0: apply chunk UV to texcoord path for texture unit 1; bit 1: for unit 2 (see ModelRender / terrain bind).
+uniform int terrain_uv_mask;
+uniform vec2 terrain_chunk_corner_xz;
 
 // code from https://wowdev.wiki/M2/.skin#Environment_mapping
 vec2 sphere_map(vec3 vert, vec3 norm)
@@ -45,7 +52,12 @@ vec2 sphere_map(vec3 vert, vec3 norm)
   return ((normalize(temp).xy * 0.5) + vec2(0.5));
 }
 
-vec2 get_texture_uv(int tex_unit_lookup, vec3 vert, vec3 norm)
+vec2 chunk_terrain_uv(vec3 world_pos)
+{
+  return clamp((world_pos.xz - terrain_chunk_corner_xz) / vec2(kWoWChunksize), vec2(0.0), vec2(1.0));
+}
+
+vec2 get_texture_uv(int tex_unit_lookup, vec3 vert, vec3 norm, vec3 world_pos, mat4 inst_transform)
 {
   if(tex_unit_lookup == 0)
   {
@@ -53,11 +65,31 @@ vec2 get_texture_uv(int tex_unit_lookup, vec3 vert, vec3 norm)
   }
   else if(tex_unit_lookup == 1)
   {
+    if ((terrain_uv_mask & 1) != 0)
+    {
+      return chunk_terrain_uv(world_pos);
+    }
     return (transpose(tex_matrix_1) * vec4(texcoord1, 0.0, 1.0)).xy;
   }
   else if(tex_unit_lookup == 2)
   {
+    if ((terrain_uv_mask & 2) != 0)
+    {
+      return chunk_terrain_uv(world_pos);
+    }
     return (transpose(tex_matrix_2) * vec4(texcoord2, 0.0, 1.0)).xy;
+  }
+  else if(tex_unit_lookup == 4)
+  {
+    // Match prepareDraw: bit 0 = layer 0 uses chunk UV, bit 1 = layer 1. Ground lookup must honor either bit
+    // (e.g. env + projected terrain on T2 with mask 0b10 only).
+    if ((terrain_uv_mask & 3) != 0)
+    {
+      return chunk_terrain_uv(world_pos);
+    }
+    // Chunk-period tiling; subtract instance translation so UVs do not slide when the whole doodad is moved.
+    vec2 origin_xz = inst_transform[3].xz;
+    return fract((world_pos.xz - origin_xz) / kWoWChunksize);
   }
   else
   {
@@ -93,16 +125,19 @@ void main()
     boneTransformMat = mat4(1);
   }
 
-  mat4 cameraMatrix = model_view * transform * boneTransformMat;
-  mat3 normMatrix = mat3(transform * boneTransformMat);
+  mat4 worldMatrix = transform * boneTransformMat;
+  mat4 cameraMatrix = model_view * worldMatrix;
+  mat3 normMatrix = mat3(worldMatrix);
 
-  vec4 vertex = cameraMatrix * pos;
+  vec4 world_vertex = worldMatrix * pos;
+  vec4 vertex = model_view * world_vertex;
 
   // important to normalize because of the scaling !!
   norm = normalize(normMatrix * normal);
+  world_pos = world_vertex.xyz;
 
-  uv1 = get_texture_uv(tex_unit_lookup_1, vertex.xyz, norm);
-  uv2 = get_texture_uv(tex_unit_lookup_2, vertex.xyz, norm);
+  uv1 = get_texture_uv(tex_unit_lookup_1, vertex.xyz, norm, world_pos, transform);
+  uv2 = get_texture_uv(tex_unit_lookup_2, vertex.xyz, norm, world_pos, transform);
 
   camera_dist = -vertex.z;
   gl_Position = projection * vertex;

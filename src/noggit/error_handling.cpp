@@ -1,7 +1,11 @@
 #include <noggit/errorHandling.h>
 #include <noggit/Log.h>
 
+#include <atomic>
 #include <csignal>
+#include <cstdint>
+#include <iomanip>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -12,8 +16,24 @@
   #include <errhandlingapi.h>
 #endif
 
+namespace
+{
+  std::atomic<char const*> g_crash_render_stage{"(startup)"};
+}
+
 namespace Noggit
 {
+  void register_crash_render_stage(char const* stage) noexcept
+  {
+    g_crash_render_stage.store(stage ? stage : "(null stage)", std::memory_order_relaxed);
+  }
+
+  char const* crash_render_stage() noexcept
+  {
+    char const* s = g_crash_render_stage.load(std::memory_order_relaxed);
+    return s ? s : "(null)";
+  }
+
   void printStacktrace()
   {
 #ifndef WIN32
@@ -92,6 +112,8 @@ namespace Noggit
         << "\".\nPlease excuse the inconvenience. You may want to report this error including the log to the developers.\n"
         << std::endl;
 
+      LogError << "Last render stage: " << crash_render_stage() << std::endl;
+
       printStacktrace();
 
       exit (sig);
@@ -100,11 +122,48 @@ namespace Noggit
 #ifdef _WIN32
     LONG WINAPI windows_exception_handler(EXCEPTION_POINTERS * ExceptionInfo)
     {
-      auto code = ExceptionInfo->ExceptionRecord->ExceptionCode;
+      LogError << "Last render stage: " << crash_render_stage() << std::endl;
+
+      if (!ExceptionInfo || !ExceptionInfo->ExceptionRecord)
+      {
+        LogError << "windows_exception_handler: null ExceptionInfo or ExceptionRecord" << std::endl;
+        printStacktrace();
+        try
+        {
+          std::cout.flush();
+          std::clog.flush();
+          std::cerr.flush();
+        }
+        catch (...)
+        {
+        }
+        return EXCEPTION_EXECUTE_HANDLER;
+      }
+
+      auto const code = ExceptionInfo->ExceptionRecord->ExceptionCode;
+
+      LogError << "Faulting address (instruction): 0x"
+        << std::hex << std::uppercase
+        << reinterpret_cast<std::uintptr_t>(ExceptionInfo->ExceptionRecord->ExceptionAddress)
+        << std::dec << std::nouppercase << std::endl;
 
       switch (code)
       {
-      case EXCEPTION_ACCESS_VIOLATION: LogError << "EXCEPTION_ACCESS_VIOLATION" << std::endl; break;
+      case EXCEPTION_ACCESS_VIOLATION:
+      {
+        LogError << "EXCEPTION_ACCESS_VIOLATION";
+        if (ExceptionInfo->ExceptionRecord->NumberParameters >= 2)
+        {
+          ULONG_PTR const op = ExceptionInfo->ExceptionRecord->ExceptionInformation[0];
+          ULONG_PTR const addr = ExceptionInfo->ExceptionRecord->ExceptionInformation[1];
+          // 0 = read, 1 = write, 8 = DEP execute
+          LogError << " access_type=" << op << " accessed_address=0x"
+            << std::hex << std::uppercase << static_cast<std::uintptr_t>(addr)
+            << std::dec << std::nouppercase;
+        }
+        LogError << std::endl;
+        break;
+      }
       case EXCEPTION_DATATYPE_MISALIGNMENT: LogError << "EXCEPTION_DATATYPE_MISALIGNMENT" << std::endl; break;
       case EXCEPTION_BREAKPOINT: LogError << "EXCEPTION_BREAKPOINT" << std::endl; break;
       case EXCEPTION_SINGLE_STEP: LogError << "EXCEPTION_SINGLE_STEP" << std::endl; break;
@@ -135,7 +194,19 @@ namespace Noggit
 
       printStacktrace();
 
-      return EXCEPTION_CONTINUE_SEARCH;
+      // Best effort: flush logs to disk before Windows terminates us.
+      try
+      {
+        std::cout.flush();
+        std::clog.flush();
+        std::cerr.flush();
+      }
+      catch (...)
+      {
+      }
+
+      // We've already logged and printed a stacktrace; let Windows unwind via our handler.
+      return EXCEPTION_EXECUTE_HANDLER;
     }
 #endif
 

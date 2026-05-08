@@ -52,6 +52,13 @@ void TileRender::unload()
     gl.deleteQueries(1, &_tile_occlusion_query);
   }
 
+  if (_chunk_manip_preview_height_ready)
+  {
+    gl.deleteTextures(1, &_chunk_manip_preview_height_tex);
+    _chunk_manip_preview_height_tex = 0;
+    _chunk_manip_preview_height_ready = false;
+  }
+
 
   _map_tile->_chunk_update_flags = ChunkUpdateFlags::VERTEX | ChunkUpdateFlags::ALPHAMAP
                                   | ChunkUpdateFlags::SHADOW | ChunkUpdateFlags::MCCV
@@ -93,7 +100,6 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
   _uploaded_alphamap_last_frame = false;
   _num_uploaded_chunk_alphamaps = 0;
 
-
   // iterate all textures to check if there's one that's not loaded yet
   if (_texture_not_loaded)
   {
@@ -127,8 +133,8 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
   }
 
   // run chunk updates. running this when splitdraw call detected unused sampler configuration as well.
-  if (!skip_upload_alphamap && (_map_tile->_chunk_update_flags || is_selected != _selected || need_paintability_update || _requires_sampler_reset || _texture_not_loaded
-    || _requires_ground_effect_color_recalc || _require_geffect_active_texture_update))
+  if (!skip_upload_alphamap && (_map_tile->_chunk_update_flags || is_selected != _selected || need_paintability_update || _texture_not_loaded
+    || _requires_sampler_reset || _requires_ground_effect_color_recalc || _require_geffect_active_texture_update))
   {
 
     gl.bindBuffer(GL_UNIFORM_BUFFER, _chunk_instance_data_ubo);
@@ -159,7 +165,7 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
 
       unsigned flags = chunk->getUpdateFlags();
 
-      if (!skip_upload_alphamap && (flags & ChunkUpdateFlags::ALPHAMAP || _requires_sampler_reset || _texture_not_loaded))
+      if (!skip_upload_alphamap && (flags & ChunkUpdateFlags::ALPHAMAP || _requires_sampler_reset))
       {
         gl.activeTexture(GL_TEXTURE0 + 3);
         gl.bindTexture(GL_TEXTURE_2D_ARRAY, _alphamap_tex);
@@ -267,7 +273,10 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
       }
       
 
-      _chunk_instance_data[i].AreaIDColor_Pad2_DrawSelection[3] = _selected;
+      // .y: Chunk Manipulator preview footprint, .w: selection overlay (tile selection OR chunk-manip selection).
+      _chunk_instance_data[i].AreaIDColor_Pad2_DrawSelection[1] = _chunk_manip_preview[static_cast<std::size_t>(i)] ? 1 : 0;
+      _chunk_instance_data[i].AreaIDColor_Pad2_DrawSelection[3] =
+        (_selected || (_chunk_manip_selected[static_cast<std::size_t>(i)] != 0)) ? 1 : 0;
 
       chunk->endChunkUpdates();
 
@@ -325,6 +334,20 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
     if (_texture_not_loaded)
       _map_tile->registerChunkUpdate(ChunkUpdateFlags::ALPHAMAP);
 
+    gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::ChunkInstanceDataUniformBlock) * 256,
+                     &_chunk_instance_data);
+  }
+  else if (_chunk_manip_dirty)
+  {
+    // Keep Chunk Manipulator overlays live even if no chunk data changed.
+    gl.bindBuffer(GL_UNIFORM_BUFFER, _chunk_instance_data_ubo);
+    for (int i = 0; i < 256; ++i)
+    {
+      _chunk_instance_data[i].AreaIDColor_Pad2_DrawSelection[1] = _chunk_manip_preview[static_cast<std::size_t>(i)] ? 1 : 0;
+      _chunk_instance_data[i].AreaIDColor_Pad2_DrawSelection[3] =
+        (_selected || (_chunk_manip_selected[static_cast<std::size_t>(i)] != 0)) ? 1 : 0;
+    }
+    _chunk_manip_dirty = false;
     gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::ChunkInstanceDataUniformBlock) * 256,
                      &_chunk_instance_data);
   }
@@ -470,7 +493,10 @@ void TileRender::doTileOcclusionQuery(OpenGL::Scoped::use_program& occlusion_sha
 
   _tile_occlusion_query_in_use = true;
   gl.beginQuery(GL_ANY_SAMPLES_PASSED, _tile_occlusion_query);
-  occlusion_shader.uniform("aabb", _map_tile->getCombinedExtents().data(), _map_tile->getCombinedExtents().size());
+  {
+    auto const ext = _map_tile->getTerrainWaterCullExtents();
+    occlusion_shader.uniform("aabb", ext.data(), ext.size());
+  }
   gl.drawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
   gl.endQuery(GL_ANY_SAMPLES_PASSED);
 }
@@ -488,7 +514,7 @@ bool TileRender::getTileOcclusionQueryResult(glm::vec3 const& camera)
   if (!_uploaded)
     return !_tile_occluded;
 
-  if (misc::pointInside(camera, _map_tile->getCombinedExtents()))
+  if (misc::pointInside(camera, _map_tile->getTerrainWaterCullExtents()))
   {
     _tile_occlusion_query_in_use = false;
     return true;
@@ -499,7 +525,9 @@ bool TileRender::getTileOcclusionQueryResult(glm::vec3 const& camera)
 
   if (result != GL_TRUE)
   {
-    return _tile_occlusion_cull_override || !_tile_occluded;
+    // Result not ready yet: treat as visible. Stale _tile_occluded here can keep tiles culled for many
+    // frames (or indefinitely on some drivers / heavy frames), which shows up as the whole world going black.
+    return true;
   }
 
   if (!_tile_occlusion_cull_override)
@@ -673,6 +701,8 @@ void TileRender::initChunkData(MapChunk* chunk)
   chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[2] = static_cast<int>(chunk->texture_set->num());
   chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[3] = 0;
   chunk_render_instance.AreaIDColor_Pad2_DrawSelection[0] = chunk->areaID;
+  chunk_render_instance.AreaIDColor_Pad2_DrawSelection[1] = 0;
+  chunk_render_instance.AreaIDColor_Pad2_DrawSelection[2] = 0;
   chunk_render_instance.AreaIDColor_Pad2_DrawSelection[3] = 0;
 
   chunk_render_instance.ChunkGroundEffectColor[0] = 0.0f;
@@ -685,6 +715,102 @@ void TileRender::initChunkData(MapChunk* chunk)
   chunk_render_instance.ChunkDoodadsEnabled2_ChunksLayerEnabled2[1] = 0;
   chunk_render_instance.ChunkDoodadsEnabled2_ChunksLayerEnabled2[2] = 0;
   chunk_render_instance.ChunkDoodadsEnabled2_ChunksLayerEnabled2[3] = 0;
+}
+
+void TileRender::setChunkManipulatorOverlays(std::array<std::uint8_t, 256> const& selected_mask,
+                                             std::array<std::uint8_t, 256> const& preview_mask)
+{
+  if (_chunk_manip_selected == selected_mask && _chunk_manip_preview == preview_mask)
+    return;
+  _chunk_manip_selected = selected_mask;
+  _chunk_manip_preview = preview_mask;
+  _chunk_manip_dirty = true;
+}
+
+void TileRender::clearChunkManipulatorOverlays()
+{
+  std::array<std::uint8_t, 256> const empty{};
+  setChunkManipulatorOverlays(empty, empty);
+}
+
+void TileRender::updateChunkManipulatorPreviewHeightmap(std::vector<std::pair<int, std::vector<float>>> const& rows)
+{
+  if (rows.empty())
+    return;
+
+  // Allocate preview heightmap texture if needed.
+  if (!_chunk_manip_preview_height_ready)
+  {
+    gl.genTextures(1, &_chunk_manip_preview_height_tex);
+    gl.bindTexture(GL_TEXTURE_2D, _chunk_manip_preview_height_tex);
+    gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, mapbufsize, 256, 0, GL_RGBA, GL_FLOAT, nullptr);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    _chunk_manip_preview_height_ready = true;
+  }
+
+  // Start from the real heightmap then overwrite rows.
+  gl.bindTexture(GL_TEXTURE_2D, _chunk_manip_preview_height_tex);
+  // Copy from the CPU-side tile heightmap buffer (RGBA32F rows for all 256 chunks).
+  gl.texSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mapbufsize, 256, GL_RGBA, GL_FLOAT, _map_tile->_chunk_heightmap_buffer.data());
+  for (auto const& r : rows)
+  {
+    int const instance = r.first;
+    if (instance < 0 || instance >= 256)
+      continue;
+    std::vector<float> const& data = r.second;
+    if (static_cast<int>(data.size()) != mapbufsize * 4)
+      continue;
+    gl.texSubImage2D(GL_TEXTURE_2D, 0, 0, instance, mapbufsize, 1, GL_RGBA, GL_FLOAT, data.data());
+  }
+}
+
+void TileRender::drawChunkManipulatorPreview(OpenGL::Scoped::use_program& mcnk_shader, float alpha)
+{
+  if (!_chunk_manip_preview_height_ready)
+    return;
+  if (_texture_not_loaded)
+    return;
+
+  // Bind UBO.
+  gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::CHUNK_INSTANCE_DATA,
+                     _chunk_instance_data_ubo, 0, sizeof(OpenGL::ChunkInstanceDataUniformBlock) * 256);
+
+  // Bind required textures (same units as regular draw).
+  gl.activeTexture(GL_TEXTURE0 + 3);
+  gl.bindTexture(GL_TEXTURE_2D_ARRAY, _alphamap_tex);
+  gl.activeTexture(GL_TEXTURE0 + 2);
+  gl.bindTexture(GL_TEXTURE_2D_ARRAY, _shadowmap_tex);
+  gl.activeTexture(GL_TEXTURE0 + 1);
+  gl.bindTexture(GL_TEXTURE_2D, _mccv_tex);
+  gl.activeTexture(GL_TEXTURE0 + 0);
+  gl.bindTexture(GL_TEXTURE_2D, _chunk_manip_preview_height_tex);
+
+  mcnk_shader.uniform("preview_pass", 1);
+  mcnk_shader.uniform("preview_alpha", alpha);
+
+  for (auto& draw_call : _draw_calls)
+  {
+    assert(draw_call.n_chunks <= 256);
+    mcnk_shader.uniform("base_instance", static_cast<int>(draw_call.start_chunk));
+
+    for (int i = 0; i < 11; ++i)
+    {
+      gl.activeTexture(GL_TEXTURE0 + 5 + i);
+      if (draw_call.samplers[i] < 0)
+      {
+        gl.bindTexture(GL_TEXTURE_2D_ARRAY, 0);
+        continue;
+      }
+      gl.bindTexture(GL_TEXTURE_2D_ARRAY, draw_call.samplers[i]);
+    }
+
+    gl.drawElementsInstanced(GL_TRIANGLES, 768, GL_UNSIGNED_SHORT, nullptr, draw_call.n_chunks);
+  }
+
+  mcnk_shader.uniform("preview_pass", 0);
+  mcnk_shader.uniform("preview_alpha", 1.0f);
 }
 
 void TileRender::setChunkDetaildoodadsExclusionData(MapChunk* chunk)
