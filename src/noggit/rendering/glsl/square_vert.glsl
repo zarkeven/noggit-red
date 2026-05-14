@@ -9,12 +9,24 @@ uniform vec3 origin;
 uniform float radius;
 uniform float inclination;
 uniform float orientation;
+/// 1: world Y is exactly origin.y (horizontal XZ plane). Skips slope math so sea level stays at true y=0.
+uniform int constant_world_y;
 
 void main()
 {
-    vec4 pos = position;
     float cos_o = cos(orientation);
     float sin_o = sin(orientation);
+
+    if (constant_world_y != 0)
+    {
+        float wx = (position.x * cos_o - position.z * sin_o) * radius + origin.x;
+        float wz = (position.z * cos_o + position.x * sin_o) * radius + origin.z;
+        gl_Position = model_view_projection * vec4(wx, origin.y, wz, 1.0);
+        f_pos = position.xyz;
+        return;
+    }
+
+    vec4 pos = position;
 
     pos.y += pos.x * tan(inclination) * radius;
 

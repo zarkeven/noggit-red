@@ -18,6 +18,7 @@
 #include <QOpenGLFramebufferObject>
 
 #include <memory>
+#include <vector>
 
 namespace OpenGL
 {
@@ -27,6 +28,11 @@ namespace OpenGL
 struct TileIndex;
 class World;
 struct MinimapRenderSettings;
+
+namespace math
+{
+  class frustum;
+}
 
 
 struct WorldRenderParams 
@@ -89,6 +95,9 @@ struct WorldRenderParams
 
   /// Highlight quick-selected ADT chunks (Chunk Manipulator tool).
   bool draw_chunk_manipulator_selection = false;
+
+  /// Per-chunk texture layer count (0–4) as camera-facing billboards (not painted on terrain).
+  bool draw_texture_layer_count_overlay = false;
 };
 
 namespace Noggit::Rendering
@@ -163,6 +172,11 @@ namespace Noggit::Rendering
     std::unique_ptr<OpenGL::program> _wmo_program;
     std::unique_ptr<OpenGL::program> _liquid_program;
     std::unique_ptr<OpenGL::program> _occluder_program;
+    std::unique_ptr<OpenGL::program> _sea_level_clip_program;
+    GLuint _sea_level_clip_vao = 0;
+    GLuint _sea_level_clip_vbo = 0;
+    /// Rebuilt each sea draw: tessellated y=0 plane (avoids huge float triangles at map scale).
+    std::vector<glm::vec3> _sea_level_plane_mesh_scratch;
 
     // horizon && skies && lighting
     std::unique_ptr<Noggit::map_horizon::render> _horizon_render;
@@ -178,7 +192,7 @@ namespace Noggit::Rendering
     Noggit::Rendering::Primitives::WireBox _wirebox_render;
 
     // buffers
-    OpenGL::Scoped::deferred_upload_buffers<12> _buffers;
+    OpenGL::Scoped::deferred_upload_buffers<14> _buffers;
     GLuint const& _mvp_ubo = _buffers[0];
     GLuint const& _lighting_ubo = _buffers[1];
     GLuint const& _terrain_params_ubo = _buffers[2];
@@ -191,6 +205,8 @@ namespace Noggit::Rendering
     GLuint const& _mccv_viz_instance_vbo = _buffers[9];
     GLuint const& _mccv_viz_quad_vbo = _buffers[10];
     GLuint const& _mccv_viz_crosshair_vbo = _buffers[11];
+    GLuint const& _tex_layer_billboard_instance_vbo = _buffers[12];
+    GLuint const& _tex_layer_billboard_quad_vbo = _buffers[13];
 
     // uniform blocks
     OpenGL::MVPUniformBlock _mvp_ubo_data;
@@ -199,12 +215,13 @@ namespace Noggit::Rendering
     OpenGL::PointLightsUniformBlock _point_lights_ubo_data;
 
     // VAOs
-    OpenGL::Scoped::deferred_upload_vertex_arrays<5> _vertex_arrays;
+    OpenGL::Scoped::deferred_upload_vertex_arrays<6> _vertex_arrays;
     GLuint const& _mapchunk_vao = _vertex_arrays[0];
     GLuint const& _liquid_chunk_vao = _vertex_arrays[1];
     GLuint const& _occluder_vao = _vertex_arrays[2];
     GLuint const& _mccv_viz_vao = _vertex_arrays[3];
     GLuint const& _mccv_crosshair_vao = _vertex_arrays[4];
+    GLuint const& _tex_layer_billboard_vao = _vertex_arrays[5];
 
     LiquidTextureManager _liquid_texture_manager;
 
@@ -213,6 +230,14 @@ namespace Noggit::Rendering
     void updatePointLightsUniformBlock(bool enabled, glm::vec3 const& camera_pos);
 
     void setupMccvVizBuffers();
+    void setupTextureLayerBillboardResources();
+    void drawTextureLayerCountBillboards ( glm::mat4x4 const& model_view
+                                         , glm::mat4x4 const& projection
+                                         , glm::vec3 const& camera_pos
+                                         , math::frustum const& frustum
+                                         , WorldRenderParams const& render_settings
+                                         );
+
     void drawMccvVertexAltViz ( glm::mat4x4 const& model_view
                               , glm::mat4x4 const& projection
                               , glm::mat4x4 const& mvp
@@ -228,6 +253,13 @@ namespace Noggit::Rendering
                                        , WorldRenderParams const& render_settings
                                        );
 
+    void drawSeaLevelPlane ( glm::mat4x4 const& model_view
+                           , glm::mat4x4 const& projection
+                           , glm::vec3 const& camera_pos
+                           , float plane_radius
+                           , glm::vec4 const& sea_color
+                           );
+
     // Terrain→WMO seam blending: terrain base-color lookup (rendered top-down).
     std::unique_ptr<QOpenGLFramebufferObject> _terrain_blend_fbo;
     GLuint _terrain_blend_color_tex = 0;
@@ -240,6 +272,10 @@ namespace Noggit::Rendering
     std::unique_ptr<OpenGL::program> _mccv_viz_program;
     std::unique_ptr<OpenGL::program> _mccv_crosshair_ndc_program;
     bool _mccv_viz_buffers_ready = false;
+
+    std::unique_ptr<OpenGL::program> _tex_layer_billboard_program;
+    GLuint _tex_layer_billboard_atlas = 0;
+    bool _tex_layer_billboard_ready = false;
   };
 }
 

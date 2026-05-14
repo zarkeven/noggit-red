@@ -49,7 +49,7 @@ layout (std140) uniform overlay_params
   int draw_noeffectdoodad_overlay;
   int draw_only_normals;
   int point_normals_up;
-  int draw_texture_layer_count_overlay;
+  int draw_sea_level_plane;
 };
 
 struct ChunkInstanceData
@@ -326,50 +326,6 @@ float contour_alpha(float unit_size, vec2 pos, vec2 line_width)
                   );
 }
 
-// 5-bit row, MSB = left column (5 cols x 7 rows digit bitmaps for 0–4)
-int tex_layer_count_row_bits(int n, int ir)
-{
-  ir = clamp(ir, 0, 6);
-  if (n == 0)
-  {
-    if (ir == 0) return 31; if (ir == 1) return 17; if (ir == 2) return 17; if (ir == 3) return 17;
-    if (ir == 4) return 17; if (ir == 5) return 17; return 31;
-  }
-  if (n == 1)
-  {
-    if (ir == 0) return 4; if (ir == 1) return 12; if (ir == 2) return 4; if (ir == 3) return 4;
-    if (ir == 4) return 4; if (ir == 5) return 4; return 14;
-  }
-  if (n == 2)
-  {
-    if (ir == 0) return 31; if (ir == 1) return 1; if (ir == 2) return 1; if (ir == 3) return 30;
-    if (ir == 4) return 16; if (ir == 5) return 16; return 31;
-  }
-  if (n == 3)
-  {
-    if (ir == 0) return 31; if (ir == 1) return 1; if (ir == 2) return 1; if (ir == 3) return 30;
-    if (ir == 4) return 1; if (ir == 5) return 1; return 31;
-  }
-  // n == 4
-  if (ir == 0) return 17; if (ir == 1) return 17; if (ir == 2) return 17; if (ir == 3) return 31;
-  if (ir == 4) return 1; if (ir == 5) return 1; return 1;
-}
-
-float tex_layer_count_digit_alpha(vec2 gn, int n)
-{
-  n = clamp(n, 0, 4);
-  if (max(abs(gn.x), abs(gn.y)) > 1.0)
-    return 0.0;
-  vec2 t01 = gn * 0.5 + 0.5;
-  int ic = int(floor(t01.x * 5.0));
-  int ir = int(floor(t01.y * 7.0));
-  ic = clamp(ic, 0, 4);
-  ir = clamp(ir, 0, 6);
-  int row = tex_layer_count_row_bits(n, ir);
-  int mask = 1 << (4 - ic);
-  return (row & mask) != 0 ? 1.0 : 0.0;
-}
-
 void main()
 {
   float dist_from_camera = distance(camera, vary_position);
@@ -578,42 +534,6 @@ void main()
       vec3 prev_col = vec3(0.20, 1.00, 0.45);
       out_color.rgb = mix(out_color.rgb, prev_col, 0.50);
     }
-  }
-
-  if (draw_texture_layer_count_overlay != 0)
-  {
-    int layer_n = instances[instanceID].ChunkHoles_DrawImpass_TexLayerCount_CantPaint.b;
-    int n = clamp(layer_n, 0, 4);
-
-    uvec2 tile_index_tl = uvec2(uint(floor(vary_position.x / TILESIZE)), uint(floor(vary_position.z / TILESIZE)));
-    vec2 tile_base_tl = vec2(float(tile_index_tl.x * TILESIZE), float(tile_index_tl.y * TILESIZE));
-    uvec2 chunk_index_tl = uvec2(uint(floor(instanceID / 16)), uint(floor(instanceID % 16)));
-    vec2 chunk_base_tl = vec2(float(chunk_index_tl.x * CHUNKSIZE), float(chunk_index_tl.y * CHUNKSIZE));
-    vec2 chunk_center_tl = tile_base_tl + chunk_base_tl + vec2(CHUNKSIZE * 0.5);
-    vec2 delta_tl = vary_position.xz - chunk_center_tl;
-
-    float rad = CHUNKSIZE * 0.14;
-    float d_tl = length(delta_tl);
-    float inner = 1.0 - smoothstep(rad * 0.72, rad, d_tl);
-
-    vec3 badge_rgb = vec3(0.55, 0.55, 0.55);
-    if (n == 1)
-      badge_rgb = vec3(108.0, 151.0, 240.0) / 255.0;
-    else if (n == 2)
-      badge_rgb = vec3(100.0, 245.0, 101.0) / 255.0;
-    else if (n == 3)
-      badge_rgb = vec3(245.0, 166.0, 66.0) / 255.0;
-    else if (n == 4)
-      badge_rgb = vec3(245.0, 53.0, 50.0) / 255.0;
-
-    vec2 gn = delta_tl / (rad * 0.62);
-    float g = tex_layer_count_digit_alpha(gn, n);
-    float edge = smoothstep(rad * 0.95, rad * 1.02, d_tl);
-    float disk = (1.0 - edge) * inner;
-
-    vec3 base_mix = mix(out_color.rgb, badge_rgb, 0.88 * disk);
-    vec3 glyph = vec3(0.04, 0.04, 0.06);
-    out_color.rgb = mix(base_mix, glyph, g * disk * 0.92);
   }
 
   if (draw_shadows != 0)

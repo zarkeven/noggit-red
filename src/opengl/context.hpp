@@ -241,6 +241,8 @@ namespace OpenGL
 
     NOGGIT_FORCEINLINE void drawElements (GLenum mode, GLuint index_buffer, GLsizei count, GLenum type, GLvoid const* indices);
 
+    NOGGIT_FORCEINLINE void drawArrays (GLenum mode, GLint first, GLsizei count);
+
     NOGGIT_FORCEINLINE void drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
 
     QOpenGLContext* getCurrentContext();

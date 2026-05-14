@@ -1,6 +1,8 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/MapView.h>
+#include <noggit/project/ApplicationProject.h>
+#include <noggit/project/VertexColorPalettePersistence.hpp>
 #include <noggit/ui/ShaderTool.hpp>
 #include <noggit/ui/tools/UiCommon/expanderwidget.h>
 #include <noggit/ui/tools/UiCommon/ExtendedSlider.hpp>
@@ -20,6 +22,9 @@
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QSpinBox>
 
+#include <QSignalBlocker>
+#include <QColor>
+
 #define _USE_MATH_DEFINES
 #include <math.h>
 
@@ -27,10 +32,11 @@ namespace Noggit
 {
   namespace Ui
   {
-    ShaderTool::ShaderTool(MapView* map_view, QWidget* parent)
+    ShaderTool::ShaderTool(MapView* map_view, QWidget* parent, bool persist_vertex_color_palette)
       : QWidget(parent)
       , _map_view(map_view)
       , _color(1.f, 1.f, 1.f, 1.f)
+      , _persist_vertex_color_palette(persist_vertex_color_palette)
     {
 
       auto layout (new QFormLayout(this));
@@ -166,8 +172,119 @@ namespace Noggit
       connect (_radius_slider, &Noggit::Ui::Tools::UiCommon::ExtendedSlider::valueChanged, this, &ShaderTool::updateMaskImage);
       connect(_image_mask_group, &Noggit::Ui::Tools::ImageMaskSelector::pixmapUpdated, this, &ShaderTool::updateMaskImage);
 
+      if (_persist_vertex_color_palette)
+      {
+        auto persist_if_ready = [this]()
+        {
+          if (_vertex_palette_io_guard)
+          {
+            return;
+          }
+          persistVertexPaletteToDiskForKey(_vertex_palette_map_key);
+        };
+
+        QObject::connect(_color_palette, &color_widgets::ColorListWidget::colorsChanged,
+                         this, [persist_if_ready](QList<QColor> const&) { persist_if_ready(); });
+        QObject::connect(_color_palette, &color_widgets::ColorListWidget::color_added,
+                         this, [persist_if_ready]() { persist_if_ready(); });
+      }
+
       setMinimumWidth(250);
       setMaximumWidth(250);
+
+      if (_persist_vertex_color_palette)
+      {
+        syncVertexColorPaletteWithMap();
+      }
+    }
+
+    ShaderTool::~ShaderTool()
+    {
+      if (_persist_vertex_color_palette && !_vertex_palette_map_key.isEmpty() && !_vertex_palette_io_guard)
+      {
+        persistVertexPaletteToDiskForKey(_vertex_palette_map_key);
+      }
+    }
+
+    void ShaderTool::syncVertexColorPaletteWithMap()
+    {
+      if (!_persist_vertex_color_palette || !_map_view || !_map_view->getWorld())
+      {
+        return;
+      }
+
+      QString const map = QString::fromStdString(_map_view->getWorld()->basename);
+      if (map.isEmpty())
+      {
+        return;
+      }
+
+      if (map == _vertex_palette_map_key)
+      {
+        return;
+      }
+
+      if (!_vertex_palette_map_key.isEmpty())
+      {
+        persistVertexPaletteToDiskForKey(_vertex_palette_map_key);
+      }
+
+      _vertex_palette_map_key = map;
+      loadVertexPaletteForMap(map);
+    }
+
+    void ShaderTool::persistVertexPaletteToDiskForKey(QString const& map_key)
+    {
+      if (!_persist_vertex_color_palette || _vertex_palette_io_guard || map_key.isEmpty() || !_map_view)
+      {
+        return;
+      }
+
+      auto proj = _map_view->project();
+      if (!proj || proj->ProjectPath.empty())
+      {
+        return;
+      }
+
+      Noggit::Project::saveVertexColorPaletteForMap(QString::fromStdString(proj->ProjectPath),
+                                                   map_key,
+                                                   _color_palette->colors());
+    }
+
+    void ShaderTool::loadVertexPaletteForMap(QString const& map_key)
+    {
+      _vertex_palette_io_guard = true;
+
+      QList<QColor> loaded;
+      if (_map_view)
+      {
+        auto proj = _map_view->project();
+        if (proj && !proj->ProjectPath.empty())
+        {
+          loaded = Noggit::Project::loadVertexColorPaletteForMap(QString::fromStdString(proj->ProjectPath), map_key);
+        }
+      }
+
+      {
+        QSignalBlocker const palette_block(_color_palette);
+        _color_palette->setColors(loaded);
+      }
+
+      if (!loaded.isEmpty())
+      {
+        QColor const c = loaded.front();
+        QSignalBlocker const picker_block(color_picker);
+        QSignalBlocker const wheel_block(color_wheel);
+        color_picker->setColor(c);
+        color_wheel->setColor(c);
+        _color.x = c.redF();
+        _color.y = c.greenF();
+        _color.z = c.blueF();
+        _color.w = 1.f;
+      }
+
+      update_color_widgets();
+      _vertex_palette_io_guard = false;
     }
 
     void ShaderTool::changeShader

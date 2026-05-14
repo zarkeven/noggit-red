@@ -55,6 +55,8 @@
       <file alias="sphere_fs">../src/noggit/rendering/glsl/sphere_frag.glsl</file>
       <file alias="square_vs">../src/noggit/rendering/glsl/square_vert.glsl</file>
       <file alias="square_fs">../src/noggit/rendering/glsl/square_frag.glsl</file>
+      <file alias="sea_level_clip_vs">../src/noggit/rendering/glsl/sea_level_clip_vert.glsl</file>
+      <file alias="sea_level_clip_fs">../src/noggit/rendering/glsl/sea_level_clip_frag.glsl</file>
       <file alias="cylinder_vs">../src/noggit/rendering/glsl/cylinder_vert.glsl</file>
       <file alias="cylinder_fs">../src/noggit/rendering/glsl/cylinder_frag.glsl</file>
 	  <file alias="line_vs">../src/noggit/rendering/glsl/line_vert.glsl</file>
@@ -63,5 +65,7 @@
       <file alias="mccv_viz_fs">../src/noggit/rendering/glsl/mccv_viz_frag.glsl</file>
       <file alias="mccv_crosshair_vs">../src/noggit/rendering/glsl/mccv_crosshair_vert.glsl</file>
       <file alias="mccv_crosshair_fs">../src/noggit/rendering/glsl/mccv_crosshair_frag.glsl</file>
+      <file alias="texture_layer_billboard_vs">../src/noggit/rendering/glsl/texture_layer_billboard_vert.glsl</file>
+      <file alias="texture_layer_billboard_fs">../src/noggit/rendering/glsl/texture_layer_billboard_frag.glsl</file>
     </qresource>
 </RCC>

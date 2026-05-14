@@ -2161,6 +2161,19 @@ void MapView::setupViewMenu()
   ADD_TOGGLE (view_menu, "Water",       Qt::Key_F4, _draw_water);
   ADD_TOGGLE (view_menu, "WMOs",        Qt::Key_F6, _draw_wmo);
 
+  ADD_TOGGLE_POST (view_menu, "Sea level (y = 0)", Qt::SHIFT | Qt::Key_F8, _draw_sea_level_plane,
+                   [=]
+                   {
+                     _world->renderer()->getTerrainParamsUniformBlock()->draw_sea_level_plane = _draw_sea_level_plane.get() ? 1 : 0;
+                     if (_draw_sea_level_plane.get())
+                     {
+                       // Same idea as texture layer count: shoreline reads clearer with ADT grid (F7).
+                       _draw_lines.set(true);
+                       _world->renderer()->getTerrainParamsUniformBlock()->draw_lines = true;
+                     }
+                     _world->renderer()->markTerrainParamsUniformBlockDirty();
+                   });
+
   ADD_TOGGLE_POST (view_menu, "Lines", Qt::Key_F7, _draw_lines,
                    [=]
                    {
@@ -3013,11 +3026,13 @@ MapView::MapView( math::degrees camera_yaw0
     _world->renderer()->markTerrainParamsUniformBlockDirty();
   });
 
-  connect(&_draw_texture_layer_count_overlay, &Noggit::BoolToggleProperty::changed, this, [this](bool)
+  connect(&_draw_texture_layer_count_overlay, &Noggit::BoolToggleProperty::changed, this, [this](bool on)
   {
-    _world->renderer()->getTerrainParamsUniformBlock()->draw_texture_layer_count_overlay =
-      _draw_texture_layer_count_overlay.get();
-    _world->renderer()->markTerrainParamsUniformBlockDirty();
+    // Texture layer billboards read best with ADT/tile grid lines (terrain shader "Lines" / F7).
+    if (on)
+    {
+      _draw_lines.set(true);
+    }
   });
 
   if (QCoreApplication* app = QCoreApplication::instance())
@@ -4490,8 +4505,6 @@ void MapView::draw_map()
 
   bool show_unpaintable = _classic_ui ? show_unpaintable_chunks : _left_sec_toolbar->showUnpaintableChunk();
 
-
-
   WorldRenderParams renderParams;
 
   renderParams.cursorRotation = _cursorRotation;
@@ -4536,6 +4549,8 @@ void MapView::draw_map()
   renderParams.render_select_wmo_aabb = _render_wmo_aabb;
   renderParams.render_select_wmo_groups_bounds = _render_wmo_groups_bounds;
 
+  renderParams.draw_texture_layer_count_overlay = _draw_texture_layer_count_overlay.get();
+
   if (terrainMode == editing_mode::mccv && _mod_alt_down && _draw_terrain.get())
   {
     // tick() runs after draw_map(), so _cursor_pos can lag _last_mouse_pos by a frame.
@@ -4577,13 +4592,14 @@ void MapView::draw_map()
   }
 
   Noggit::register_crash_render_stage("MapView::draw_map:WorldRender::draw");
+  glm::vec3 const view_ve = debug_cam ? _debug_cam.position : _camera.position;
   _world->renderer()->draw (
                   _model_view
                 , _projection
                 , _cursor_pos
                 , cursorColor
                 , ref_pos
-                , _camera.position
+                , view_ve
                 , &minimapRenderSettings
                 , renderParams
                 );
@@ -5392,6 +5408,11 @@ void MapView::clearRampPoints()
   _ramp_pick_target = 0;
 }
 
+void MapView::openRampCreationTool()
+{
+  ensureRampToolWindow();
+}
+
 void MapView::ensureRampToolWindow()
 {
   if (!_ramp_tool_window)
@@ -5408,6 +5429,26 @@ void MapView::ensureRampToolWindow()
   _ramp_tool_window->show();
   _ramp_tool_window->raise();
   _ramp_tool_window->activateWindow();
+}
+
+std::optional<glm::vec3> MapView::pickTerrainWorldPositionUnderCursor() const
+{
+  if (_display_mode != display_mode::in_3D)
+    return std::nullopt;
+
+  if (!_draw_terrain.get())
+    return std::nullopt;
+
+  QPoint const mouse_px(static_cast<int>(_last_mouse_pos.x()), static_cast<int>(_last_mouse_pos.y()));
+  selection_result const results = intersect_result(true, mouse_px);
+  if (results.empty())
+    return std::nullopt;
+
+  auto const& hit = results.front().second;
+  if (hit.index() != eEntry_MapChunk)
+    return std::nullopt;
+
+  return std::get<selected_chunk_type>(hit).position;
 }
 
 void MapView::tryRampTerrainPick(QPoint const& mouse_px, Qt::MouseButton button)
@@ -5549,7 +5590,7 @@ void MapView::onSettingsSave()
 
   OpenGL::TerrainParamsUniformBlock* params = _world->renderer()->getTerrainParamsUniformBlock();
   params->draw_tileset = _draw_tileset.get();
-  params->draw_texture_layer_count_overlay = _draw_texture_layer_count_overlay.get();
+  params->draw_sea_level_plane = _draw_sea_level_plane.get() ? 1 : 0;
   params->wireframe_type = _settings->value("wireframe/type", false).toBool();
   params->wireframe_radius = _settings->value("wireframe/radius", 1.5f).toFloat();
   params->wireframe_width = _settings->value ("wireframe/width", 1.f).toFloat();

@@ -15,6 +15,7 @@
 #include <QtWidgets/QDial>
 #include <QtWidgets/QGridLayout>
 #include <QtWidgets/QGroupBox>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QRadioButton>
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QVBoxLayout>
@@ -128,6 +129,17 @@ namespace Noggit
       settings_layout->addWidget(_snap_wmo_objects_chkbox);
 
       layout->addWidget(settings_group);
+
+      auto* ramp_tool_btn = new QPushButton(tr("Ramp Creation Tool"), this);
+      ramp_tool_btn->setToolTip(tr("Pick two points on the terrain and build a ramp between them."));
+      connect(ramp_tool_btn, &QPushButton::clicked, this, [this]
+      {
+        if (_map_view)
+        {
+          _map_view->openRampCreationTool();
+        }
+      });
+      layout->addWidget(ramp_tool_btn);
 
       _image_mask_group = new Noggit::Ui::Tools::ImageMaskSelector(map_view, this);
       _mask_image = _image_mask_group->getPixmap()->toImage();

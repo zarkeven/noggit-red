@@ -3,6 +3,7 @@
 #include <noggit/BoolToggleProperty.hpp>
 #include <noggit/MapView.h>
 #include <noggit/ui/FontAwesome.hpp>
+#include <noggit/ui/FontNoggit.hpp>
 #include <noggit/ui/tools/ActionHistoryNavigator/ActionHistoryNavigator.hpp>
 #include <noggit/ui/tools/ViewToolbar/Ui/ViewToolbar.hpp>
 #include <noggit/World.h>
@@ -15,6 +16,8 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QtGui/QIconEngine>
+#include <QtGui/QPalette>
+#include <QFont>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -73,6 +76,76 @@ namespace
   QIcon texture_layer_overlay_tool_icon()
   {
     static QIcon const cached(new TextureLayerOverlayIconEngine());
+    return cached;
+  }
+
+  /// Sea level (y = 0): same water glyph as Water toggle + "0 FT" below; colors match FontNoggitIconEngine.
+  class SeaLevelPlaneIconEngine final : public QIconEngine
+  {
+  public:
+    QIconEngine* clone() const override
+    {
+      return new SeaLevelPlaneIconEngine();
+    }
+
+    void paint(QPainter* painter, QRect const& rect, QIcon::Mode mode, QIcon::State state) override
+    {
+      painter->save();
+      painter->setRenderHint(QPainter::Antialiasing, true);
+
+      auto* temp_btn = new FontNoggitButtonStyle();
+      temp_btn->ensurePolished();
+      QColor const label_color =
+        (mode == QIcon::Disabled)
+          ? temp_btn->palette().color(QPalette::Disabled, QPalette::WindowText)
+          : (state == QIcon::On)
+              ? temp_btn->palette().color(QPalette::WindowText)
+              : temp_btn->palette().color(QPalette::Disabled, QPalette::WindowText);
+      delete temp_btn;
+
+      int const n = qMin(rect.width(), rect.height());
+      qreal const m = qMax(1.0, qreal(n) / 14.0);
+      QRectF const R(rect);
+
+      // Same asset as "Water" (VISIBILITY_WATER); leaves lower band for label.
+      qreal const drop_h = R.height() * 0.58;
+      QRect const drop_rect(
+        static_cast<int>(R.left() + m),
+        static_cast<int>(R.top() + m * 0.5),
+        static_cast<int>(R.width() - 2.0 * m),
+        static_cast<int>(drop_h));
+      static FontNoggitIcon const water_icon(FontNoggit::VISIBILITY_WATER);
+      water_icon.paint(painter, drop_rect, Qt::AlignCenter, mode, state);
+
+      QRectF const label_rect(
+        R.left() + m,
+        drop_rect.bottom() + m * 0.35,
+        R.width() - 2.0 * m,
+        R.bottom() - drop_rect.bottom() - m * 1.25);
+      QFont f = painter->font();
+      f.setPixelSize(qMax(4, int(qMin(label_rect.width(), label_rect.height()) * 0.65)));
+      f.setBold(true);
+      f.setStyleStrategy(QFont::PreferAntialias);
+      painter->setFont(f);
+      painter->setPen(label_color);
+      painter->drawText(label_rect, Qt::AlignHCenter | Qt::AlignTop, QStringLiteral("0 FT"));
+
+      painter->restore();
+    }
+
+    QPixmap pixmap(QSize const& size, QIcon::Mode mode, QIcon::State state) override
+    {
+      QPixmap pm(size);
+      pm.fill(Qt::transparent);
+      QPainter p(&pm);
+      paint(&p, QRect(QPoint(0, 0), size), mode, state);
+      return pm;
+    }
+  };
+
+  QIcon sea_level_plane_tool_icon()
+  {
+    static QIcon const cached(new SeaLevelPlaneIconEngine());
     return cached;
   }
 }
@@ -208,6 +281,7 @@ ViewToolbar::ViewToolbar(MapView *mapView, ViewToolbar *tb)
     add_tool_icon(mapView, &mapView->_draw_wmo_exterior, tr("WMO exterior"), FontNoggit::UI_TOGGLE, tb);
     add_tool_icon(mapView, &mapView->_draw_terrain, tr("Terrain"), FontNoggit::VISIBILITY_TERRAIN, tb);
     add_tool_icon(mapView, &mapView->_draw_water, tr("Water"), FontNoggit::VISIBILITY_WATER, tb);
+    add_tool_icon(mapView, &mapView->_draw_sea_level_plane, tr("Sea level plane (y = 0)"), sea_level_plane_tool_icon(), tb);
 
     addSeparator();
 

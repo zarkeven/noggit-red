@@ -79,7 +79,7 @@ namespace Noggit
 
     void FlattenBlurTool::setupUi(Ui::Tools::ToolPanel* toolPanel)
     {
-        _flattenTool = new Noggit::Ui::flatten_blur_tool(mapView());
+        _flattenTool = new Noggit::Ui::flatten_blur_tool(mapView(), mapView());
         toolPanel->registerTool(this, _flattenTool);
     }
 

@@ -1258,6 +1258,14 @@ void OpenGL::context::drawElements (GLenum mode, GLuint index_buffer, GLsizei co
   gl.bindBuffer (GL_ELEMENT_ARRAY_BUFFER, old);
 }
 
+void OpenGL::context::drawArrays (GLenum mode, GLint first, GLsizei count)
+{
+#ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS
+  verify_context_and_check_for_gl_errors const _ (_current_context, NOGGIT_CURRENT_FUNCTION);
+#endif
+  return _4_1_core_func->glDrawArrays (mode, first, count);
+}
+
 void OpenGL::context::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount)
 {
 #ifndef NOGGIT_DO_NOT_CHECK_FOR_OPENGL_ERRORS

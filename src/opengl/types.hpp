@@ -88,7 +88,8 @@ namespace OpenGL
     int draw_noeffectdoodad_overlay = false;
     int draw_only_normals = false;
     int point_normals_up = false;
-    int draw_texture_layer_count_overlay = false;
+    /// WoW sea surface height (world Y = 0); clip-plane pass reads this (not painted in terrain_frag).
+    int draw_sea_level_plane = false;
   };
 
   struct ChunkInstanceDataUniformBlock

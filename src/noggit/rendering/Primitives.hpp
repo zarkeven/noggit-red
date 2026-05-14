@@ -110,6 +110,8 @@ namespace Noggit::Rendering::Primitives
              , math::radians inclination
              , math::radians orientation
              , glm::vec4  const& color
+             , bool checkerboard_pattern = true
+             , bool constant_world_y = false
              );
     void unload();
   private:

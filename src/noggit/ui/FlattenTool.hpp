@@ -13,6 +13,7 @@ namespace Noggit::Ui::Tools::UiCommon
   class ExtendedSlider;
 }
 
+class MapView;
 class World;
 
 class QButtonGroup;
@@ -30,7 +31,7 @@ namespace Noggit
     class flatten_blur_tool : public QWidget
     {
     public:
-      flatten_blur_tool(QWidget* parent = nullptr);
+      flatten_blur_tool(MapView* map_view, QWidget* parent = nullptr);
 
       void flatten (World* world, glm::vec3 const& cursor_pos, float dt);
       void blur (World* world, glm::vec3 const& cursor_pos, float dt);
@@ -96,6 +97,8 @@ namespace Noggit
       QCheckBox* _lock_down_checkbox;
       QCheckBox* _snap_m2_objects_chkbox;
       QCheckBox* _snap_wmo_objects_chkbox;
+
+      MapView* _map_view = nullptr;
     };
   }
 }

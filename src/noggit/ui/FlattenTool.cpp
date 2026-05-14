@@ -3,6 +3,7 @@
 #include <noggit/ui/FlattenTool.hpp>
 #include <noggit/ui/FontNoggit.hpp>
 #include <noggit/ui/tools/UiCommon/ExtendedSlider.hpp>
+#include <noggit/MapView.h>
 #include <noggit/World.h>
 
 #include <util/qt/overload.hpp>
@@ -16,15 +17,18 @@
 #include <QtWidgets/QGridLayout>
 #include <QtWidgets/QGroupBox>
 #include <QtWidgets/QLabel>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QRadioButton>
 #include <QtWidgets/QSlider>
+#include <QtWidgets/QVBoxLayout>
 
 namespace Noggit
 {
   namespace Ui
   {
-    flatten_blur_tool::flatten_blur_tool(QWidget* parent)
+    flatten_blur_tool::flatten_blur_tool(MapView* map_view, QWidget* parent)
       : QWidget(parent)
+      , _map_view(map_view)
       , _angle(45.0f)
       , _orientation(0.0f)
       , _flatten_type(eFlattenType_Linear)
@@ -206,6 +210,20 @@ namespace Noggit
       angle_layout->addWidget(_orientation_info, 2, 1);
       
       flatten_only_layout->addWidget(_angle_group);
+
+      if (_map_view)
+      {
+        auto* ramp_tool_btn = new QPushButton(tr("Ramp Creation Tool"), flatten_only_group);
+        ramp_tool_btn->setToolTip(tr("Pick two points on the terrain and build a ramp between them."));
+        connect(ramp_tool_btn, &QPushButton::clicked, this, [this]
+        {
+          if (_map_view)
+          {
+            _map_view->openRampCreationTool();
+          }
+        });
+        flatten_only_layout->addWidget(ramp_tool_btn);
+      }
 
       _lock_group = new QGroupBox("Lock mode", this);
       _lock_group->setCheckable(true);

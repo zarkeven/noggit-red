@@ -58,7 +58,7 @@ BrushStack::BrushStack(MapView* map_view, QWidget* parent)
                 brush_stack_item->setTool(new Noggit::Ui::TerrainTool(_map_view, this, true));
                 break;
               case eTools::eFlattenBlur:
-                brush_stack_item->setTool(new Noggit::Ui::flatten_blur_tool(this));
+                brush_stack_item->setTool(new Noggit::Ui::flatten_blur_tool(_map_view, this));
                 break;
               case eTools::eTexturing:
                 brush_stack_item->setTool(new Noggit::Ui::texturing_tool(&_map_view->getCamera()->position, _map_view, nullptr, this));
@@ -355,7 +355,7 @@ void BrushStack::fromJSON(const QJsonObject& json)
     }
     else if (type == "FLATTEN_BLUR")
     {
-      brush_stack_item->setTool(new Noggit::Ui::flatten_blur_tool(this));
+      brush_stack_item->setTool(new Noggit::Ui::flatten_blur_tool(_map_view, this));
     }
     else if (type == "TEXTURING")
     {

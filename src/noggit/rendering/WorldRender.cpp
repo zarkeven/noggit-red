@@ -27,6 +27,16 @@
 #include <opengl/shader.hpp>
 #include <opengl/types.hpp>
 
+#include <QFile>
+#include <QFont>
+#include <QFontDatabase>
+#include <QFontMetrics>
+#include <QImage>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPen>
+#include <QString>
+#include <QStringList>
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
@@ -53,6 +63,111 @@ namespace
     glm::vec4 pos;
     glm::vec4 color;
   };
+
+  struct TexLayerBillboardInstance
+  {
+    glm::vec4 center_digit;
+    glm::vec4 color;
+  };
+
+  static constexpr std::size_t kMaxTexLayerBillboardInstances = 24576u;
+
+  static glm::vec4 tex_layer_digit_color(int n)
+  {
+    n = std::clamp(n, 0, 4);
+    glm::vec4 c(0.62f, 0.62f, 0.64f, 1.f);
+    if (n == 1)
+    {
+      c = glm::vec4(108.f / 255.f, 151.f / 255.f, 240.f / 255.f, 1.f);
+    }
+    else if (n == 2)
+    {
+      c = glm::vec4(100.f / 255.f, 245.f / 255.f, 101.f / 255.f, 1.f);
+    }
+    else if (n == 3)
+    {
+      c = glm::vec4(245.f / 255.f, 166.f / 255.f, 66.f / 255.f, 1.f);
+    }
+    else if (n == 4)
+    {
+      c = glm::vec4(245.f / 255.f, 53.f / 255.f, 50.f / 255.f, 1.f);
+    }
+    return c;
+  }
+
+  static QImage build_texture_layer_digit_atlas_image()
+  {
+    constexpr int kDigits = 5;
+    constexpr int kCellH = 176;
+    constexpr int kCellW = 132;
+
+    QImage img(kCellW * kDigits, kCellH, QImage::Format_RGBA8888);
+    img.fill(0x00000000);
+
+    QString const paths[] = {
+      QStringLiteral("C:/Users/donal/Downloads/ARIALNB.TTF"),
+      QDir::homePath() + QStringLiteral("/Downloads/ARIALNB.TTF"),
+    };
+
+    QFont font;
+    bool loaded = false;
+    for (QString const& path : paths)
+    {
+      if (!QFile::exists(path))
+      {
+        continue;
+      }
+
+      int const id = QFontDatabase::addApplicationFont(path);
+      if (id < 0)
+      {
+        continue;
+      }
+
+      QStringList const fams = QFontDatabase::applicationFontFamilies(id);
+      if (fams.empty())
+      {
+        continue;
+      }
+
+      font = QFont(fams.front());
+      loaded = true;
+      break;
+    }
+
+    if (!loaded)
+    {
+      font = QFont(QStringLiteral("Arial"), 96, QFont::Bold);
+      font.setStretch(80);
+    }
+
+    font.setPixelSize(118);
+    font.setStyleHint(QFont::SansSerif, QFont::PreferAntialias);
+
+    QPainter painter(&img);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+
+    for (int d = 0; d < kDigits; ++d)
+    {
+      QRect const cell(d * kCellW, 0, kCellW, kCellH);
+      QString const s = QString::number(d);
+
+      QPainterPath path;
+      path.addText(0.f, 0.f, font, s);
+      QRectF const br = path.boundingRect();
+      QPointF const delta(cell.center().x() - br.center().x(), cell.center().y() - br.center().y());
+      path.translate(delta);
+
+      painter.strokePath(path, QPen(QColor(0, 0, 0, 245), 5.f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      painter.fillPath(path, QColor(255, 255, 255, 255));
+    }
+
+    painter.end();
+
+    // OpenGL convention: first row is bottom of texture.
+    return img.mirrored(false, true);
+  }
 
   static constexpr std::size_t kMaxMccvVizInstances = 12288u;
   static constexpr float kMccvVizBallScale = 6.f;
@@ -255,6 +370,23 @@ void WorldRender::upload()
       { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("liquid_fs") },
     });
 
+  _sea_level_clip_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("sea_level_clip_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("sea_level_clip_fs") },
+    });
+
+  gl.genVertexArrays(1, &_sea_level_clip_vao);
+  gl.genBuffers(1, &_sea_level_clip_vbo);
+  {
+    std::array<glm::vec3, 6> init{};
+    OpenGL::Scoped::use_program sea_sh(*_sea_level_clip_program.get());
+    OpenGL::Scoped::vao_binder const sea_vao_bind(_sea_level_clip_vao);
+    OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> sea_vbuf(_sea_level_clip_vbo);
+    gl.bufferData(GL_ARRAY_BUFFER, sizeof(init), init.data(), GL_DYNAMIC_DRAW);
+    sea_sh.attrib("world_position", 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), 0);
+  }
+
   _occluder_program.reset(
     new OpenGL::program{
       { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("occluder_vs") },
@@ -309,6 +441,7 @@ void WorldRender::upload()
   }
 
   setupMccvVizBuffers();
+  setupTextureLayerBillboardResources();
 }
 
 void WorldRender::draw (glm::mat4x4 const& model_view
@@ -363,7 +496,6 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     _terrain_params_ubo_data.draw_noeffectdoodad_overlay = false;
     _terrain_params_ubo_data.draw_only_normals = minimap_render_settings->draw_only_normals;
     _terrain_params_ubo_data.point_normals_up = minimap_render_settings->point_normals_up;
-    _terrain_params_ubo_data.draw_texture_layer_count_overlay = false;
     _terrain_params_ubo_data.draw_tileset = true;
     _need_terrain_params_ubo_update = true;
   }
@@ -746,7 +878,27 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
 
     drawMccvVertexAltViz(model_view, projection, mvp, camera_pos, cursor_color, render_settings);
+    drawTextureLayerCountBillboards(model_view, projection, camera_pos, frustum, render_settings);
     drawRampPreview(mvp, render_settings);
+  }
+
+  // Sea level as soon as terrain (and terrain-adjacent overlays) have written the depth buffer.
+  // Drawing after WMO/M2 lets those occlude the plane and can make shoreline depth alternate terrain vs
+  // nearer geometry every frame → visible flicker. ADT water still draws after this block.
+  if (_terrain_params_ubo_data.draw_sea_level_plane && !render_settings.minimap_render
+      && render_settings.display_mode == display_mode::in_3D)
+  {
+    ZoneScopedN("World::draw() : Draw sea level plane");
+
+    gl.enable(GL_BLEND);
+    gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    OpenGL::Scoped::depth_mask_setter<GL_FALSE> const depth_mask;
+
+    float const plane_radius = std::max(_view_distance * 25.f, 12000.f);
+    glm::vec4 const sea_color(46.f / 255.f, 107.f / 255.f, 199.f / 255.f, 0.4f);
+
+    drawSeaLevelPlane(model_view, projection, camera_pos, plane_radius, sea_color);
   }
 
   // Terrain base-color lookup texture for WMO shader-16 blending (modern clients).
@@ -1973,6 +2125,174 @@ void WorldRender::setupMccvVizBuffers()
   _mccv_viz_buffers_ready = true;
 }
 
+void WorldRender::setupTextureLayerBillboardResources()
+{
+  ZoneScopedN("WorldRender::setupTextureLayerBillboardResources");
+
+  _tex_layer_billboard_ready = false;
+
+  _tex_layer_billboard_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("texture_layer_billboard_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("texture_layer_billboard_fs") },
+    });
+
+  static constexpr glm::vec2 quad_strip[4] = {
+    { -1.f, -1.f }, { 1.f, -1.f }, { -1.f, 1.f }, { 1.f, 1.f },
+  };
+
+  gl.bufferData<GL_ARRAY_BUFFER>(_tex_layer_billboard_quad_vbo, sizeof(quad_strip), quad_strip, GL_STATIC_DRAW);
+
+  QImage const atlas = build_texture_layer_digit_atlas_image();
+  if (atlas.isNull() || atlas.width() <= 0 || atlas.height() <= 0)
+  {
+    LogError << "WorldRender::setupTextureLayerBillboardResources: failed to build digit atlas" << std::endl;
+    _tex_layer_billboard_program.reset();
+    return;
+  }
+
+  if (_tex_layer_billboard_atlas == 0)
+  {
+    gl.genTextures(1, &_tex_layer_billboard_atlas);
+  }
+
+  gl.bindTexture(GL_TEXTURE_2D, _tex_layer_billboard_atlas);
+  gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlas.width(), atlas.height(), 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 atlas.constBits());
+  gl.bindTexture(GL_TEXTURE_2D, 0);
+
+  {
+    OpenGL::Scoped::vao_binder const vao_bind(_tex_layer_billboard_vao);
+    OpenGL::Scoped::use_program prog{ *_tex_layer_billboard_program.get() };
+
+    prog.attrib("quad_corner", _tex_layer_billboard_quad_vbo, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    prog.attrib_divisor("quad_corner", 0, 1);
+
+    prog.attrib("instance_center_digit", _tex_layer_billboard_instance_vbo, 4, GL_FLOAT, GL_FALSE,
+                sizeof(TexLayerBillboardInstance), nullptr);
+    prog.attrib_divisor("instance_center_digit", 1, 1);
+
+    prog.attrib("instance_color", _tex_layer_billboard_instance_vbo, 4, GL_FLOAT, GL_FALSE,
+                sizeof(TexLayerBillboardInstance), reinterpret_cast<void*>(sizeof(glm::vec4)));
+    prog.attrib_divisor("instance_color", 1, 1);
+  }
+
+  _tex_layer_billboard_ready = true;
+}
+
+void WorldRender::drawTextureLayerCountBillboards ( glm::mat4x4 const& model_view
+                                                 , glm::mat4x4 const& projection
+                                                 , glm::vec3 const& camera_pos
+                                                 , math::frustum const& frustum
+                                                 , WorldRenderParams const& render_settings
+                                                 )
+{
+  if (!render_settings.draw_texture_layer_count_overlay
+      || render_settings.minimap_render
+      || !render_settings.draw_terrain
+      || render_settings.display_mode != display_mode::in_3D)
+  {
+    return;
+  }
+  if (!_tex_layer_billboard_ready || !_tex_layer_billboard_program || !_tex_layer_billboard_atlas)
+  {
+    return;
+  }
+  if (!_mcnk_program)
+  {
+    return;
+  }
+
+  ZoneScopedN("WorldRender::drawTextureLayerCountBillboards");
+
+  constexpr float kTileSize = 533.33333f;
+  constexpr float kChunkSize = kTileSize / 16.f;
+
+  std::vector<TexLayerBillboardInstance> instances;
+  instances.reserve(8192u);
+
+  for (MapTile* tile : _world->mapIndex.loaded_tiles())
+  {
+    if (!tile || !tile->texturesFinishedLoading())
+    {
+      continue;
+    }
+
+    for (unsigned z = 0; z < 16u; ++z)
+    {
+      for (unsigned x = 0; x < 16u; ++x)
+      {
+        MapChunk* chunk = tile->getChunk(x, z);
+        if (!chunk)
+        {
+          continue;
+        }
+
+        glm::vec3 const center = chunk->vcenter + glm::vec3(0.f, kChunkSize * 0.16f, 0.f);
+        if (!frustum.intersectsSphere(center, kChunkSize * 0.6f))
+        {
+          continue;
+        }
+
+        int const layers = static_cast<int>(chunk->texture_set->num());
+        int const n = std::clamp(layers, 0, 4);
+
+        instances.push_back({ glm::vec4(center, static_cast<float>(n)), tex_layer_digit_color(n) });
+
+        if (instances.size() >= kMaxTexLayerBillboardInstances)
+        {
+          goto tex_layer_billboard_done;
+        }
+      }
+    }
+  }
+
+tex_layer_billboard_done:
+
+  if (instances.empty())
+  {
+    return;
+  }
+
+  gl.bufferData<GL_ARRAY_BUFFER>(_tex_layer_billboard_instance_vbo,
+                                  static_cast<GLsizeiptr>(instances.size() * sizeof(TexLayerBillboardInstance)),
+                                  instances.data(),
+                                  GL_DYNAMIC_DRAW);
+
+  gl.enable(GL_BLEND);
+  gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  OpenGL::Scoped::bool_setter<GL_CULL_FACE, GL_FALSE> const cull_off;
+  OpenGL::Scoped::depth_mask_setter<GL_FALSE> const no_depth_write;
+
+  float const d0 = glm::distance(camera_pos, glm::vec3(instances.front().center_digit));
+  float const s = glm::clamp(0.22f * d0 / 140.f, 0.12f, 1.65f) * kChunkSize;
+  constexpr float kTexLayerBillboardSize = 1.f / 8.f;
+  // half_ext.x = world half-width, .y = world half-height (along camera-facing quad "up").
+  constexpr float kTexLayerBillboardHeightScale = 0.5f;
+  glm::vec2 const half_ext(s * 0.52f * kTexLayerBillboardSize,
+                             s * 0.98f * kTexLayerBillboardSize * kTexLayerBillboardHeightScale);
+
+  constexpr GLint kAtlasUnit = 14;
+  gl.activeTexture(GL_TEXTURE0 + kAtlasUnit);
+  gl.bindTexture(GL_TEXTURE_2D, _tex_layer_billboard_atlas);
+
+  OpenGL::Scoped::use_program prog{ *_tex_layer_billboard_program.get() };
+  prog.uniform("model_view", model_view);
+  prog.uniform("projection", projection);
+  prog.uniform("camera_pos", camera_pos);
+  prog.uniform("billboard_half_extent", half_ext);
+  prog.uniform("digit_atlas", kAtlasUnit);
+
+  OpenGL::Scoped::vao_binder const vao_bind(_tex_layer_billboard_vao);
+  gl.drawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(instances.size()));
+
+  gl.bindTexture(GL_TEXTURE_2D, 0);
+}
+
 void WorldRender::drawMccvVertexAltViz ( glm::mat4x4 const& model_view
                                        , glm::mat4x4 const& projection
                                        , glm::mat4x4 const& mvp
@@ -2229,6 +2549,70 @@ void WorldRender::drawRampPreview(glm::mat4x4 const& mvp, WorldRenderParams cons
   _line_render.draw(mvp, cut2, col, false);
 }
 
+void WorldRender::drawSeaLevelPlane ( glm::mat4x4 const& model_view
+                                    , glm::mat4x4 const& projection
+                                    , glm::vec3 const& camera_pos
+                                    , float plane_radius
+                                    , glm::vec4 const& sea_color
+                                    )
+{
+  if (!_sea_level_clip_program.get() || !_sea_level_clip_vao || !_sea_level_clip_vbo)
+    return;
+
+  OpenGL::Scoped::bool_setter<GL_CULL_FACE, GL_FALSE> const sea_two_sided;
+
+  // Far-terrain flicker: one pair of huge float triangles spans tens of km; GPU loses precision on
+  // clip/depth vs terrain. Build many smaller quads; compute corners in double then cast to float.
+  static constexpr int kSeaPlaneGridSteps = 40;
+  static constexpr double kSeaLevelWorldY = 0.0;
+
+  double const cx = static_cast<double>(camera_pos.x);
+  double const cz = static_cast<double>(camera_pos.z);
+  double const rd = static_cast<double>(plane_radius);
+  double const cell = (2.0 * rd) / static_cast<double>(kSeaPlaneGridSteps);
+
+  std::vector<glm::vec3>& verts = _sea_level_plane_mesh_scratch;
+  verts.clear();
+  verts.reserve(static_cast<std::size_t>(kSeaPlaneGridSteps * kSeaPlaneGridSteps * 6u));
+
+  for (int j = 0; j < kSeaPlaneGridSteps; ++j)
+  {
+    for (int i = 0; i < kSeaPlaneGridSteps; ++i)
+    {
+      double const x0 = cx - rd + static_cast<double>(i) * cell;
+      double const x1 = x0 + cell;
+      double const z0 = cz - rd + static_cast<double>(j) * cell;
+      double const z1 = z0 + cell;
+
+      auto const push = [&verts] (double x, double z, double y)
+      {
+        verts.emplace_back(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+      };
+
+      push(x0, z0, kSeaLevelWorldY);
+      push(x1, z0, kSeaLevelWorldY);
+      push(x1, z1, kSeaLevelWorldY);
+      push(x0, z0, kSeaLevelWorldY);
+      push(x1, z1, kSeaLevelWorldY);
+      push(x0, z1, kSeaLevelWorldY);
+    }
+  }
+
+  OpenGL::Scoped::use_program shader(*_sea_level_clip_program.get());
+  shader.uniform("model_view", model_view);
+  shader.uniform("projection", projection);
+  shader.uniform("color", sea_color);
+
+  gl.bindBuffer(GL_ARRAY_BUFFER, _sea_level_clip_vbo);
+  gl.bufferData(GL_ARRAY_BUFFER
+                 , static_cast<GLsizeiptr>(verts.size() * sizeof(glm::vec3))
+                 , verts.data()
+                 , GL_DYNAMIC_DRAW);
+
+  OpenGL::Scoped::vao_binder const bind(_sea_level_clip_vao);
+  gl.drawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size()));
+}
+
 void WorldRender::drawChunkManipulatorSelection ( glm::mat4x4 const& model_view
                                                 , glm::mat4x4 const& projection
                                                 , WorldRenderParams const& render_settings
@@ -2253,9 +2637,30 @@ void WorldRender::unload()
   _wmo_program.reset();
   _liquid_program.reset();
 
+  _sea_level_clip_program.reset();
+  if (_sea_level_clip_vao)
+  {
+    gl.deleteVertexArray(1, &_sea_level_clip_vao);
+    _sea_level_clip_vao = 0;
+  }
+  if (_sea_level_clip_vbo)
+  {
+    gl.deleteBuffers(1, &_sea_level_clip_vbo);
+    _sea_level_clip_vbo = 0;
+  }
+  _occluder_program.reset();
+
   _mccv_viz_program.reset();
   _mccv_crosshair_ndc_program.reset();
   _mccv_viz_buffers_ready = false;
+
+  _tex_layer_billboard_program.reset();
+  if (_tex_layer_billboard_atlas)
+  {
+    gl.deleteTextures(1, &_tex_layer_billboard_atlas);
+    _tex_layer_billboard_atlas = 0;
+  }
+  _tex_layer_billboard_ready = false;
 
   _cursor_render.unload();
   _sphere_render.unload();

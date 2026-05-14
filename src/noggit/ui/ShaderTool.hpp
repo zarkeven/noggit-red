@@ -4,7 +4,12 @@
 
 #include <QtWidgets/QWidget>
 
+#include <QImage>
 #include <QJsonObject>
+#include <QString>
+
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 namespace color_widgets
 {
@@ -40,7 +45,12 @@ namespace Noggit
     {
       Q_OBJECT
     public:
-      ShaderTool(MapView* map_view, QWidget* parent = nullptr);
+      ShaderTool(MapView* map_view, QWidget* parent = nullptr, bool persist_vertex_color_palette = false);
+
+      ~ShaderTool() override;
+
+      //! When persisting palettes, reload or flush when the open map basename changes.
+      void syncVertexColorPaletteWithMap();
 
       void changeShader (World*, glm::vec3 const& pos, float dt, bool add);
       void pickColor(World* world, glm::vec3 const& pos);
@@ -90,6 +100,13 @@ namespace Noggit
       Noggit::Ui::Tools::ImageMaskSelector* _image_mask_group;
       QImage _mask_image;
       MapView* _map_view;
+
+      bool _persist_vertex_color_palette = false;
+      QString _vertex_palette_map_key;
+      bool _vertex_palette_io_guard = false;
+
+      void persistVertexPaletteToDiskForKey(QString const& map_key);
+      void loadVertexPaletteForMap(QString const& map_key);
 
     public Q_SLOTS:
       void set_hsv();

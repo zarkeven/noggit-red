@@ -148,6 +148,7 @@ public:
   Noggit::BoolToggleProperty _draw_terrain = {true};
   Noggit::BoolToggleProperty _draw_wmo = {true};
   Noggit::BoolToggleProperty _draw_water = {true};
+  Noggit::BoolToggleProperty _draw_sea_level_plane = {false};
   Noggit::BoolToggleProperty _draw_wmo_doodads = {true};
   Noggit::BoolToggleProperty _draw_wmo_exterior = { true };
   Noggit::BoolToggleProperty _draw_models = {true};
@@ -313,12 +314,18 @@ public:
   glm::vec3 cursorPosition() const;
   void cursorPosition(glm::vec3 position);
 
+  //! Terrain hit under the current cursor (3D, terrain draw on); empty if ray misses ADT terrain.
+  [[nodiscard]] std::optional<glm::vec3> pickTerrainWorldPositionUnderCursor() const;
+
   //! Ramp creation tool (Editor menu): 0 = none, 1 = pick first, 2 = pick second
   void setRampPickTarget(int which);
   [[nodiscard]] int rampPickTarget() const;
   [[nodiscard]] std::optional<glm::vec3> rampPointA() const;
   [[nodiscard]] std::optional<glm::vec3> rampPointB() const;
   void clearRampPoints();
+
+  //! Opens the ramp creation dialog (Editor menu and terrain tool shortcuts).
+  void openRampCreationTool();
 
   void enableGizmoBar();
   void disableGizmoBar();

@@ -45,7 +45,7 @@ namespace Noggit
 
     void VertexPainterTool::setupUi(Ui::Tools::ToolPanel* toolPanel)
     {
-        _shaderTool = new Noggit::Ui::ShaderTool(mapView(), mapView());
+        _shaderTool = new Noggit::Ui::ShaderTool(mapView(), mapView(), true);
         toolPanel->registerTool(this, _shaderTool);
     }
 
@@ -61,6 +61,13 @@ namespace Noggit
 
     void VertexPainterTool::onSelected()
     {
+        if (!_shaderTool)
+        {
+            return;
+        }
+
+        _shaderTool->syncVertexColorPaletteWithMap();
+
         if (_shaderTool->getImageMaskSelector()->isEnabled())
         {
             _shaderTool->updateMaskImage();
