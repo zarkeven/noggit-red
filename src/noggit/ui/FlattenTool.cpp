@@ -324,6 +324,7 @@ namespace Noggit
                                   , use_ref_pos() ? _lock_pos : cursor_pos
                                   , math::degrees (angled_mode() ? _angle : 0.0f)
                                   , math::degrees (angled_mode() ? _orientation : 0.0f)
+                                  , _radial_falloff
                                   );
       }
       else
@@ -336,6 +337,7 @@ namespace Noggit
                               , use_ref_pos() ? _lock_pos : cursor_pos
                               , math::degrees (angled_mode() ? _angle : 0.0f)
                               , math::degrees (angled_mode() ? _orientation : 0.0f)
+                              , _radial_falloff
                               );
       }
 
@@ -362,6 +364,7 @@ namespace Noggit
                                , _radius_slider->value()
                                , _flatten_type
                                , _flatten_mode
+                               , _radial_falloff
                                );
       }
       else
@@ -371,6 +374,7 @@ namespace Noggit
                            , _radius_slider->value()
                            , _flatten_type
                            , _flatten_mode
+                           , _radial_falloff
                            );
       }
 

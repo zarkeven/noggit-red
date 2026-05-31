@@ -42,6 +42,7 @@ namespace Noggit
         eCHUNKS_LAYERINFO         = 0x4000, // ground effect id and texture flags
         eAREA_TRIGGER_TRANSFORMED = 0x8000,
         ePOINT_LIGHTS_CHANGED     = 0x10000,
+        eCHUNKS_SOUND_EMITTERS    = 0x20000,
     };
 
     enum ActionModalityControllers
@@ -142,6 +143,7 @@ namespace Noggit
         void registerAllChunkChanges(MapChunk* chunk);
         void registerAreaTriggerTransformed(area_trigger* trigger);
         void registerPointLightsChange();
+        void registerChunkSoundEmitterChange(MapChunk* chunk);
 
 
     private:
@@ -180,6 +182,9 @@ namespace Noggit
 
         std::vector<World::PointLight> _point_lights_pre;
         std::vector<World::PointLight> _point_lights_post;
+
+        std::vector<std::pair<MapChunk*, std::vector<ENTRY_MCSE>>> _chunk_sound_emitters_pre;
+        std::vector<std::pair<MapChunk*, std::vector<ENTRY_MCSE>>> _chunk_sound_emitters_post;
 
         VertexSelectionCache _vertex_selection_pre;
         VertexSelectionCache _vertex_selection_post;

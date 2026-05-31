@@ -192,6 +192,9 @@ public:
   [[nodiscard]]
   Noggit::Rendering::ModelRender* renderer();
 
+  //! Refreshes bone matrices (and related animation state) for GPU skinning.
+  void updateAnimationForRender (glm::mat4x4 const& model_view, int anim_id, int anim_time);
+
   uint32_t get_anim_lenght(int16_t anim_id);
 
   // only useful if model has multiple anims with varying bound sizes

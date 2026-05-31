@@ -1,8 +1,11 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/Log.h>
+#include <noggit/application/NoggitApplication.hpp>
 #include <noggit/ui/FramelessWindow.hpp>
 #include <noggit/ui/windows/settingsPanel/SettingsPanel.h>
+
+#include <ClientData.hpp>
 
 #include <QDir>
 #include <QtCore/QSettings>
@@ -10,6 +13,7 @@
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QSpinBox>
+#include <QtCore/QSignalBlocker>
 
 #ifdef USE_MYSQL_UID_STORAGE
 #include <mysql/mysql.h>
@@ -17,8 +21,51 @@
 
 #include <ui_SettingsPanel.h>
 
+#include <filesystem>
 #include <sstream>
 
+
+namespace
+{
+  void populate_epsilon_export_map_combo (::Ui::SettingsPanel* ui, QSettings* settings)
+  {
+    QString const saved = settings->value ("integrations/epsilon_export_map").toString().trimmed();
+    QStringList names;
+
+    if (auto* app = Noggit::Application::NoggitApplication::instance();
+        app && app->hasClientData())
+    {
+      BlizzardArchive::ClientData* const cd = app->clientData();
+      std::filesystem::path const maps_dir = std::filesystem::path (cd->projectPath()) / "world" / "maps";
+      std::error_code ec;
+      if (std::filesystem::is_directory (maps_dir, ec) && !ec)
+      {
+        for (auto const& ent : std::filesystem::directory_iterator (maps_dir, ec))
+        {
+          if (ec || !ent.is_directory())
+            continue;
+
+          std::string const name = ent.path().filename().string();
+          std::filesystem::path const wdt = ent.path() / (name + ".wdt");
+          std::filesystem::path const lgt = ent.path() / (name + "_lgt.wdt");
+          if (std::filesystem::is_regular_file (wdt, ec) || std::filesystem::is_regular_file (lgt, ec))
+            names.append (QString::fromStdString (name));
+        }
+      }
+    }
+
+    names.sort (Qt::CaseInsensitive);
+    names.removeDuplicates();
+    if (!saved.isEmpty() && !names.contains (saved, Qt::CaseInsensitive))
+      names.prepend (saved);
+
+    QSignalBlocker const blocker (ui->_epsilon_export_map_combo);
+    ui->_epsilon_export_map_combo->clear();
+    ui->_epsilon_export_map_combo->addItems (names);
+    if (!saved.isEmpty())
+      ui->_epsilon_export_map_combo->setCurrentText (saved);
+  }
+}
 
 namespace Noggit
 {
@@ -102,6 +149,11 @@ namespace Noggit
               }
       );
 
+      connect(ui->_epsilon_export_map_combo, &QComboBox::currentTextChanged, [&](QString value)
+              {
+                _settings->setValue("integrations/epsilon_export_map", value.trimmed());
+              }
+      );
 
 #ifdef USE_MYSQL_UID_STORAGE
       ui->MySQL_box->setEnabled(true);
@@ -177,6 +229,8 @@ namespace Noggit
           });
 
       ui->_wireframe_color->setColor(Qt::white);
+      ui->_brush_cursor_inner_color->setColor(Qt::white);
+      ui->_brush_cursor_outer_color->setColor(Qt::red);
 
       connect(ui->saveButton, &QPushButton::clicked, [this]
               {
@@ -231,9 +285,12 @@ namespace Noggit
       ui->_load_fav_cb->setChecked(_settings->value("auto_load_fav_project", true).toBool());
       ui->_systemWindowFrame->setChecked(_settings->value("systemWindowFrame", true).toBool());
       ui->_nativeMenubar->setChecked(_settings->value("nativeMenubar", true).toBool());
-      ui->_classic_ui->setChecked(_settings->value("classicUI", false).toBool());
-      ui->_additional_file_loading_log->setChecked(
-          _settings->value("additional_file_loading_log", false).toBool());
+      ui->_classic_split_terrain_tools->setChecked(_settings->value(QStringLiteral("terrain_tools/classic_split"), false).toBool());
+      {
+        bool const load_log = _settings->value("additional_file_loading_log", false).toBool()
+                           || _settings->value("load_trace", false).toBool();
+        ui->_additional_file_loading_log->setChecked(load_log);
+      }
       ui->_keyboard_locale->setCurrentText(_settings->value("keyboard_locale", "QWERTY").toString());
       ui->_use_mclq_liquids_export->setChecked(_settings->value("use_mclq_liquids_export", false).toBool());
       ui->_theme->setCurrentText(_settings->value("theme", "Dark").toString());
@@ -248,6 +305,7 @@ namespace Noggit
       ui->_epsilon_integration_cb->setChecked(_settings->value("integrations/epsilon_enabled", false).toBool());
       ui->_epsilon_patches_path_field->setText(_settings->value("integrations/epsilon_patches_path").toString());
       ui->_epsilon_patch_name_field->setText(_settings->value("integrations/epsilon_patch_name").toString());
+      populate_epsilon_export_map_combo (ui, _settings);
       ui->_epsilon_starting_fdid_field->setValue(_settings->value("integrations/epsilon_starting_fdid", 5000000).toInt());
       ui->_epsilon_wdt_fdid_field->setValue(_settings->value("integrations/epsilon_wdt_fdid", 0).toInt());
 
@@ -313,6 +371,10 @@ namespace Noggit
       ui->_wireframe_radius->setValue(_settings->value("wireframe/radius", 1.5f).toFloat());
       ui->_wireframe_width->setValue(_settings->value("wireframe/width", 1.f).toFloat());
       ui->_wireframe_color->setColor(_settings->value("wireframe/color").value<QColor>());
+      ui->_brush_cursor_inner_color->setColor(
+        _settings->value("brush_cursor/inner_color", QColor(255, 255, 255)).value<QColor>());
+      ui->_brush_cursor_outer_color->setColor(
+        _settings->value("brush_cursor/outer_color", QColor(255, 0, 0)).value<QColor>());
       ui->_fps_limit_slider->setValue(_settings->value("fps_limit", 60).toInt());
     }
 
@@ -336,11 +398,16 @@ namespace Noggit
       _settings->setValue("loading_radius", ui->_adt_loading_radius->value());
       _settings->setValue("uid_startup_check", ui->_uid_cb->isChecked());
       _settings->setValue("auto_load_fav_project", ui->_load_fav_cb->isChecked());
-      _settings->setValue("additional_file_loading_log", ui->_additional_file_loading_log->isChecked());
+      {
+        bool const load_log = ui->_additional_file_loading_log->isChecked();
+        _settings->setValue("additional_file_loading_log", load_log);
+        _settings->setValue("load_trace", load_log);
+      }
       _settings->setValue("keyboard_locale", ui->_keyboard_locale->currentText());
       _settings->setValue("systemWindowFrame", ui->_systemWindowFrame->isChecked());
       _settings->setValue("nativeMenubar", ui->_nativeMenubar->isChecked());
       _settings->setValue("classicUI", ui->_classic_ui->isChecked());
+      _settings->setValue(QStringLiteral("terrain_tools/classic_split"), ui->_classic_split_terrain_tools->isChecked());
       _settings->setValue("modern_features", ui->_modern_features->isChecked());
       _settings->setValue("tablet/use_windows_ink", ui->_use_windows_ink->isChecked());
       _settings->setValue("tablet/pressure_strength", ui->_tablet_pressure_strength->isChecked());
@@ -353,6 +420,7 @@ namespace Noggit
       _settings->setValue("integrations/epsilon_enabled", ui->_epsilon_integration_cb->isChecked());
       _settings->setValue("integrations/epsilon_patches_path", ui->_epsilon_patches_path_field->text());
       _settings->setValue("integrations/epsilon_patch_name", ui->_epsilon_patch_name_field->text());
+      _settings->setValue("integrations/epsilon_export_map", ui->_epsilon_export_map_combo->currentText().trimmed());
       _settings->setValue("integrations/epsilon_starting_fdid", ui->_epsilon_starting_fdid_field->value());
       _settings->setValue("integrations/epsilon_wdt_fdid", ui->_epsilon_wdt_fdid_field->value());
 
@@ -369,6 +437,8 @@ namespace Noggit
       _settings->setValue("wireframe/radius", ui->_wireframe_radius->value());
       _settings->setValue("wireframe/width", ui->_wireframe_width->value());
       _settings->setValue("wireframe/color", ui->_wireframe_color->color());
+      _settings->setValue("brush_cursor/inner_color", ui->_brush_cursor_inner_color->color());
+      _settings->setValue("brush_cursor/outer_color", ui->_brush_cursor_outer_color->color());
       _settings->setValue("theme", ui->_theme->currentText());
       _settings->setValue("assetBrowser/background_color", ui->assetBrowserBgCol->color());
       _settings->setValue("assetBrowser/diffuse_light", ui->assetBrowserDiffuseLight->color());

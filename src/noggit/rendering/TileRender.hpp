@@ -112,7 +112,7 @@ namespace Noggit::Rendering
     unsigned _objects_frustum_cull_test = 0;
     bool _tile_occluded = false;
     bool _tile_frustum_culled = true;
-    bool _tile_occlusion_cull_override = true;
+    bool _tile_occlusion_cull_override = false;
 
     // drawing
     std::vector<MapTileDrawCall> _draw_calls;

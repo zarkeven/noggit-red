@@ -181,6 +181,7 @@ void main()
   float NaN = makeNaN(1);
 
   vec4 pos_after_holecheck = (is_hole ? vec4(NaN, NaN, NaN, 1.0) : vec4(pos, 1.0));
+
   gl_Position = projection * model_view * pos_after_holecheck;
 
   vary_normal = normal_pos.rgb;

@@ -3,6 +3,7 @@
 #include <noggit/ui/TerrainTool.hpp>
 
 #include <noggit/ActionManager.hpp>
+#include <noggit/BrushFalloffCurve.hpp>
 #include <noggit/MapView.h>
 #include <noggit/tool_enums.hpp>
 #include <noggit/ui/tools/UiCommon/expanderwidget.h>
@@ -27,7 +28,7 @@ namespace Noggit
 {
   namespace Ui
   {
-    TerrainTool::TerrainTool(MapView* map_view, QWidget* parent, bool stamp)
+    TerrainTool::TerrainTool(MapView* map_view, QWidget* parent, bool stamp, bool expand_custom_brush_by_default)
       : QWidget(parent)
       , _edit_type (eTerrainType_Linear)
       , _vertex_angle (0.0f)
@@ -149,7 +150,7 @@ namespace Noggit
       auto* customBrushBox = new ExpanderWidget(this);
       customBrushBox->setExpanderTitle("Custom Brush");
       customBrushBox->addPage(_image_mask_group);
-      customBrushBox->setExpanded(false);
+      customBrushBox->setExpanded(expand_custom_brush_by_default);
       layout->addWidget(customBrushBox);
 
       _vertex_type_group = new QGroupBox ("Vertex edit", this);
@@ -259,7 +260,7 @@ namespace Noggit
     }
 
     void TerrainTool::changeTerrain
-      (World* world, glm::vec3 const& pos, float dt)
+      (World* world, glm::vec3 const& pos, float dt, Noggit::BrushFalloffCurve const* radial_falloff)
     {
 
       float radius =  static_cast<float>(_radius_slider->value());
@@ -284,10 +285,10 @@ namespace Noggit
         }
         else
         {
-          world->changeTerrain(pos, dt * _speed_slider->value(), radius, _edit_type, _inner_radius_slider->value());
+          world->changeTerrain(pos, dt * _speed_slider->value(), radius, _edit_type, _inner_radius_slider->value(), radial_falloff);
 
           world->changeObjectsWithTerrain(pos, dt * _speed_slider->value(), radius, _edit_type, _inner_radius_slider->value()
-              , _snap_wmo_objects_chkbox->isChecked(), _snap_m2_objects_chkbox->isChecked());
+              , _snap_wmo_objects_chkbox->isChecked(), _snap_m2_objects_chkbox->isChecked(), radial_falloff);
         }
       }
       else

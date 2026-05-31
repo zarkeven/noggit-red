@@ -97,27 +97,26 @@ vec2 rot2(vec2 p, float degree)
 void main()
 {
   // lava || slime
-  if(type == 2u || type == 3u)
+  if(type == 2 || type == 3)
   {
     out_color = get_tex_color(tex_coord_ + vec2(anim_uv.x*animtime / 2880.0, anim_uv.y*animtime / 2880.0), tex_array, tex_frame);
   }
   else
   {
     vec2 uv = rot2(tex_coord_ * anim_uv.x, anim_uv.y);
-
     vec4 texel = get_tex_color(uv, tex_array, tex_frame);
-    vec4 lerp = (type == 1u)
-              ? mix (OceanColorLight, OceanColorDark, depth_)
-              : mix (RiverColorLight, RiverColorDark, depth_)
-              ;
+    // depth_ is per-vertex water depth (terrain below surface): 0 at shore, 1 in deep water.
+    vec4 lerp = (type == 1)
+              ? mix(OceanColorLight, OceanColorDark, depth_)
+              : mix(RiverColorLight, RiverColorDark, depth_);
 
-    //clamp shouldn't be needed
-    out_color = vec4 (clamp(texel + lerp, 0.0, 1.0).rgb, lerp.a);
+    float alpha = (type == 1) ? 1.0 : min(1.0, lerp.a);
+    out_color = vec4(clamp(texel.rgb + lerp.rgb, 0.0, 1.0), alpha);
   }
 
   if (FogColor_FogOn.w != 0)
   {
-    float start = AmbientColor_FogEnd.w * DiffuseColor_FogStart.w;
+    float start = DiffuseColor_FogStart.w;
 
     vec3 fogParams;
     fogParams.x = -(1.0 / (AmbientColor_FogEnd.w - start));

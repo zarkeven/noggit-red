@@ -73,32 +73,46 @@ namespace Noggit
     void erase (BlizzardArchive::Listfile::FileKey const& file_key, Noggit::NoggitRenderContext context)
     {
       auto pair = std::make_pair(context, file_key);
-      //LogDebug << "Erasing " << normalized << " from context" << context << std::endl;
 
       AsyncObject* obj = nullptr;
 
       {
         std::scoped_lock lock(_mutex);
 
-        if (--_counts.at(pair) == 0)
+        auto count_it = _counts.find(pair);
+        if (count_it == _counts.end())
         {
-          obj = static_cast<AsyncObject*>(&(_elements.at(pair)));
+          return;
+        }
+
+        if (--count_it->second != 0)
+        {
+          return;
+        }
+
+        auto elem_it = _elements.find(pair);
+        if (elem_it == _elements.end())
+        {
+          _counts.erase(count_it);
+          return;
+        }
+
+        obj = static_cast<AsyncObject*>(&elem_it->second);
+      }
+
+      if (obj && AsyncLoader::instance)
+      {
+        if (!obj->finishedLoading())
+        {
+          AsyncLoader::instance->ensure_deletable(obj);
         }
       }
 
       if (obj)
       {
-        // always make sure an async object can be deleted before deleting it
-        if (!obj->finishedLoading())
-        {
-          AsyncLoader::instance->ensure_deletable(obj);
-        }
-
-        {
-          std::scoped_lock lock(_mutex);
-          _elements.erase(pair);
-          _counts.erase(pair);
-        }
+        std::scoped_lock lock(_mutex);
+        _elements.erase(pair);
+        _counts.erase(pair);
       }
     }
     void apply (std::function<void (BlizzardArchive::Listfile::FileKey const&, T&)> fun)

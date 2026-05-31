@@ -14,8 +14,11 @@ std::ostream& _Log (const char* pFile, int pLine);
 #define Log _Log (__FILE__, __LINE__)
 
 //! True when verbose load tracing is enabled: env \c NOGGIT_LOAD_TRACE (non-0/false/off), else QSettings
-//! \a load_trace (default true) or legacy \a additional_file_loading_log.
+//! \a load_trace or \a additional_file_loading_log (both default false).
 [[nodiscard]] bool LoadTraceEnabled();
+
+//! True when LogDebug output is written (defaults off; follows LoadTraceEnabled unless NOGGIT_DEBUG_LOG is set).
+[[nodiscard]] bool LogDebugEnabled();
 
 /// Opens `noggit.log` (truncates each run) and tees stdout/stderr/clog to the console and that file.
 /// Tries in order: env \c NOGGIT_LOG_PATH (file path, or directory + \c noggit.log), then

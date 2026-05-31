@@ -25,6 +25,7 @@ SoundAmbienceDB gSoundAmbienceDB;
 ZoneMusicDB gZoneMusicDB;
 ZoneIntroMusicTableDB gZoneIntroMusicTableDB;
 SoundEntriesDB gSoundEntriesDB;
+SoundEntriesAdvancedDB gSoundEntriesAdvancedDB;
 WMOAreaTableDB gWMOAreaTableDB;
 
 void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData)
@@ -51,6 +52,7 @@ void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData)
     gZoneMusicDB.open(clientData);
     gZoneIntroMusicTableDB.open(clientData);
     gSoundEntriesDB.open(clientData);
+    gSoundEntriesAdvancedDB.open(clientData);
     gWMOAreaTableDB.open(clientData);
   }
   catch (BlizzardArchive::Exceptions::FileReadFailedError const& e)
@@ -62,6 +64,56 @@ void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData)
       LogError << "OpenDBs() : unhandled exception" << std::endl;
   }
 
+}
+
+std::optional<std::uint32_t> resolveSoundEntryId(std::uint32_t mcse_sound_id)
+{
+  if (mcse_sound_id == 0)
+  {
+    return std::nullopt;
+  }
+
+  try
+  {
+    SoundEntriesAdvancedDB::Record const advanced = gSoundEntriesAdvancedDB.getByID(mcse_sound_id);
+    std::uint32_t const sound_entry_id = advanced.getUInt(SoundEntriesAdvancedDB::soundEntryID);
+    if (sound_entry_id != 0)
+    {
+      return sound_entry_id;
+    }
+  }
+  catch (SoundEntriesAdvancedDB::NotFound)
+  {
+  }
+
+  try
+  {
+    gSoundEntriesDB.getByID(mcse_sound_id);
+    return mcse_sound_id;
+  }
+  catch (SoundEntriesDB::NotFound)
+  {
+  }
+
+  return std::nullopt;
+}
+
+std::optional<std::uint32_t> findSoundEntriesAdvancedId(std::uint32_t sound_entry_id)
+{
+  if (sound_entry_id == 0)
+  {
+    return std::nullopt;
+  }
+
+  for (auto& record : gSoundEntriesAdvancedDB)
+  {
+    if (record.getUInt(SoundEntriesAdvancedDB::soundEntryID) == sound_entry_id)
+    {
+      return record.getUInt(SoundEntriesAdvancedDB::ID);
+    }
+  }
+
+  return std::nullopt;
 }
 
 

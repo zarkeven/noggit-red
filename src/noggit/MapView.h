@@ -7,6 +7,7 @@
 #include <noggit/Camera.hpp>
 #include <noggit/Selection.h>
 #include <noggit/StringHash.hpp>
+#include <noggit/audio/SoundEmitterAudioManager.hpp>
 #include <noggit/tool_enums.hpp>
 #include <noggit/ui/tools/ViewportGizmo/ViewportGizmo.hpp>
 #include <noggit/ui/tools/ViewportManager/ViewportManager.hpp>
@@ -75,6 +76,7 @@ namespace Noggit
     class help;
     class minimap_widget;
     class RampCreationTool;
+    class BrushCursorTool;
     class toolbar;
   }
 }
@@ -118,6 +120,9 @@ private:
   float _2d_zoom = 1.f;
   float moving, strafing, updown, mousedir, turn, lookat;
   CursorType _cursorType;
+  BrushCursorStyle _brush_cursor_style = BrushCursorStyle::TerrainWrap;
+  glm::vec4 _inner_cursor_outline_color = { 1.f, 1.f, 1.f, 1.f };
+  glm::vec4 _outer_cursor_outline_color = { 1.f, 0.f, 0.f, 1.f };
   glm::vec3 _cursor_pos;
   QPoint _drag_start_pos;
   QPoint _right_click_pos;
@@ -140,6 +145,7 @@ public:
   Noggit::BoolToggleProperty _draw_tileset = {true};
   Noggit::BoolToggleProperty _draw_texture_layer_count_overlay = { false };
   Noggit::BoolToggleProperty _draw_baked_shadows = { false };
+  Noggit::BoolToggleProperty _draw_realtime_shadows = { false };
   Noggit::BoolToggleProperty _draw_climb = {false};
   Noggit::BoolToggleProperty _draw_contour = {false};
   Noggit::BoolToggleProperty _draw_mfbo = {false};
@@ -148,6 +154,7 @@ public:
   Noggit::BoolToggleProperty _draw_terrain = {true};
   Noggit::BoolToggleProperty _draw_wmo = {true};
   Noggit::BoolToggleProperty _draw_water = {true};
+  Noggit::BoolToggleProperty _auto_water_opacity_on_terrain_edit = {true};
   Noggit::BoolToggleProperty _draw_sea_level_plane = {false};
   Noggit::BoolToggleProperty _draw_wmo_doodads = {true};
   Noggit::BoolToggleProperty _draw_wmo_exterior = { true };
@@ -163,6 +170,10 @@ public:
   Noggit::BoolToggleProperty _draw_point_lights = { true };
   Noggit::BoolToggleProperty _draw_point_light_spheres = { true };
   float _point_light_sphere_opacity = 0.50f;
+  Noggit::BoolToggleProperty _draw_sound_emitters = { false };
+  Noggit::BoolToggleProperty _play_sound_emitters = { false };
+  bool _draw_sound_emitters_for_editing = false;
+  std::optional<bool> _draw_sound_emitters_before_editing;
 
   // Numpad movement (mirrors object move hotkeys) for selected point lights.
   float _point_light_keyx = 0.0f;
@@ -170,6 +181,10 @@ public:
   bool _point_light_gizmo_edit_action = false;
   bool _point_light_mmb_edit_action = false;
   bool _point_light_numpad_edit_action = false;
+  bool _sound_emitter_gizmo_edit_action = false;
+  bool _sound_emitter_gizmo_was_over = false;
+  QTimer _sound_emitter_property_undo_timer;
+  bool _sound_emitter_property_undo_session = false;
   // Noggit::BoolToggleProperty _game_mode_camera = { false };
   Noggit::BoolToggleProperty _draw_lights_zones = { false };
   Noggit::BoolToggleProperty _show_detail_info_window = { false };
@@ -247,6 +262,7 @@ private:
   void save(save_mode mode);
 
   QSettings* _settings; // expensive, don't access it on main loop
+  Noggit::Audio::SoundEmitterAudioManager _sound_emitter_audio;
   Noggit::Ui::Tools::ViewportGizmo::ViewportGizmo _transform_gizmo;
   ImGuiContext* _imgui_context;
 
@@ -327,10 +343,23 @@ public:
   //! Opens the ramp creation dialog (Editor menu and terrain tool shortcuts).
   void openRampCreationTool();
 
+  void openBrushCursorTool();
+  void cycleBrushCursorStyle();
+  void setBrushCursorStyle(BrushCursorStyle style, bool persist = true, bool show_status = true);
+  [[nodiscard]] BrushCursorStyle brushCursorStyle() const;
+  void setBrushCursorOutlineColors(glm::vec4 inner, glm::vec4 outer, bool persist = true);
+  [[nodiscard]] glm::vec4 brushCursorInnerOutlineColor() const;
+  [[nodiscard]] glm::vec4 brushCursorOuterOutlineColor() const;
+  //! Dotted outer ring: vertex tool color in mccv mode, otherwise settings color.
+  [[nodiscard]] glm::vec4 brushCursorOuterOutlineColorForRender();
+
   void enableGizmoBar();
   void disableGizmoBar();
 
   void setDbcDirty(DBCFile* dbc);
+
+  //! Unified terrain tool: show flatten raise/lower viewport strip while editing surface family.
+  void setTerrainUnifiedSurfaceOverlayVisible(bool surface_family_active);
 
 private:
   enum Modifier
@@ -475,6 +504,7 @@ private:
   void setupMinimap();
   void setupFileMenu();
   void ensureRampToolWindow();
+  void ensureBrushCursorToolWindow();
   void tryRampTerrainPick(QPoint const& mouse_px, Qt::MouseButton button);
   void setupEditMenu();
   void setupAssistMenu();
@@ -494,6 +524,7 @@ private:
   std::optional<glm::vec3> _ramp_point_b;
   int _ramp_pick_target = 0;
   Noggit::Ui::RampCreationTool* _ramp_tool_window = nullptr;
+  Noggit::Ui::BrushCursorTool* _brush_cursor_tool_window = nullptr;
 
   std::unique_ptr<Noggit::Tool>& activeTool();
   void activeTool(editing_mode newTool);
@@ -528,6 +559,11 @@ private:
   void flushPointLightPropertyUndoBatch();
   void recordPointLightListChange(std::function<void()> mut);
 
+  void touchSoundEmitterPropertyUndoBatch();
+  void flushSoundEmitterPropertyUndoBatch();
+  void recordSoundEmitterChange(std::function<void()> mut);
+  void setDrawSoundEmittersForEditing(bool editing);
+
   //! Register point-light color widgets so we can hide the in-view gizmo only while their QColorDialog is open.
   void registerPointLightColorPicker(QWidget* picker);
 
@@ -539,6 +575,8 @@ private:
 
   //! True while point-light gizmo drag, MMB move, or numpad move holds an undo step — spot RMB+modifier rotation must wait.
   [[nodiscard]] bool pointLightViewportTransformBlocked() const noexcept;
+
+  [[nodiscard]] bool screenNearSelectedSoundEmitter(QPointF mouse_px) const;
 
   void selectObjects(std::array<glm::vec2, 2> selection_box, float depth);
   void doSelection(bool selectTerrainOnly, bool mouseMove = false);

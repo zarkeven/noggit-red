@@ -58,6 +58,7 @@ namespace Noggit
       generate_hotkey_row({FontNoggit::u}, "\a2D texture editor", basic_controls_layout);
       generate_hotkey_row({FontNoggit::ctrl, FontNoggit::f1}, "\a+\aThis help", basic_controls_layout);
       generate_hotkey_row({FontNoggit::shift, FontNoggit::j}, "\a+\aReload an adt under the camera", basic_controls_layout);
+      generate_hotkey_row({FontNoggit::shift, FontNoggit::c}, "\a+\aCycle brush cursor display style (Edit → Brush cursor)", basic_controls_layout);
       generate_hotkey_row({FontNoggit::shift, FontNoggit::r}, "\a+\aTurn camera 180 degrees", basic_controls_layout);
       generate_hotkey_row({FontNoggit::shift}, "\a+     1, 2, 3 or 4        Set a predefined camera speed", basic_controls_layout);
       generate_hotkey_row({FontNoggit::alt, FontNoggit::f4}, "\a+\aExit to main menu", basic_controls_layout);

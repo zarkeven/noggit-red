@@ -3,6 +3,7 @@
 #include "LightEditor.hpp"
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 #include <noggit/application/NoggitApplication.hpp>
+#include <noggit/ModernLightTables.hpp>
 #include <noggit/DBC.h>
 #include <noggit/MapView.h>
 #include <noggit/Model.h>
@@ -70,6 +71,7 @@ LightEditor::LightEditor(MapView* map_view, QWidget* parent)
 	light_selection_layout->addWidget(lightningInfoDialogButton);
 
 	_lightning_info_dialog = new LightningInfoDialog(this, this);
+	UpdateToolTime();
 
 	// TODO can save this as a nice reusable text+tooltip indicator label widget
 	QLabel* active_lights_label = new QLabel("Active Lights :", this);
@@ -916,6 +918,9 @@ void LightEditor::loadSelectSky(Sky* _curr_sky)
 
 void LightEditor::UpdateToolTime()
 {
+	if (!_lightning_info_dialog)
+		return;
+
 	QSignalBlocker const blocker(_lightning_info_dialog->_time_dial);
 	_lightning_info_dialog->_time_dial->setValue(_map_view->getWorld()->time);
 
@@ -993,9 +998,17 @@ void LightEditor::updateActiveLights()
 
 void Noggit::Ui::Tools::LightEditor::updateLightningInfo()
 {
-	Skies* const skies = _map_view->getWorld()->renderer()->skies().get();
+	auto& skies_ptr = _map_view->getWorld()->renderer()->skies();
+	if (!skies_ptr)
+		return;
 
-	Sky* const highest_weight_sky = _map_view->getWorld()->renderer()->skies()->findClosestSkyByWeight();
+	Skies* const skies = skies_ptr.get();
+	Sky* const highest_weight_sky = skies->findClosestSkyByWeight();
+	if (!highest_weight_sky)
+	{
+		_lightning_info_dialog->_highest_weight_sky_label->setText("None");
+		return;
+	}
 
 	std::string light_name = getLightName(highest_weight_sky->Id, highest_weight_sky->global, highest_weight_sky->zone_light);
 	std::stringstream ss;
@@ -1048,6 +1061,24 @@ void Noggit::Ui::Tools::LightEditor::updateLightningInfo()
 
 		float float_param_unk5 = skies->unknown_float_param5();
 		_lightning_info_dialog->_current_lightning_floats_labels[SKY_UNK_FLOAT_PARAM_5]->setText(QString::number(float_param_unk5, 'f', 2));
+
+		bool const modern = noggit_modern_features_enabled();
+		if (_lightning_info_dialog->_fog_density_label)
+		{
+			_lightning_info_dialog->_fog_density_label->setVisible(modern);
+			_lightning_info_dialog->_end_fog_color_label->setVisible(modern);
+			_lightning_info_dialog->_end_fog_distance_label->setVisible(modern);
+			_lightning_info_dialog->_fog_height_label->setVisible(modern);
+		}
+		if (modern && _lightning_info_dialog->_fog_density_label)
+		{
+			_lightning_info_dialog->_fog_density_label->setText(QString::number(skies->fog_density(), 'f', 2));
+			glm::vec3 const ec = skies->end_fog_color();
+			_lightning_info_dialog->_end_fog_color_label->setText(
+			  QString("R:%1 G:%2 B:%3").arg(int(ec.r * 255)).arg(int(ec.g * 255)).arg(int(ec.b * 255)));
+			_lightning_info_dialog->_end_fog_distance_label->setText(QString::number(skies->end_fog_color_distance(), 'f', 2));
+			_lightning_info_dialog->_fog_height_label->setText(QString::number(skies->fog_height(), 'f', 2));
+		}
 	}
 	// light params
 	{
@@ -1178,8 +1209,15 @@ void LightEditor::load_light_param(int param_id)
 	// color values
 	for (int i = 0; i < NUM_SkyColorNames; ++i)
 	{
-	  LightsPreview[i]->SetPreview(sky_param->colorRows[i]);
-	  //_color_value_Buttons[i]->setText(QString::fromStdString(std::format("{} / 16 values", sky_param->colorRows[i].size())));
+	  if (sky_param->has_modern_light_data())
+	  {
+	    std::vector<SkyColor> preview = sky_param->color_row_preview(i);
+	    LightsPreview[i]->SetPreview(preview);
+	  }
+	  else
+	  {
+	    LightsPreview[i]->SetPreview(sky_param->colorRows[i]);
+	  }
 	}
 	
 	// skybox
@@ -1230,8 +1268,6 @@ Noggit::Ui::Tools::LightningInfoDialog::LightningInfoDialog(LightEditor* editor,
 	layout_column1->addWidget(_time_dial);
 	_time_dial->setRange(0, DAY_DURATION); // Time Values from 0 to 2880 where each number represents a half minute from midnight to midnight
 	_time_dial->setWrapping(true);
-	_time_dial->setSliderPosition((int)_editor->_world->time); // to get ingame orientation
-	// _time_dial->setInvertedAppearance(true); // sets the position at top
 	_time_dial->setToolTip("Time (24hours)");
 	_time_dial->setSingleStep(180); // ticks are 360 units (1/8 = 3 hours)
 
@@ -1379,13 +1415,29 @@ Noggit::Ui::Tools::LightningInfoDialog::LightningInfoDialog(LightEditor* editor,
 		int index = SKY_FOG_COLOR;
 		fog_layout->addRow(sky_color_names_map.at(index).c_str(), _current_lightning_colors_labels[index]);
 
-		// TODO density
+		_fog_density_label = new QLabel("0", this);
+		fog_layout->addRow("Fog Density", _fog_density_label);
+
+		_end_fog_color_label = new QLabel(this);
+		fog_layout->addRow("End Fog Color", _end_fog_color_label);
+
+		_end_fog_distance_label = new QLabel("0", this);
+		fog_layout->addRow("End Fog Distance", _end_fog_distance_label);
+
+		_fog_height_label = new QLabel("0", this);
+		fog_layout->addRow("Fog Height", _fog_height_label);
 
 		index = SKY_FOG_DISTANCE;
 		fog_layout->addRow("Fog Farclip", _current_lightning_floats_labels[index]);
 
 		index = SKY_FOG_MULTIPLIER;
 		fog_layout->addRow("Fog Nearclip", _current_lightning_floats_labels[index]);
+
+		bool const show_modern = noggit_modern_features_enabled();
+		_fog_density_label->setVisible(show_modern);
+		_end_fog_color_label->setVisible(show_modern);
+		_end_fog_distance_label->setVisible(show_modern);
+		_fog_height_label->setVisible(show_modern);
 
 		layout_column2->addWidget(fog_group);
 	}

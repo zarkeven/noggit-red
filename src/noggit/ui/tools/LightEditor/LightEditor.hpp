@@ -86,6 +86,11 @@ namespace Noggit::Ui::Tools
 		QLabel* _ocean_deep_alpha_label;
 		QLabel* _glow_label;
 		QLabel* _highlight_label;
+
+		QLabel* _fog_density_label = nullptr;
+		QLabel* _end_fog_color_label = nullptr;
+		QLabel* _end_fog_distance_label = nullptr;
+		QLabel* _fog_height_label = nullptr;
 	};
 
   class LightEditor : public QWidget

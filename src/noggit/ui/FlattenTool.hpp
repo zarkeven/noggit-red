@@ -26,6 +26,8 @@ class QSlider;
 
 namespace Noggit
 {
+  class BrushFalloffCurve;
+
   namespace Ui
   {
     class flatten_blur_tool : public QWidget
@@ -35,6 +37,8 @@ namespace Noggit
 
       void flatten (World* world, glm::vec3 const& cursor_pos, float dt);
       void blur (World* world, glm::vec3 const& cursor_pos, float dt);
+
+      void setRadialFalloffCurve(Noggit::BrushFalloffCurve const* curve) { _radial_falloff = curve; }
 
       void nextFlattenType();
       void nextFlattenMode();
@@ -99,6 +103,7 @@ namespace Noggit
       QCheckBox* _snap_wmo_objects_chkbox;
 
       MapView* _map_view = nullptr;
+      Noggit::BrushFalloffCurve const* _radial_falloff = nullptr;
     };
   }
 }

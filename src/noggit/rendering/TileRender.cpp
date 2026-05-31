@@ -935,7 +935,7 @@ bool Noggit::Rendering::TileRender::isOverridingOcclusionCulling() const
 
 void Noggit::Rendering::TileRender::setOverrideOcclusionCulling(bool state)
 {
-  _tile_frustum_culled = state;
+  _tile_occlusion_cull_override = state;
 }
 
 [[nodiscard]]

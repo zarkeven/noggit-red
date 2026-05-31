@@ -3,6 +3,7 @@
 #include <noggit/DBC.h>
 #include <noggit/Log.h>
 #include <noggit/MapHeaders.h>
+#include <noggit/ModernLightTables.hpp>
 #include <noggit/Model.h> // Model
 #include <noggit/ModelManager.h> // ModelManager
 #include <noggit/Sky.h>
@@ -40,10 +41,8 @@ namespace skyparams
       return &(it->second);  // Return existing SkyParam
     }
   
-    // Try to create new SkyParam and insert into map
     SkyParam newParam = SkyParam(id, context);
-  
-    // Dbc loading failed
+
     assert(newParam.Id != 0);
     if (newParam.Id == 0)
       return nullptr;
@@ -75,10 +74,21 @@ SkyParam::SkyParam(int paramId, Noggit::NoggitRenderContext context)
 
   if (Id == 0)
   {
-    // shouldn't happen in the new system, we don't load params with no valid id.
     assert(false);
+    return;
+  }
 
-    return; // don't initialise entry
+  if (noggit_modern_features_enabled())
+  {
+    ModernLightTables::instance().ensure_loaded();
+    if (ModernLightTables::instance().has_usable_data())
+    {
+      ModernLightTables::instance().init_sky_param(paramId, *this, context);
+      if (has_modern_light_data() || skybox.has_value())
+      {
+        return;
+      }
+    }
   }
 
   try
@@ -278,7 +288,9 @@ Sky::Sky(DBCFile::Iterator data, Noggit::NoggitRenderContext context)
 {
   Id = data->getInt(LightDB::ID);
   mapId = data->getInt(LightDB::Map);
-  pos = glm::vec3(data->getFloat(LightDB::PositionX) / skymul, data->getFloat(LightDB::PositionY) / skymul, data->getFloat(LightDB::PositionZ) / skymul);
+  pos = glm::vec3(data->getFloat(LightDB::PositionX) / skymul
+                , data->getFloat(LightDB::PositionY) / skymul
+                , data->getFloat(LightDB::PositionZ) / skymul);
   r1 = data->getFloat(LightDB::RadiusInner) / skymul;
   r2 = data->getFloat(LightDB::RadiusOuter) / skymul;
 
@@ -289,13 +301,22 @@ Sky::Sky(DBCFile::Iterator data, Noggit::NoggitRenderContext context)
       int sky_param_id = data->getInt(LightDB::DataIDs + i);
 
       skyParams[i] = sky_param_id;
-
-      // initialize param to map, shouldn't even be needed
-      // if (sky_param_id > 0)
-      // {
-      //   getOrCreateParam(sky_param_id, _context);
-      // }
   }
+}
+
+Sky::Sky(ModernLightRecord const& data, Noggit::NoggitRenderContext context)
+: _context(context)
+, _selected(false)
+{
+  Id = data.id;
+  mapId = data.map_id;
+  pos = data.pos;
+  r1 = data.r1;
+  r2 = data.r2;
+  global = (pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f);
+
+  for (int i = 0; i < NUM_SkyParamsNames; ++i)
+    skyParams[i] = data.sky_params[i];
 }
 
 int Sky::getId() const
@@ -332,6 +353,102 @@ std::optional<SkyParam*> Sky::getCurrentParam() const
   return getParam(curr_sky_param);
 }
 
+std::vector<SkyColor> SkyParam::color_row_preview(int color_index) const
+{
+  std::vector<SkyColor> out;
+  if (!has_modern_light_data() || color_index < 0 || color_index >= kModernLightColorCount)
+    return out;
+
+  out.reserve(light_data_keyframes.size());
+  for (auto const& kf : light_data_keyframes)
+  {
+    glm::vec3 const& c = kf.colors[color_index];
+    int const packed = (static_cast<int>(c.x * 255.f) << 16)
+                     | (static_cast<int>(c.y * 255.f) << 8)
+                     | static_cast<int>(c.z * 255.f);
+    out.emplace_back(kf.time, packed);
+  }
+  return out;
+}
+
+bool SkyParam::interpolate_light_data(int time, LightDataKeyframe& out) const
+{
+  if (!has_modern_light_data())
+    return false;
+
+  auto const& kfs = light_data_keyframes;
+  if (kfs.empty())
+    return false;
+
+  if (kfs.size() == 1)
+  {
+    out = kfs.front();
+    return true;
+  }
+
+  LightDataKeyframe const* a = &kfs.back();
+  LightDataKeyframe const* b = &kfs.front();
+  int t_wrap = time;
+
+  if (time < kfs.front().time)
+  {
+    a = &kfs.back();
+    b = &kfs.front();
+    t_wrap = time + DAY_DURATION;
+  }
+  else
+  {
+    for (std::size_t i = 0; i < kfs.size(); ++i)
+    {
+      if (kfs[i].time <= time)
+      {
+        a = &kfs[i];
+        b = (i + 1 < kfs.size()) ? &kfs[i + 1] : &kfs.front();
+        if (i + 1 >= kfs.size())
+          t_wrap = (time < kfs.front().time) ? time + DAY_DURATION : time;
+        break;
+      }
+    }
+  }
+
+  int t1 = a->time;
+  int t2 = b->time;
+  if (t2 < t1)
+    t2 += DAY_DURATION;
+  float const tt = (t2 == t1) ? 0.f : static_cast<float>(t_wrap - t1) / static_cast<float>(t2 - t1);
+
+  out = *a;
+  for (int i = 0; i < kModernLightColorCount; ++i)
+    out.colors[i] = glm::mix(a->colors[i], b->colors[i], tt);
+
+  out.fog_end = a->fog_end + (b->fog_end - a->fog_end) * tt;
+  out.fog_scaler = a->fog_scaler + (b->fog_scaler - a->fog_scaler) * tt;
+  out.fog_density = a->fog_density + (b->fog_density - a->fog_density) * tt;
+  out.fog_height = a->fog_height + (b->fog_height - a->fog_height) * tt;
+  out.fog_height_scaler = a->fog_height_scaler + (b->fog_height_scaler - a->fog_height_scaler) * tt;
+  out.fog_height_density = a->fog_height_density + (b->fog_height_density - a->fog_height_density) * tt;
+  out.end_fog_color = glm::mix(a->end_fog_color, b->end_fog_color, tt);
+  out.end_fog_color_distance = a->end_fog_color_distance + (b->end_fog_color_distance - a->end_fog_color_distance) * tt;
+  out.sun_fog_color = glm::mix(a->sun_fog_color, b->sun_fog_color, tt);
+  out.sun_fog_strength = a->sun_fog_strength + (b->sun_fog_strength - a->sun_fog_strength) * tt;
+  out.fog_height_color = glm::mix(a->fog_height_color, b->fog_height_color, tt);
+  out.cloud_density = a->cloud_density + (b->cloud_density - a->cloud_density) * tt;
+  for (int i = 0; i < 4; ++i)
+  {
+    out.fog_height_coeff[i] = a->fog_height_coeff[i] + (b->fog_height_coeff[i] - a->fog_height_coeff[i]) * tt;
+    out.main_fog_coeff[i] = a->main_fog_coeff[i] + (b->main_fog_coeff[i] - a->main_fog_coeff[i]) * tt;
+  }
+  return true;
+}
+
+bool Sky::lightDataFor(int time, LightDataKeyframe& out) const
+{
+  auto param_opt = getCurrentParam();
+  if (!param_opt.has_value())
+    return false;
+  return param_opt.value()->interpolate_light_data(time, out);
+}
+
 float Sky::floatParamFor(int r, int t) const
 {
   auto param_opt = getCurrentParam();
@@ -340,48 +457,75 @@ float Sky::floatParamFor(int r, int t) const
 
   SkyParam* const sky_param = param_opt.value();
 
-  if (sky_param->floatParams[r].empty())
+  if (r < 0 || r >= NUM_SkyFloatParamsNames)
+    return 0.0f;
+
+  auto const& params = sky_param->floatParams[r];
+  if (params.empty() && sky_param->has_modern_light_data())
+  {
+    LightDataKeyframe kf;
+    if (!sky_param->interpolate_light_data(t, kf))
+      return 0.f;
+    switch (r)
+    {
+      case SKY_FOG_DISTANCE: return kf.fog_end;
+      case SKY_FOG_MULTIPLIER: return kf.fog_scaler;
+      case SKY_CLOUD_DENSITY: return kf.cloud_density;
+      default: break;
+    }
+  }
+
+  if (params.empty())
   {
     return 0.0f;
   }
   float c1, c2;
   int t1, t2;
-  size_t last = sky_param->floatParams[r].size() - 1;
+  int const last = static_cast<int>(params.size()) - 1;
 
-  if (t < sky_param->floatParams[r].front().time)
+  if (t < params.front().time)
   {
     // reverse interpolate
-    c1 = sky_param->floatParams[r][last].value;
-    c2 = sky_param->floatParams[r][0].value;
-    t1 = sky_param->floatParams[r][last].time;
-    t2 = sky_param->floatParams[r][0].time + DAY_DURATION;
+    c1 = params[static_cast<size_t>(last)].value;
+    c2 = params[0].value;
+    t1 = params[static_cast<size_t>(last)].time;
+    t2 = params[0].time + DAY_DURATION;
     t += DAY_DURATION;
   }
   else
   {
-    for (size_t i = last; true; i--)
-    { //! \todo iterator this.
-      if (sky_param->floatParams[r][i].time <= t)
+    bool found = false;
+    for (int i = last; i >= 0; --i)
+    {
+      if (params[static_cast<size_t>(i)].time <= t)
       {
-        c1 = sky_param->floatParams[r][i].value;
-        t1 = sky_param->floatParams[r][i].time;
+        c1 = params[static_cast<size_t>(i)].value;
+        t1 = params[static_cast<size_t>(i)].time;
 
         if (i == last)
         {
-          c2 = sky_param->floatParams[r][0].value;
-          t2 = sky_param->floatParams[r][0].time + DAY_DURATION;
+          c2 = params[0].value;
+          t2 = params[0].time + DAY_DURATION;
         }
         else
         {
-          c2 = sky_param->floatParams[r][i + 1].value;
-          t2 = sky_param->floatParams[r][i + 1].time;
+          c2 = params[static_cast<size_t>(i + 1)].value;
+          t2 = params[static_cast<size_t>(i + 1)].time;
         }
+        found = true;
         break;
       }
     }
+    if (!found)
+    {
+      c1 = params[0].value;
+      c2 = params[0].value;
+      t1 = params[0].time;
+      t2 = params[0].time + DAY_DURATION;
+    }
   }
 
-  float tt = static_cast<float>(t - t1) / static_cast<float>(t2 - t1);
+  float tt = (t2 == t1) ? 0.f : static_cast<float>(t - t1) / static_cast<float>(t2 - t1);
   return c1 + ((c2 - c1) * tt);
 }
 
@@ -393,61 +537,75 @@ glm::vec3 Sky::colorFor(int r, int t) const
 
   SkyParam* const sky_param = param_opt.value();
 
-  if (sky_param->colorRows[r].empty())
+  if (r < 0 || r >= NUM_SkyColorNames)
+    return glm::vec3(0.0f);
+
+  auto const& rows = sky_param->colorRows[r];
+  if (rows.empty())
   {
+    if (sky_param->has_modern_light_data())
+    {
+      LightDataKeyframe kf;
+      if (sky_param->interpolate_light_data(t, kf))
+        return kf.colors[r];
+    }
     return glm::vec3(0.0f, 0.0f, 0.0f);
   }
   glm::vec3 c1, c2;
   int t1, t2;
-  int last = static_cast<int>(sky_param->colorRows[r].size()) - 1;
+  int const last = static_cast<int>(rows.size()) - 1;
 
   if (last == 0)
   {
-      c1 = sky_param->colorRows[r][last].color;
-      c2 = sky_param->colorRows[r][0].color;
-      t1 = sky_param->colorRows[r][last].time;
-      t2 = sky_param->colorRows[r][0].time + DAY_DURATION;
+      c1 = rows[0].color;
+      c2 = rows[0].color;
+      t1 = rows[0].time;
+      t2 = rows[0].time + DAY_DURATION;
+      t += DAY_DURATION;
+  }
+  else if (t < rows.front().time)
+  {
+      // reverse interpolate
+      c1 = rows[static_cast<size_t>(last)].color;
+      c2 = rows[0].color;
+      t1 = rows[static_cast<size_t>(last)].time;
+      t2 = rows[0].time + DAY_DURATION;
       t += DAY_DURATION;
   }
   else
   {
+      bool found = false;
+      for (int i = last; i >= 0; --i)
+      {
+          if (rows[static_cast<size_t>(i)].time <= t)
+          {
+              c1 = rows[static_cast<size_t>(i)].color;
+              t1 = rows[static_cast<size_t>(i)].time;
 
-      // if (t < sky_param->mmin[r])
-      if (t < sky_param->colorRows[r].front().time)
-      {
-          // reverse interpolate
-          c1 = sky_param->colorRows[r][last].color;
-          c2 = sky_param->colorRows[r][0].color;
-          t1 = sky_param->colorRows[r][last].time;
-          t2 = sky_param->colorRows[r][0].time + DAY_DURATION;
-          t += DAY_DURATION;
-      }
-      else
-      {
-          for (int i = last; true; i--)
-          { //! \todo iterator this.
-              if (sky_param->colorRows[r][i].time <= t)
+              if (i == last)
               {
-                  c1 = sky_param->colorRows[r][i].color;
-                  t1 = sky_param->colorRows[r][i].time;
-
-                  if (i == last)
-                  {
-                      c2 = sky_param->colorRows[r][0].color;
-                      t2 = sky_param->colorRows[r][0].time + DAY_DURATION;
-                  }
-                  else
-                  {
-                      c2 = sky_param->colorRows[r][i + 1].color;
-                      t2 = sky_param->colorRows[r][i + 1].time;
-                  }
-                  break;
+                  c2 = rows[0].color;
+                  t2 = rows[0].time + DAY_DURATION;
               }
+              else
+              {
+                  c2 = rows[static_cast<size_t>(i + 1)].color;
+                  t2 = rows[static_cast<size_t>(i + 1)].time;
+              }
+              found = true;
+              break;
           }
+      }
+      if (!found)
+      {
+          c1 = rows[0].color;
+          c2 = rows[0].color;
+          t1 = rows[0].time;
+          t2 = rows[0].time + DAY_DURATION;
       }
   }
 
-  float tt = static_cast<float>(t - t1) / static_cast<float>(t2 - t1);
+  float tt = (t2 == t1) ? 0.f : static_cast<float>(t - t1) / static_cast<float>(t2 - t1);
   return c1*(1.0f - tt) + c2*tt;
 }
 
@@ -469,6 +627,21 @@ const int hseg = 32;
 
 void Skies::loadZoneLights(int map_id)
 {
+  if (noggit_modern_features_enabled() && ModernLightTables::instance().has_usable_data())
+  {
+    ModernLightTables::instance().fill_zone_lights(map_id, zoneLightsWotlk);
+    for (auto& zl : zoneLightsWotlk)
+    {
+      Sky* light_ptr = findSkyById(static_cast<int>(zl.lightId));
+      if (light_ptr)
+        light_ptr->zone_light = true;
+    }
+    return;
+  }
+
+  if (Noggit::Project::CurrentProject::get()->projectVersion != Noggit::Project::ProjectVersion::WOTLK)
+    return;
+
     // read zone lights from csv file
   {
     std::string zonelight_db_path = Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
@@ -662,16 +835,36 @@ Skies::Skies(unsigned int mapid, Noggit::NoggitRenderContext context)
   , _last_pos(glm::vec3(0.0f, 0.0f, 0.0f))
 {
   bool has_global = false;
-  for (DBCFile::Iterator i = gLightDB.begin(); i != gLightDB.end(); ++i)
-  {
-    if (mapid == i->getUInt(LightDB::Map))
-    {
-      Sky s(i, _context);
-      skies.push_back(s);
-      numSkies++;
+  bool const use_modern_lights = noggit_modern_features_enabled()
+    && [&]() {
+         ModernLightTables::instance().ensure_loaded();
+         return ModernLightTables::instance().has_usable_data();
+       }();
 
+  if (use_modern_lights)
+  {
+    for (auto const& rec : ModernLightTables::instance().lights_for_map(mapid))
+    {
+      Sky s(rec, _context);
+      skies.push_back(s);
+      ++numSkies;
       if (s.pos == glm::vec3(0, 0, 0))
         has_global = true;
+    }
+  }
+  else
+  {
+    for (DBCFile::Iterator i = gLightDB.begin(); i != gLightDB.end(); ++i)
+    {
+      if (mapid == i->getUInt(LightDB::Map))
+      {
+        Sky s(i, _context);
+        skies.push_back(s);
+        numSkies++;
+
+        if (s.pos == glm::vec3(0, 0, 0))
+          has_global = true;
+      }
     }
   }
 
@@ -679,29 +872,37 @@ Skies::Skies(unsigned int mapid, Noggit::NoggitRenderContext context)
   {
     LogDebug << "No global light data found for the current map (id :" << mapid
         << ") using light id 1 as a fallback" << std::endl;
-    for (DBCFile::Iterator i = gLightDB.begin(); i != gLightDB.end(); ++i)
+
+    if (use_modern_lights)
     {
-      if (1 == i->getUInt(LightDB::ID))
+      ModernLightRecord const* const fallback = ModernLightTables::instance().find_light(1);
+      if (fallback)
       {
-        Sky s(i, _context);
+        Sky s(*fallback, _context);
         s.global = true;
         skies.push_back(s);
-        numSkies++;
-        break;
+        ++numSkies;
+      }
+    }
+    else
+    {
+      for (DBCFile::Iterator i = gLightDB.begin(); i != gLightDB.end(); ++i)
+      {
+        if (1 == i->getUInt(LightDB::ID))
+        {
+          Sky s(i, _context);
+          s.global = true;
+          skies.push_back(s);
+          numSkies++;
+          break;
+        }
       }
     }
     using_fallback_global = true;
   }
 
-  // sort skies from smallest to largest; global last.
-  // smaller skies will have precedence when calculating weights to achieve smooth transitions etc.
   std::sort(skies.begin(), skies.end());
-
-  // load Zone Lights data, was hardcoded in 3.3.5 and moved to a dbc in Cata. Noggit stores them in a csv
-  if (Noggit::Project::CurrentProject::get()->projectVersion == Noggit::Project::ProjectVersion::WOTLK)
-  {
-    loadZoneLights(mapid);
-  }
+  loadZoneLights(mapid);
 }
 
 Sky* Skies::createNewSky(Sky*  old_sky, unsigned int new_id, glm::vec3& pos)
@@ -742,7 +943,7 @@ Sky* Skies::findSkyWeights(glm::vec3 pos)
 
   for (auto& sky : skies)
   {
-    if (sky.pos == glm::vec3(0, 0, 0))
+    if (sky.global || sky.pos == glm::vec3(0, 0, 0))
     {
       default_sky = &sky;
       break;
@@ -764,14 +965,17 @@ Sky* Skies::findSkyWeights(glm::vec3 pos)
       continue;
     }
 
-    float length_of_falloff = sky.r2 - sky.r1;
-    sky.weight = (sky.r2 - distance_to_light) / length_of_falloff;
-
-    if (distance_to_light <= sky.r1)
+    float const length_of_falloff = sky.r2 - sky.r1;
+    if (length_of_falloff > 1e-6f)
     {
-      sky.weight = 1.0f;
+      sky.weight = (sky.r2 - distance_to_light) / length_of_falloff;
+      if (distance_to_light <= sky.r1)
+        sky.weight = 1.0f;
     }
-
+    else
+    {
+      sky.weight = (distance_to_light <= sky.r2) ? 1.0f : 0.0f;
+    }
   }
 
   // Light zones
@@ -844,6 +1048,48 @@ void Skies::setCurrentParam(int param_id)
   }
 }
 
+void Skies::apply_light_data_fog(LightDataKeyframe const& kf)
+{
+  _fog_distance = kf.fog_end == 0.f ? 6500.f : kf.fog_end;
+  _fog_multiplier = kf.fog_scaler == 0.f ? 0.1f : kf.fog_scaler;
+  _fog_density = kf.fog_density;
+  _cloud_density = kf.cloud_density;
+  _end_fog_color = kf.end_fog_color;
+  _end_fog_color_distance = kf.end_fog_color_distance;
+  _fog_height_color = kf.fog_height_color;
+  _fog_height = kf.fog_height;
+  _fog_height_scaler = kf.fog_height_scaler;
+  _fog_height_density = kf.fog_height_density;
+  for (int i = 0; i < 4; ++i)
+  {
+    _fog_height_coeff[i] = kf.fog_height_coeff[i];
+    _main_fog_coeff[i] = kf.main_fog_coeff[i];
+  }
+}
+
+void Skies::blend_light_data_fog(LightDataKeyframe const& kf, float weight, float weight_remain)
+{
+  if (kf.fog_end != 0.f)
+    _fog_distance = _fog_distance * weight_remain + kf.fog_end * weight;
+  if (kf.fog_scaler != 0.f)
+    _fog_multiplier = _fog_multiplier * weight_remain + kf.fog_scaler * weight;
+  if (kf.fog_density != 0.f)
+    _fog_density = _fog_density * weight_remain + kf.fog_density * weight;
+  _cloud_density = _cloud_density * weight_remain + kf.cloud_density * weight;
+  _end_fog_color = glm::mix(_end_fog_color, kf.end_fog_color, weight);
+  if (kf.end_fog_color_distance != 0.f)
+    _end_fog_color_distance = _end_fog_color_distance * weight_remain + kf.end_fog_color_distance * weight;
+  _fog_height_color = glm::mix(_fog_height_color, kf.fog_height_color, weight);
+  _fog_height = _fog_height * weight_remain + kf.fog_height * weight;
+  _fog_height_scaler = _fog_height_scaler * weight_remain + kf.fog_height_scaler * weight;
+  _fog_height_density = _fog_height_density * weight_remain + kf.fog_height_density * weight;
+  for (int i = 0; i < 4; ++i)
+  {
+    _fog_height_coeff[i] = _fog_height_coeff[i] * weight_remain + kf.fog_height_coeff[i] * weight;
+    _main_fog_coeff[i] = _main_fog_coeff[i] * weight_remain + kf.main_fog_coeff[i] * weight;
+  }
+}
+
 void Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
 {
   if (numSkies == 0 || (_last_time == time && _last_pos == pos && !_force_update))
@@ -851,6 +1097,8 @@ void Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
     return;
   }
   _force_update = false;
+
+  bool const modern = noggit_modern_features_enabled();
 
   Sky* default_sky = findSkyWeights(pos);
 
@@ -868,6 +1116,13 @@ void Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
 
     float fog_multiplier = default_sky->floatParamFor(SKY_FOG_MULTIPLIER, time);
     _fog_multiplier = fog_multiplier == 0.0f ? 0.1f : fog_multiplier;
+
+    if (modern)
+    {
+      LightDataKeyframe kf;
+      if (default_sky->lightDataFor(time, kf))
+        apply_light_data_fog(kf);
+    }
 
     _celestial_glow = default_sky->floatParamFor(SKY_CELESTIAL_GLOW, time);
     _cloud_density = default_sky->floatParamFor(SKY_CLOUD_DENSITY, time);
@@ -907,6 +1162,9 @@ void Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
 
     _fog_multiplier = 0.1f;
     _fog_distance = 6500.0f;
+    _fog_density = 0.f;
+    _end_fog_color = glm::vec3(0.f);
+    _end_fog_color_distance = 0.f;
     _celestial_glow = 1.0f;
     _cloud_density = 1.0f;
     _unknown_float_param4 = 1.0f;
@@ -956,6 +1214,13 @@ void Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
           if (fog_multiplier != 0.0f)
             _fog_multiplier = (_fog_multiplier * sky_weight_remain) + (fog_multiplier * sky.weight);
 
+          if (modern)
+          {
+            LightDataKeyframe kf;
+            if (sky.lightDataFor(time, kf))
+              blend_light_data_fog(kf, sky.weight, sky_weight_remain);
+          }
+
           _celestial_glow = (_celestial_glow * sky_weight_remain) + (sky.floatParamFor(SKY_CELESTIAL_GLOW, time) * sky.weight);
           _cloud_density = (_cloud_density * sky_weight_remain) + (sky.floatParamFor(SKY_CLOUD_DENSITY, time) * sky.weight);
           _unknown_float_param4 = (_unknown_float_param4 * sky_weight_remain) + (sky.floatParamFor(SKY_UNK_FLOAT_PARAM_4, time) * sky.weight);
@@ -982,13 +1247,13 @@ void Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
   const float fogStart = _fog_multiplier * fogEnd;
   const float fogRange = fogEnd - fogStart;
 
-  // constexpr float fogFarClip = 500.f; // Max fog farclip possible
-  constexpr float fogFarClip = 1583.333374f; // 1583.333374 for wrath/tbc zones, 791.666687 for vanilla zones
+  constexpr float fogFarClip = 1583.333374f;
 
   if (fogRange <= fogFarClip)
   {
     _fog_rate = ((1.0f - (fogRange / fogFarClip)) * 5.5f) + 1.5f;
-  } else
+  }
+  else
   {
     _fog_rate = 1.5f;
   }
@@ -1267,6 +1532,51 @@ float Skies::fogRate() const
   return _fog_rate;
 }
 
+float Skies::fog_density() const
+{
+  return _fog_density;
+}
+
+glm::vec3 Skies::end_fog_color() const
+{
+  return _end_fog_color;
+}
+
+float Skies::end_fog_color_distance() const
+{
+  return _end_fog_color_distance;
+}
+
+glm::vec3 Skies::fog_height_color() const
+{
+  return _fog_height_color;
+}
+
+float Skies::fog_height() const
+{
+  return _fog_height;
+}
+
+float Skies::fog_height_scaler() const
+{
+  return _fog_height_scaler;
+}
+
+float Skies::fog_height_density() const
+{
+  return _fog_height_density;
+}
+
+std::array<float, 4> Skies::fog_height_coeff() const
+{
+  return {_fog_height_coeff[0], _fog_height_coeff[1], _fog_height_coeff[2], _fog_height_coeff[3]};
+}
+
+std::array<float, 4> Skies::main_fog_coeff() const
+{
+  return {_main_fog_coeff[0], _main_fog_coeff[1], _main_fog_coeff[2], _main_fog_coeff[3]};
+}
+
 void Skies::unload()
 {
   _program.reset();
@@ -1424,10 +1734,9 @@ void OutdoorLightStats::interpolate(OutdoorLightStats *a, OutdoorLightStats *b, 
     };
 
   unsigned currentPhiIndex = static_cast<unsigned>(progressDayAndNight / 0.25f);
-  unsigned nextPhiIndex = 0;
-
-  if (currentPhiIndex < 3)
-    nextPhiIndex = currentPhiIndex + 1;
+  if (currentPhiIndex > 3)
+    currentPhiIndex = 3;
+  unsigned nextPhiIndex = (currentPhiIndex < 3) ? currentPhiIndex + 1 : 0;
 
   // Lerp between the current value of phi and the next value of phi
   {
@@ -1480,7 +1789,8 @@ OutdoorLightStats OutdoorLighting::getLightStats(int time)
 
   static constexpr unsigned DayNight_SecondsPerDay = 86400;
 
-  long progressDayAndNight = (static_cast<float>(normalized_time) * 120);
+  // time is in half-minutes (0..DAY_DURATION); each step is 30 seconds of in-game day.
+  long progressDayAndNight = (static_cast<long>(time) % DAY_DURATION) * 30L;
 
   while (progressDayAndNight < 0 || progressDayAndNight > DayNight_SecondsPerDay)
   {

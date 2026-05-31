@@ -10,6 +10,7 @@
 #include <noggit/tool_enums.hpp>
 #include <noggit/rendering/CursorRender.hpp>
 #include <noggit/rendering/LiquidTextureManager.hpp>
+#include <noggit/rendering/RealtimeGpuShadowMap.hpp>
 #include <noggit/map_horizon.h>
 #include <noggit/Sky.h>
 
@@ -17,8 +18,11 @@
 
 #include <QOpenGLFramebufferObject>
 
+#include <limits>
 #include <memory>
 #include <vector>
+
+#include <external/tsl/robin_map.h>
 
 namespace OpenGL
 {
@@ -27,6 +31,8 @@ namespace OpenGL
 
 struct TileIndex;
 class World;
+class Model;
+class WMOInstance;
 struct MinimapRenderSettings;
 
 namespace math
@@ -39,6 +45,9 @@ struct WorldRenderParams
 {
   float cursorRotation;
   CursorType cursor_type;
+  BrushCursorStyle brush_cursor_style = BrushCursorStyle::TerrainWrap;
+  glm::vec4 inner_cursor_outline_color = { 1.f, 1.f, 1.f, 1.f };
+  glm::vec4 outer_cursor_outline_color = { 1.f, 0.f, 0.f, 1.f };
   float brush_radius;
   bool show_unpaintable_chunks;
   bool draw_only_inside_light_sphere;
@@ -98,6 +107,15 @@ struct WorldRenderParams
 
   /// Per-chunk texture layer count (0–4) as camera-facing billboards (not painted on terrain).
   bool draw_texture_layer_count_overlay = false;
+
+  /// Terrain MCSE sound emitter markers.
+  bool draw_sound_emitters = false;
+
+  glm::vec3 selected_sound_emitter_pos{};
+  bool has_selected_sound_emitter = false;
+
+  /// Directional shadow map for M2 / WMO (fixed NW 45° sun).
+  bool draw_realtime_shadows = false;
 };
 
 namespace Noggit::Rendering
@@ -130,6 +148,8 @@ namespace Noggit::Rendering
     void updateTerrainParamsUniformBlock();
     void markTerrainParamsUniformBlockDirty();;
 
+    void invalidateRealtimeShadows();
+
     [[nodiscard]] std::unique_ptr<Skies>& skies();;
 
     float _view_distance;
@@ -150,7 +170,9 @@ namespace Noggit::Rendering
 
     void updateMVPUniformBlock(const glm::mat4x4& model_view, const glm::mat4x4& projection);
     void updateLightingUniformBlock(bool draw_fog, glm::vec3 const& camera_pos);
+    void updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& camera_pos);
     void updateLightingUniformBlockMinimap(MinimapRenderSettings* settings);
+    void drawVolumetricFogDebug(glm::mat4x4 const& model_view, glm::mat4x4 const& projection, glm::vec3 const& camera_pos, float cull_distance);
 
     void setupChunkVAO(OpenGL::Scoped::use_program& mcnk_shader);
     void setupLiquidChunkVAO(OpenGL::Scoped::use_program& water_shader);
@@ -173,6 +195,9 @@ namespace Noggit::Rendering
     std::unique_ptr<OpenGL::program> _liquid_program;
     std::unique_ptr<OpenGL::program> _occluder_program;
     std::unique_ptr<OpenGL::program> _sea_level_clip_program;
+    std::unique_ptr<OpenGL::program> _sun_shadow_m2_program;
+    std::unique_ptr<OpenGL::program> _sun_shadow_wmo_program;
+    RealtimeGpuShadowMap _gpu_sun_shadow;
     GLuint _sea_level_clip_vao = 0;
     GLuint _sea_level_clip_vbo = 0;
     /// Rebuilt each sea draw: tessellated y=0 plane (avoids huge float triangles at map scale).
@@ -192,9 +217,10 @@ namespace Noggit::Rendering
     Noggit::Rendering::Primitives::WireBox _wirebox_render;
 
     // buffers
-    OpenGL::Scoped::deferred_upload_buffers<14> _buffers;
+    OpenGL::Scoped::deferred_upload_buffers<16> _buffers;
     GLuint const& _mvp_ubo = _buffers[0];
     GLuint const& _lighting_ubo = _buffers[1];
+    GLuint const& _modern_fog_ubo = _buffers[14];
     GLuint const& _terrain_params_ubo = _buffers[2];
     GLuint const& _mapchunk_vertex = _buffers[3];
     GLuint const& _mapchunk_index = _buffers[4];
@@ -207,21 +233,24 @@ namespace Noggit::Rendering
     GLuint const& _mccv_viz_crosshair_vbo = _buffers[11];
     GLuint const& _tex_layer_billboard_instance_vbo = _buffers[12];
     GLuint const& _tex_layer_billboard_quad_vbo = _buffers[13];
+    GLuint const& _sound_emitter_instance_vbo = _buffers[15];
 
     // uniform blocks
     OpenGL::MVPUniformBlock _mvp_ubo_data;
     OpenGL::LightingUniformBlock _lighting_ubo_data;
+    OpenGL::ModernFogUniformBlock _modern_fog_ubo_data;
     OpenGL::TerrainParamsUniformBlock _terrain_params_ubo_data;
     OpenGL::PointLightsUniformBlock _point_lights_ubo_data;
 
     // VAOs
-    OpenGL::Scoped::deferred_upload_vertex_arrays<6> _vertex_arrays;
+    OpenGL::Scoped::deferred_upload_vertex_arrays<7> _vertex_arrays;
     GLuint const& _mapchunk_vao = _vertex_arrays[0];
     GLuint const& _liquid_chunk_vao = _vertex_arrays[1];
     GLuint const& _occluder_vao = _vertex_arrays[2];
     GLuint const& _mccv_viz_vao = _vertex_arrays[3];
     GLuint const& _mccv_crosshair_vao = _vertex_arrays[4];
     GLuint const& _tex_layer_billboard_vao = _vertex_arrays[5];
+    GLuint const& _sound_emitter_billboard_vao = _vertex_arrays[6];
 
     LiquidTextureManager _liquid_texture_manager;
 
@@ -238,6 +267,14 @@ namespace Noggit::Rendering
                                          , WorldRenderParams const& render_settings
                                          );
 
+    void setupSoundEmitterBillboardResources();
+    void drawSoundEmitterBillboards ( glm::mat4x4 const& model_view
+                                    , glm::mat4x4 const& projection
+                                    , glm::vec3 const& camera_pos
+                                    , math::frustum const& frustum
+                                    , WorldRenderParams const& render_settings
+                                    );
+
     void drawMccvVertexAltViz ( glm::mat4x4 const& model_view
                               , glm::mat4x4 const& projection
                               , glm::mat4x4 const& mvp
@@ -247,6 +284,12 @@ namespace Noggit::Rendering
                               );
 
     void drawRampPreview(glm::mat4x4 const& mvp, WorldRenderParams const& render_settings);
+
+    void drawBrushCursorOverlay ( glm::mat4x4 const& mvp
+                                , glm::vec3 const& cursor_pos
+                                , glm::vec4 const& cursor_color
+                                , WorldRenderParams const& render_settings
+                                );
 
     void drawChunkManipulatorSelection ( glm::mat4x4 const& model_view
                                        , glm::mat4x4 const& projection
@@ -259,6 +302,25 @@ namespace Noggit::Rendering
                            , float plane_radius
                            , glm::vec4 const& sea_color
                            );
+
+    void drawSunShadowDepthPass ( glm::vec3 const& camera_pos
+                                , glm::vec3 const& sun_dir
+                                , float shadow_distance
+                                , math::frustum const& frustum
+                                , WorldRenderParams const& render_settings
+                                , tsl::robin_map<Model*, std::vector<glm::mat4x4>> const& models_to_draw
+                                , std::vector<WMOInstance*> const& wmos_to_draw
+                                );
+
+    void collectVisibleObjects ( int frame
+                             , glm::mat4x4 const& model_view
+                             , glm::vec3 const& camera_pos
+                             , math::frustum const& frustum
+                             , WorldRenderParams const& render_settings
+                             , MinimapRenderSettings* minimap_render_settings
+                             , tsl::robin_map<Model*, std::vector<glm::mat4x4>>& models_to_draw
+                             , std::vector<WMOInstance*>& wmos_to_draw
+                             );
 
     // Terrain→WMO seam blending: terrain base-color lookup (rendered top-down).
     std::unique_ptr<QOpenGLFramebufferObject> _terrain_blend_fbo;
@@ -276,6 +338,10 @@ namespace Noggit::Rendering
     std::unique_ptr<OpenGL::program> _tex_layer_billboard_program;
     GLuint _tex_layer_billboard_atlas = 0;
     bool _tex_layer_billboard_ready = false;
+
+    std::unique_ptr<OpenGL::program> _sound_emitter_billboard_program;
+    GLuint _sound_emitter_icon_texture = 0;
+    bool _sound_emitter_billboard_ready = false;
   };
 }
 

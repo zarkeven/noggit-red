@@ -23,6 +23,17 @@ layout (std140) uniform point_lights
   vec4 spot_cos_outer_kind[256];
 };
 
+layout (std140) uniform modern_fog
+{
+  ivec4 mf_meta;
+  vec4 fog_density_end_height;
+  vec4 end_fog_color;
+  vec4 fog_height_color_density;
+  vec4 height_coeff_01;
+  vec4 vfog_pos_radius[8];
+  vec4 vfog_color_intensity[8];
+};
+
 layout (std140) uniform overlay_params
 {
   int draw_shadows;
@@ -93,6 +104,8 @@ uniform float cursorRotation;
 uniform float outer_cursor_radius;
 uniform float inner_cursor_ratio;
 uniform vec4 cursor_color;
+uniform vec4 inner_cursor_color;
+uniform vec4 outer_cursor_color;
 uniform bool enable_mists_heightmapping;
 
 in vec3 vary_position;
@@ -114,6 +127,11 @@ out vec4 out_color;
 uniform int preview_pass;
 uniform float preview_alpha;
 uniform int albedo_only;
+uniform sampler2DShadow sun_shadow_depth;
+uniform mat4 sun_shadow_matrix;
+uniform vec3 sun_shadow_light_dir;
+uniform float shadow_darkness;
+uniform int realtime_shadows_enabled;
 
 const float TILESIZE  = 533.33333;
 const float CHUNKSIZE = TILESIZE / 16.0;
@@ -326,6 +344,41 @@ float contour_alpha(float unit_size, vec2 pos, vec2 line_width)
                   );
 }
 
+float sample_gpu_sun_shadow(vec3 world_pos, vec3 world_normal)
+{
+  if (realtime_shadows_enabled == 0)
+  {
+    return 1.0;
+  }
+
+  vec4 light = sun_shadow_matrix * vec4(world_pos, 1.0);
+  vec3 proj = light.xyz / light.w;
+  if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z < 0.0 || proj.z > 1.0)
+  {
+    return 1.0;
+  }
+
+  vec3 light_dir = normalize(sun_shadow_light_dir);
+  float ndotl = abs(dot(normalize(world_normal), light_dir));
+  float bias = max(0.00012, 0.0012 * (1.0 - ndotl));
+  float ref_depth = proj.z - bias;
+
+  vec2 texel = 1.0 / vec2(textureSize(sun_shadow_depth, 0));
+  vec2 uv = proj.xy;
+
+  float lit = 0.0;
+  for (int y = -1; y <= 1; ++y)
+  {
+    for (int x = -1; x <= 1; ++x)
+    {
+      lit += texture(sun_shadow_depth, vec3(uv + vec2(x, y) * texel, ref_depth));
+    }
+  }
+  lit *= 0.1111111111111111;
+
+  return mix(shadow_darkness, 1.0, lit);
+}
+
 void main()
 {
   float dist_from_camera = distance(camera, vary_position);
@@ -416,7 +469,13 @@ void main()
     }
   }
 
-  out_color.rgb = clamp(out_color.rgb * (currColor + lDiffuse + spc), 0.0, 1.0);
+  vec3 lit = out_color.rgb * (currColor + lDiffuse + spc);
+  if (realtime_shadows_enabled != 0)
+  {
+    lit *= sample_gpu_sun_shadow(vary_position, vary_normal);
+  }
+
+  out_color.rgb = clamp(lit, 0.0, 1.0);
 
   // apply overlays
   if(draw_paintability_overlay != 0 && instances[instanceID].ChunkHoles_DrawImpass_TexLayerCount_CantPaint.a != 0)
@@ -574,23 +633,41 @@ void main()
 
   if(FogColor_FogOn.w != 0)
   {
-    float start = AmbientColor_FogEnd.w * DiffuseColor_FogStart.w; // 0
-
+    float start = DiffuseColor_FogStart.w;
     vec3 fogParams;
-    fogParams.x = -(1.0 / (AmbientColor_FogEnd.w - start)); // - 1 / 338
-    fogParams.y = (1.0 / (AmbientColor_FogEnd.w - start)) * AmbientColor_FogEnd.w; // 1 / 338 * 338
-    fogParams.z = LightDir_FogRate.w; // 2.7
+    fogParams.x = -(1.0 / (AmbientColor_FogEnd.w - start));
+    fogParams.y = (1.0 / (AmbientColor_FogEnd.w - start)) * AmbientColor_FogEnd.w;
+    fogParams.z = (mf_meta.x != 0 && fog_density_end_height.x > 0.0) ? fog_density_end_height.x : LightDir_FogRate.w;
 
-    float f1 = (dist_from_camera * fogParams.x) + fogParams.y; // 1.0029
+    float f1 = (dist_from_camera * fogParams.x) + fogParams.y;
     float f2 = max(f1, 0.0);
     float f3 = pow(f2, fogParams.z);
-    float f4 = min(f3, 1.0);
+    float fogFactor = 1.0 - min(f3, 1.0);
 
-    float fogFactor = 1.0 - f4;
+    vec3 fogged = mix(out_color.rgb, FogColor_FogOn.rgb, fogFactor);
 
-    float alpha = clamp((dist_from_camera - start) / (AmbientColor_FogEnd.w - start), 0.0, 1.0);
+    if (mf_meta.x != 0 && fog_density_end_height.y > 0.0)
+    {
+      float endT = clamp(dist_from_camera / fog_density_end_height.y, 0.0, 1.0);
+      fogged = mix(fogged, end_fog_color.rgb, endT * fogFactor);
+    }
 
-    out_color.rgb = mix(out_color.rgb, FogColor_FogOn.rgb, fogFactor);
+    if (mf_meta.x != 0 && fog_density_end_height.z != 0.0)
+    {
+      float h = max(vary_position.y - fog_density_end_height.z, 0.0) * max(fog_density_end_height.w, 0.001);
+      float hf = 1.0 - exp(-h * max(fog_height_color_density.w, 0.001));
+      fogged = mix(fogged, fog_height_color_density.rgb, hf * fogFactor);
+    }
+
+    for (int i = 0; i < mf_meta.y; ++i)
+    {
+      float d = distance(vfog_pos_radius[i].xyz, vary_position);
+      float r = max(vfog_pos_radius[i].w, 1.0);
+      float vf = clamp(1.0 - d / r, 0.0, 1.0) * vfog_color_intensity[i].w;
+      fogged = mix(fogged, vfog_color_intensity[i].rgb, vf * fogFactor);
+    }
+
+    out_color.rgb = fogged;
   }
 
   if(draw_wireframe != 0 && !lines_drawn)
@@ -676,6 +753,30 @@ void main()
     float alpha = smoothstep(0.0, length(fw.xz), diff);
 
     out_color.rgb = mix(cursor_color.rgb, out_color.rgb, alpha);
+  }
+  else if(draw_cursor_circle == 3)
+  {
+    float dist = length(vary_position.xz - cursor_position.xz);
+    float inner_radius = outer_cursor_radius * inner_cursor_ratio;
+    float at_outer = abs(dist - outer_cursor_radius);
+    float at_inner = abs(dist - inner_radius);
+    float line_width = length(fw.xz);
+
+    float angle = atan(vary_position.z - cursor_position.z, vary_position.x - cursor_position.x);
+    const float dash_count = 48.0;
+    float dash = step(0.5, fract(angle / (2.0 * PI) * dash_count));
+
+    float outer_alpha = (1.0 - smoothstep(0.0, line_width, at_outer)) * dash;
+    float inner_alpha = (1.0 - smoothstep(0.0, line_width, at_inner)) * dash;
+
+    if (at_outer <= at_inner)
+    {
+      out_color.rgb = mix(outer_cursor_color.rgb, out_color.rgb, 1.0 - outer_alpha);
+    }
+    else
+    {
+      out_color.rgb = mix(inner_cursor_color.rgb, out_color.rgb, 1.0 - inner_alpha);
+    }
   }
   else if(draw_cursor_circle == 2)
   {

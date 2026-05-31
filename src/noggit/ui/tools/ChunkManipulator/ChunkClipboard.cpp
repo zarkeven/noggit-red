@@ -242,6 +242,11 @@ void ChunkClipboard::copySelected(glm::vec3 const& pos)
       chunk_cache.area_id = static_cast<int>(chunk->areaID);
     }
 
+    if (chunk_copy_flags_test(flags, ChunkCopyFlags::SOUND_EMITTERS))
+    {
+      chunk_cache.sound_emitters = chunk->sound_emitters;
+    }
+
     TileIndex const pivot_ti = pivot_chunk->mt->index;
     int const pivot_gx = static_cast<int>(pivot_ti.x) * 16 + pivot_chunk->px;
     int const pivot_gz = static_cast<int>(pivot_ti.z) * 16 + pivot_chunk->py;
@@ -517,6 +522,16 @@ void ChunkClipboard::pasteSelection(glm::vec3 const& pos, ChunkPasteFlags flags,
         undo_action->registerChunkFlagChange(chunk);
       chunk->header_flags = *cache.flags;
       chunk->registerChunkUpdate(ChunkUpdateFlags::FLAGS);
+    }
+
+    if (cache.sound_emitters)
+    {
+      if (undo_action)
+        undo_action->registerChunkSoundEmitterChange(chunk);
+      chunk->sound_emitters = *cache.sound_emitters;
+      for (auto& emitter : chunk->sound_emitters)
+        emitter.pos[1] += paste_dy;
+      _world->markSoundEmitterChunkDirty(chunk);
     }
 
     // Paste point lights once (stored on first entry).

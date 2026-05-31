@@ -169,10 +169,17 @@ void ModelRender::draw(glm::mat4x4 const& model_view
     }
   }
 
-  if (_model->animated && animate && (!_model->anim_calculated || _model->_per_instance_animation))
+  if ((_model->animated || _model->animBones) && animate && (!_model->anim_calculated || _model->_per_instance_animation))
   {
-    _model->animate(model_view, 0, animtime);
-    _model->anim_calculated = true;
+    if (!_model->_animations_seq_per_id.empty() && !_model->_animations_seq_per_id[0].empty())
+    {
+      _model->animate(model_view, 0, animtime);
+      _model->anim_calculated = true;
+    }
+    else
+    {
+      _model->anim_calculated = false;
+    }
   }
 
   OpenGL::Scoped::buffer_binder<GL_ELEMENT_ARRAY_BUFFER> indices_binder(_indices_buffer);
@@ -217,6 +224,7 @@ void ModelRender::draw(glm::mat4x4 const& model_view
     , bool draw_animation_box
     , World* world_for_terrain_projection
     , bool enable_terrain_texture_projection
+    , bool shadow_depth_pass
 )
 {
   ZoneScopedN(NOGGIT_CURRENT_FUNCTION);
@@ -248,10 +256,17 @@ void ModelRender::draw(glm::mat4x4 const& model_view
   {
     ZoneScopedN("Model::draw() : drawing")
 
-    if (_model->animated && animate && (!_model->anim_calculated || _model->_per_instance_animation))
+    if ((_model->animated || _model->animBones) && animate && (!_model->anim_calculated || _model->_per_instance_animation))
     {
-      _model->animate(model_view, 0, animtime);
-      _model->anim_calculated = true;
+      if (!_model->_animations_seq_per_id.empty() && !_model->_animations_seq_per_id[0].empty())
+      {
+        _model->animate(model_view, 0, animtime);
+        _model->anim_calculated = true;
+      }
+      else
+      {
+        _model->anim_calculated = false;
+      }
     }
 
     // store the model count to draw the bounding boxes later
@@ -305,8 +320,13 @@ void ModelRender::draw(glm::mat4x4 const& model_view
     {
       for (ModelRenderPass& p : _render_passes)
       {
-        if (p.prepareDraw(m2_shader, _model, model_render_state, nullptr))
+        if (p.prepareDraw(m2_shader, _model, model_render_state, nullptr, shadow_depth_pass))
         {
+          if (shadow_depth_pass)
+          {
+            gl.disable(GL_BLEND);
+            gl.depthMask(GL_TRUE);
+          }
           gl.drawElementsInstanced(GL_TRIANGLES, p.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(p.index_start * sizeof(GLushort)), static_cast<GLsizei>(instances.size()));
         }
       }
@@ -319,8 +339,13 @@ void ModelRender::draw(glm::mat4x4 const& model_view
 
       for (ModelRenderPass& p : _render_passes)
       {
-        if (p.prepareDraw(m2_shader, _model, model_render_state, terrain_ptr))
+        if (p.prepareDraw(m2_shader, _model, model_render_state, terrain_ptr, shadow_depth_pass))
         {
+          if (shadow_depth_pass)
+          {
+            gl.disable(GL_BLEND);
+            gl.depthMask(GL_TRUE);
+          }
           gl.drawElementsInstanced(GL_TRIANGLES, p.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(p.index_start * sizeof(GLushort)), 1);
         }
       }
@@ -342,8 +367,13 @@ void ModelRender::draw(glm::mat4x4 const& model_view
 
         for (ModelRenderPass& p : _render_passes)
         {
-          if (p.prepareDraw(m2_shader, _model, model_render_state, terrain_ptr))
+          if (p.prepareDraw(m2_shader, _model, model_render_state, terrain_ptr, shadow_depth_pass))
           {
+            if (shadow_depth_pass)
+            {
+              gl.disable(GL_BLEND);
+              gl.depthMask(GL_TRUE);
+            }
             gl.drawElementsInstanced(GL_TRIANGLES, p.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(p.index_start * sizeof(GLushort)), 1);
           }
         }
@@ -442,7 +472,6 @@ void ModelRender::setupVAO(OpenGL::Scoped::use_program& m2_shader)
 
   _vao_setup = true;
 }
-
 
 void ModelRender::fixShaderIdBlendOverride()
 {
@@ -913,7 +942,7 @@ ModelRenderPass::ModelRenderPass(ModelTexUnit const& tex_unit, Model* m)
 {
 }
 
-bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model *m, OpenGL::M2RenderState& model_render_state, M2TerrainGroundBind const* terrain_ground)
+bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model *m, OpenGL::M2RenderState& model_render_state, M2TerrainGroundBind const* terrain_ground, bool shadow_depth_pass)
 {
   if (!m->showGeosets[submesh] || !pixel_shader)
   {
@@ -960,33 +989,36 @@ bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model 
 
   if (model_render_state.blend != renderflag.blend)
   {
-    switch (static_cast<M2Blend>(renderflag.blend))
+    if (!shadow_depth_pass)
     {
-      default:
-      case M2Blend::Opaque:
-      case M2Blend::Alpha_Key:
-        gl.disable(GL_BLEND);
-        break;
-      case M2Blend::Alpha:
-        gl.enable(GL_BLEND);
-        gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        break;
-      case M2Blend::No_Add_Alpha:
-        gl.enable(GL_BLEND);
-        gl.blendFunc(GL_ONE, GL_ONE);
-        break;
-      case M2Blend::Add:
-        gl.enable(GL_BLEND);
-        gl.blendFunc(GL_SRC_ALPHA, GL_ONE);
-        break;
-      case M2Blend::Mod:
-        gl.enable(GL_BLEND);
-        gl.blendFunc(GL_DST_COLOR, GL_ZERO);
-        break;
-      case M2Blend::Mod2x:
-        gl.enable(GL_BLEND);
-        gl.blendFunc(GL_DST_COLOR, GL_SRC_COLOR);
-        break;
+      switch (static_cast<M2Blend>(renderflag.blend))
+      {
+        default:
+        case M2Blend::Opaque:
+        case M2Blend::Alpha_Key:
+          gl.disable(GL_BLEND);
+          break;
+        case M2Blend::Alpha:
+          gl.enable(GL_BLEND);
+          gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+          break;
+        case M2Blend::No_Add_Alpha:
+          gl.enable(GL_BLEND);
+          gl.blendFunc(GL_ONE, GL_ONE);
+          break;
+        case M2Blend::Add:
+          gl.enable(GL_BLEND);
+          gl.blendFunc(GL_SRC_ALPHA, GL_ONE);
+          break;
+        case M2Blend::Mod:
+          gl.enable(GL_BLEND);
+          gl.blendFunc(GL_DST_COLOR, GL_ZERO);
+          break;
+        case M2Blend::Mod2x:
+          gl.enable(GL_BLEND);
+          gl.blendFunc(GL_DST_COLOR, GL_SRC_COLOR);
+          break;
+      }
     }
 
     m2_shader.uniform("blend_mode", static_cast<int>(renderflag.blend));

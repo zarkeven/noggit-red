@@ -5,7 +5,7 @@
 const float kWoWTilesize = 533.33333;
 const float kWoWChunksize = kWoWTilesize / 16.0;
 
-in vec4 pos;
+in vec3 pos;
 in vec3 normal;
 in vec2 texcoord1;
 in vec2 texcoord2;
@@ -129,7 +129,19 @@ void main()
   mat4 cameraMatrix = model_view * worldMatrix;
   mat3 normMatrix = mat3(worldMatrix);
 
-  vec4 world_vertex = worldMatrix * pos;
+  vec4 world_vertex = worldMatrix * vec4(pos, 1.0);
+
+  if (any(isnan(world_vertex.xyz)) || any(isinf(world_vertex.xyz)))
+  {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    norm = vec3(0.0, 1.0, 0.0);
+    world_pos = vec3(0.0);
+    uv1 = vec2(0.0);
+    uv2 = vec2(0.0);
+    camera_dist = 0.0;
+    return;
+  }
+
   vec4 vertex = model_view * world_vertex;
 
   // important to normalize because of the scaling !!

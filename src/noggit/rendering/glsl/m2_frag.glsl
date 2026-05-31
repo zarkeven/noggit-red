@@ -31,6 +31,17 @@ layout (std140) uniform point_lights
   vec4 spot_cos_outer_kind[256];
 };
 
+layout (std140) uniform modern_fog
+{
+  ivec4 mf_meta;
+  vec4 fog_density_end_height;
+  vec4 end_fog_color;
+  vec4 fog_height_color_density;
+  vec4 height_coeff_01;
+  vec4 vfog_pos_radius[8];
+  vec4 vfog_color_intensity[8];
+};
+
 uniform vec4 mesh_color;
 uniform int blend_mode;
 
@@ -42,7 +53,48 @@ uniform int tex2_index;
 uniform int unfogged;
 uniform int unlit;
 
+uniform sampler2DShadow sun_shadow_depth;
+uniform mat4 sun_shadow_matrix;
+uniform vec3 sun_shadow_light_dir;
+uniform float shadow_darkness;
+uniform int realtime_shadows_enabled;
+
 uniform int pixel_shader;
+
+float sample_gpu_sun_shadow(vec3 world_pos, vec3 world_normal)
+{
+  if (realtime_shadows_enabled == 0)
+  {
+    return 1.0;
+  }
+
+  vec4 light = sun_shadow_matrix * vec4(world_pos, 1.0);
+  vec3 proj = light.xyz / light.w;
+  if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z < 0.0 || proj.z > 1.0)
+  {
+    return 1.0;
+  }
+
+  vec3 light_dir = normalize(sun_shadow_light_dir);
+  float ndotl = abs(dot(normalize(world_normal), light_dir));
+  float bias = max(0.00012, 0.0012 * (1.0 - ndotl));
+  float ref_depth = proj.z - bias;
+
+  vec2 texel = 1.0 / vec2(textureSize(sun_shadow_depth, 0));
+  vec2 uv = proj.xy;
+
+  float lit = 0.0;
+  for (int y = -1; y <= 1; ++y)
+  {
+    for (int x = -1; x <= 1; ++x)
+    {
+      lit += texture(sun_shadow_depth, vec3(uv + vec2(x, y) * texel, ref_depth));
+    }
+  }
+  lit *= 0.1111111111111111;
+
+  return mix(shadow_darkness, 1.0, lit);
+}
 
 void main()
 {
@@ -255,14 +307,27 @@ void main()
     discard;
   }
 
+#ifdef M2_SHADOW_DEPTH_PASS
+  // Alpha_key + opaque combiner: final color.a ignores texture alpha; cut out from texture for shadows.
+  if (blend_mode == 1 && alpha_test > 0.0)
+  {
+    vec4 texture1 = texture(tex1, vec3(uv1, tex1_index));
+    if (texture1.a * mesh_color.w < alpha_test)
+    {
+      discard;
+    }
+  }
+  return;
+#endif
+
   // apply world lighting
   vec3 currColor;
   vec3 lDiffuse = vec3(0.0, 0.0, 0.0);
   vec3 accumlatedLight = vec3(1.0, 1.0, 1.0);
+  float nDotL = clamp(dot(normalize(norm), -normalize(vec3(-LightDir_FogRate.x, LightDir_FogRate.z, -LightDir_FogRate.y))), 0.0, 1.0);
 
   if(unlit == 0)
   {
-      float nDotL = clamp(dot(normalize(norm), -normalize(vec3(-LightDir_FogRate.x, LightDir_FogRate.z, -LightDir_FogRate.y))), 0.0, 1.0);
 
       vec3 ambientColor = AmbientColor_FogEnd.xyz;
 
@@ -309,45 +374,46 @@ void main()
       accumlatedLight = vec3(0.0f, 0.0f, 0.0f);
   }
 
-  color.rgb = clamp(color.rgb * (currColor + lDiffuse), 0.0, 1.0);
+  vec3 albedo = color.rgb;
+  float shadow_mul = 1.0;
+  if (realtime_shadows_enabled != 0 && unlit == 0)
+  {
+    shadow_mul = sample_gpu_sun_shadow(world_pos, norm);
+  }
+  color.rgb = clamp(albedo * currColor + albedo * lDiffuse * shadow_mul, 0.0, 1.0);
 
   if(FogColor_FogOn.w != 0 && unfogged == 0)
   {
-    float start = AmbientColor_FogEnd.w * DiffuseColor_FogStart.w;
-
+    float start = DiffuseColor_FogStart.w;
     vec3 fogParams;
     fogParams.x = -(1.0 / (AmbientColor_FogEnd.w - start));
     fogParams.y = (1.0 / (AmbientColor_FogEnd.w - start)) * AmbientColor_FogEnd.w;
-    fogParams.z = LightDir_FogRate.w;
+    fogParams.z = (mf_meta.x != 0 && fog_density_end_height.x > 0.0) ? fog_density_end_height.x : LightDir_FogRate.w;
 
     float f1 = (camera_dist * fogParams.x) + fogParams.y;
     float f2 = max(f1, 0.0);
     float f3 = pow(f2, fogParams.z);
-    float f4 = min(f3, 1.0);
+    float fogFactor = 1.0 - min(f3, 1.0);
 
-    float fogFactor = 1.0 - f4;
+    vec3 fog = FogColor_FogOn.rgb;
+    if(fog_mode == 2) fog = vec3(0.);
+    else if(fog_mode == 3) fog = vec3(1.);
+    else if(fog_mode == 4) fog = vec3(0.5);
 
-    vec3 fog;
-
-    // see https://wowdev.wiki/M2/Rendering#Fog_Modes
-    if(fog_mode == 1)
+    vec3 fogged = mix(color.rgb, fog, fogFactor);
+    if (mf_meta.x != 0 && fog_density_end_height.y > 0.0)
     {
-      fog = FogColor_FogOn.rgb;
+      float endT = clamp(camera_dist / fog_density_end_height.y, 0.0, 1.0);
+      fogged = mix(fogged, end_fog_color.rgb, endT * fogFactor);
     }
-    else if(fog_mode == 2)
+    for (int i = 0; i < mf_meta.y; ++i)
     {
-      fog = vec3(0.);
+      float d = distance(vfog_pos_radius[i].xyz, world_pos);
+      float r = max(vfog_pos_radius[i].w, 1.0);
+      float vf = clamp(1.0 - d / r, 0.0, 1.0) * vfog_color_intensity[i].w;
+      fogged = mix(fogged, vfog_color_intensity[i].rgb, vf * fogFactor);
     }
-    else if(fog_mode == 3)
-    {
-      fog = vec3(1.);
-    }
-    else if(fog_mode == 4)
-    {
-      fog = vec3(0.5);
-    }
-
-    color.rgb = mix(color.rgb, FogColor_FogOn.rgb, fogFactor);
+    color.rgb = fogged;
   }
 
   out_color = color;

@@ -18,7 +18,24 @@ namespace OpenGL
     TERRAIN_OVERLAYS,
     CHUNK_INSTANCE_DATA,
     CHUNK_LIQUID_INSTANCE_INDEX,
-    POINT_LIGHTS
+    POINT_LIGHTS,
+    MODERN_FOG
+  };
+
+  static constexpr int kMaxGpuVolumetricFogs = 8;
+
+  struct ModernFogUniformBlock
+  {
+    //! meta.x: modern fog enabled, meta.y: active VFOG count for shader loop
+    glm::ivec4 meta = { 0, 0, 0, 0 };
+    //! x: FogDensity (exponent), y: EndFogColorDistance, z: FogHeight, w: FogHeightScaler
+    glm::vec4 fog_density_end_height = {};
+    glm::vec4 end_fog_color = {};
+    glm::vec4 fog_height_color_density = {};
+    glm::vec4 height_coeff_01 = {};
+    glm::vec4 height_coeff_23 = {};
+    glm::vec4 vfog_pos_radius[kMaxGpuVolumetricFogs] = {};
+    glm::vec4 vfog_color_intensity[kMaxGpuVolumetricFogs] = {};
   };
 
   struct MVPUniformBlock

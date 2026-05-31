@@ -80,6 +80,8 @@ enum class editing_mode
   chunk = 13,
   area_trigger = 14,
   point_light = 15,
+  terrain_unified = 16,
+  sound_emitter = 17,
 };
 
 enum water_opacity
@@ -95,6 +97,15 @@ enum class CursorType
   NONE = 0,
   CIRCLE = 1,
   STAMP = 2
+};
+
+enum class BrushCursorStyle : int
+{
+  TerrainWrap = 0,
+  FlatCircle,
+  Sphere,
+  NoOutline,
+  DottedOutline,
 };
 
 enum display_mode

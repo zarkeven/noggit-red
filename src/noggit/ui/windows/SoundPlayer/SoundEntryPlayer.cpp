@@ -1,5 +1,6 @@
 #include "SoundEntryPlayer.h"
 
+#include <noggit/audio/SoundFileLoader.hpp>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/DBC.h>
 #include <noggit/Log.h>
@@ -179,9 +180,9 @@ namespace Noggit
             auto item = _files_listview->selectedItems().back();
             filename << _directory_lbl->text().toStdString() << "\\" << item->text().toStdString();
 
-            if (!Noggit::Application::NoggitApplication::instance()->clientData()->exists(filename.str()))
+            auto temp_opt = Noggit::Audio::extractSoundToTempFile(filename.str());
+            if (!temp_opt)
             {
-                LogError << "The requested sound file \"" << filename.str() << "\" does not exist! Oo" << std::endl;
                 QMessageBox not_found_messagebox;
                 not_found_messagebox.setIcon(QMessageBox::Warning);
                 not_found_messagebox.setWindowIcon(QIcon(":/icon"));
@@ -193,22 +194,10 @@ namespace Noggit
                 return;
             }
 
-            BlizzardArchive::ClientFile file(filename.str(), Noggit::Application::NoggitApplication::instance()->clientData());
+            auto* temp_file = *temp_opt;
+            temp_file->setParent(this);
 
-            auto temp_file = new QTemporaryFile(this); // must parent for the object to be destroyed properly(and file deleted)
-
-            temp_file->open();
-            temp_file->write(file.getBuffer(), file.getSize());
-            temp_file->close();
-            // default tempname is like User\AppData\Local\Temp\Noggit.qrRfsy ...We need to add back the file extension or it won't be read by the player!
-            // must rename after closing or it doesn't write correctly
-            temp_file->rename(temp_file->fileName() + item->text());
-            // file.save(); // saves file to project folder
-            // auto save_path = file.getPath().string();
-
-            auto testlol = temp_file->fileName().toStdString();
-
-            _media_player->setMedia(QUrl::fromLocalFile(temp_file->fileName())); // QUrl::fromLocalFile("/Users/me/Music/coolsong.mp3")
+            _media_player->setMedia(QUrl::fromLocalFile(temp_file->fileName()));
             _media_player->play();
         }
 

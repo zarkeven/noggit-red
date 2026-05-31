@@ -2,10 +2,12 @@
 #include <ClientFile.hpp>
 #include <external/tracy/Tracy.hpp>
 #include <math/frustum.hpp>
+#include <math/ray.hpp>
 #include <noggit/Action.hpp>
 #include <noggit/ActionManager.hpp>
 #include <noggit/Alphamap.hpp>
 #include <noggit/Brush.h>
+#include <noggit/BrushFalloffCurve.hpp>
 #include <noggit/ChunkWater.hpp>
 #include <noggit/Log.h>
 #include <noggit/MapChunk.h>
@@ -25,6 +27,61 @@
 #include <limits>
 #include <map>
 #include <QImage>
+
+namespace
+{
+  constexpr std::array<std::uint16_t, 768> mapchunk_triangle_indices =
+  {
+    9, 0, 17, 9, 17, 18, 9, 18, 1, 9, 1, 0, 26, 17, 34, 26,
+    34, 35, 26, 35, 18, 26, 18, 17, 43, 34, 51, 43, 51, 52, 43, 52,
+    35, 43, 35, 34, 60, 51, 68, 60, 68, 69, 60, 69, 52, 60, 52, 51,
+    77, 68, 85, 77, 85, 86, 77, 86, 69, 77, 69, 68, 94, 85, 102, 94,
+    102, 103, 94, 103, 86, 94, 86, 85, 111, 102, 119, 111, 119, 120, 111, 120,
+    103, 111, 103, 102, 128, 119, 136, 128, 136, 137, 128, 137, 120, 128, 120, 119,
+    10, 1, 18, 10, 18, 19, 10, 19, 2, 10, 2, 1, 27, 18, 35, 27,
+    35, 36, 27, 36, 19, 27, 19, 18, 44, 35, 52, 44, 52, 53, 44, 53,
+    36, 44, 36, 35, 61, 52, 69, 61, 69, 70, 61, 70, 53, 61, 53, 52,
+    78, 69, 86, 78, 86, 87, 78, 87, 70, 78, 70, 69, 95, 86, 103, 95,
+    103, 104, 95, 104, 87, 95, 87, 86, 112, 103, 120, 112, 120, 121, 112, 121,
+    104, 112, 104, 103, 129, 120, 137, 129, 137, 138, 129, 138, 121, 129, 121, 120,
+    11, 2, 19, 11, 19, 20, 11, 20, 3, 11, 3, 2, 28, 19, 36, 28,
+    36, 37, 28, 37, 20, 28, 20, 19, 45, 36, 53, 45, 53, 54, 45, 54,
+    37, 45, 37, 36, 62, 53, 70, 62, 70, 71, 62, 71, 54, 62, 54, 53,
+    79, 70, 87, 79, 87, 88, 79, 88, 71, 79, 71, 70, 96, 87, 104, 96,
+    104, 105, 96, 105, 88, 96, 88, 87, 113, 104, 121, 113, 121, 122, 113, 122,
+    105, 113, 105, 104, 130, 121, 138, 130, 138, 139, 130, 139, 122, 130, 122, 121,
+    12, 3, 20, 12, 20, 21, 12, 21, 4, 12, 4, 3, 29, 20, 37, 29,
+    37, 38, 29, 38, 21, 29, 21, 20, 46, 37, 54, 46, 54, 55, 46, 55,
+    38, 46, 38, 37, 63, 54, 71, 63, 71, 72, 63, 72, 55, 63, 55, 54,
+    80, 71, 88, 80, 88, 89, 80, 89, 72, 80, 72, 71, 97, 88, 105, 97,
+    105, 106, 97, 106, 89, 97, 89, 88, 114, 105, 122, 114, 122, 123, 114, 123,
+    106, 114, 106, 105, 131, 122, 139, 131, 139, 140, 131, 140, 123, 131, 123, 122,
+    13, 4, 21, 13, 21, 22, 13, 22, 5, 13, 5, 4, 30, 21, 38, 30,
+    38, 39, 30, 39, 22, 30, 22, 21, 47, 38, 55, 47, 55, 56, 47, 56,
+    39, 47, 39, 38, 64, 55, 72, 64, 72, 73, 64, 73, 56, 64, 56, 55,
+    81, 72, 89, 81, 89, 90, 81, 90, 73, 81, 73, 72, 98, 89, 106, 98,
+    106, 107, 98, 107, 90, 98, 90, 89, 115, 106, 123, 115, 123, 124, 115, 124,
+    107, 115, 107, 106, 132, 123, 140, 132, 140, 141, 132, 141, 124, 132, 124, 123,
+    14, 5, 22, 14, 22, 23, 14, 23, 6, 14, 6, 5, 31, 22, 39, 31,
+    39, 40, 31, 40, 23, 31, 23, 22, 48, 39, 56, 48, 56, 57, 48, 57,
+    40, 48, 40, 39, 65, 56, 73, 65, 73, 74, 65, 74, 57, 65, 57, 56,
+    82, 73, 90, 82, 90, 91, 82, 91, 74, 82, 74, 73, 99, 90, 107, 99,
+    107, 108, 99, 108, 91, 99, 91, 90, 116, 107, 124, 116, 124, 125, 116, 125,
+    108, 116, 108, 107, 133, 124, 141, 133, 141, 142, 133, 142, 125, 133, 125, 124,
+    15, 6, 23, 15, 23, 24, 15, 24, 7, 15, 7, 6, 32, 23, 40, 32,
+    40, 41, 32, 41, 24, 32, 24, 23, 49, 40, 57, 49, 57, 58, 49, 58,
+    41, 49, 41, 40, 66, 57, 74, 66, 74, 75, 66, 75, 58, 66, 58, 57,
+    83, 74, 91, 83, 91, 92, 83, 92, 75, 83, 75, 74, 100, 91, 108, 100,
+    108, 109, 100, 109, 92, 100, 92, 91, 117, 108, 125, 117, 125, 126, 117, 126,
+    109, 117, 109, 108, 134, 125, 142, 134, 142, 143, 134, 143, 126, 134, 126, 125,
+    16, 7, 24, 16, 24, 25, 16, 25, 8, 16, 8, 7, 33, 24, 41, 33,
+    41, 42, 33, 42, 25, 33, 25, 24, 50, 41, 58, 50, 58, 59, 50, 59,
+    42, 50, 42, 41, 67, 58, 75, 67, 75, 76, 67, 76, 59, 67, 59, 58,
+    84, 75, 92, 84, 92, 93, 84, 93, 76, 84, 76, 75, 101, 92, 109, 101,
+    109, 110, 101, 110, 93, 101, 93, 92, 118, 109, 126, 118, 126, 127, 118, 127,
+    110, 118, 110, 109, 135, 126, 143, 135, 143, 144, 135, 144, 127, 135, 127, 126
+  };
+}
 
 MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAlpha,tile_mode mode
                     , Noggit::NoggitRenderContext context, bool init_empty, int chunk_idx, bool load_textures)
@@ -424,6 +481,43 @@ void MapChunk::getVertexInternal(float x, float z, glm::vec3* v)
   *v = mVertices[17 * (row / 2) + ((row % 2) ? 9 : 0) + column];
 }
 
+bool MapChunk::sampleTerrainHeightAt(float world_x, float world_z, float& out_y) const
+{
+  if (world_x < vmin.x || world_x > vmax.x || world_z < vmin.z || world_z > vmax.z)
+  {
+    return false;
+  }
+
+  math::ray const ray(glm::vec3(world_x, vmax.y + 100.f, world_z), glm::vec3(0.f, -1.f, 0.f));
+
+  float best_t = std::numeric_limits<float>::max();
+  bool hit = false;
+
+  for (std::size_t i = 0; i < mapchunk_triangle_indices.size(); i += 3)
+  {
+    std::uint16_t const i0 = mapchunk_triangle_indices[i];
+    std::uint16_t const i1 = mapchunk_triangle_indices[i + 1];
+    std::uint16_t const i2 = mapchunk_triangle_indices[i + 2];
+
+    if (auto const t = ray.intersect_triangle(mVertices[i0], mVertices[i1], mVertices[i2]))
+    {
+      if (*t > 0.f && *t < best_t)
+      {
+        best_t = *t;
+        hit = true;
+      }
+    }
+  }
+
+  if (!hit)
+  {
+    return false;
+  }
+
+  out_y = ray.position(best_t).y;
+  return true;
+}
+
 float MapChunk::getHeight(int x, int z)
 {
   if (x > 9 || z > 9 || x < 0 || z < 0) return 0.0f;
@@ -564,57 +658,7 @@ bool MapChunk::intersect (math::ray const& ray, selection_result* results, bool 
     return false;
   }
 
-  static constexpr std::array<std::uint16_t, 768> indices =
-  {
-    9, 0, 17, 9, 17, 18, 9, 18, 1, 9, 1, 0, 26, 17, 34, 26,
-    34, 35, 26, 35, 18, 26, 18, 17, 43, 34, 51, 43, 51, 52, 43, 52,
-    35, 43, 35, 34, 60, 51, 68, 60, 68, 69, 60, 69, 52, 60, 52, 51,
-    77, 68, 85, 77, 85, 86, 77, 86, 69, 77, 69, 68, 94, 85, 102, 94,
-    102, 103, 94, 103, 86, 94, 86, 85, 111, 102, 119, 111, 119, 120, 111, 120,
-    103, 111, 103, 102, 128, 119, 136, 128, 136, 137, 128, 137, 120, 128, 120, 119,
-    10, 1, 18, 10, 18, 19, 10, 19, 2, 10, 2, 1, 27, 18, 35, 27,
-    35, 36, 27, 36, 19, 27, 19, 18, 44, 35, 52, 44, 52, 53, 44, 53,
-    36, 44, 36, 35, 61, 52, 69, 61, 69, 70, 61, 70, 53, 61, 53, 52,
-    78, 69, 86, 78, 86, 87, 78, 87, 70, 78, 70, 69, 95, 86, 103, 95,
-    103, 104, 95, 104, 87, 95, 87, 86, 112, 103, 120, 112, 120, 121, 112, 121,
-    104, 112, 104, 103, 129, 120, 137, 129, 137, 138, 129, 138, 121, 129, 121, 120,
-    11, 2, 19, 11, 19, 20, 11, 20, 3, 11, 3, 2, 28, 19, 36, 28,
-    36, 37, 28, 37, 20, 28, 20, 19, 45, 36, 53, 45, 53, 54, 45, 54,
-    37, 45, 37, 36, 62, 53, 70, 62, 70, 71, 62, 71, 54, 62, 54, 53,
-    79, 70, 87, 79, 87, 88, 79, 88, 71, 79, 71, 70, 96, 87, 104, 96,
-    104, 105, 96, 105, 88, 96, 88, 87, 113, 104, 121, 113, 121, 122, 113, 122,
-    105, 113, 105, 104, 130, 121, 138, 130, 138, 139, 130, 139, 122, 130, 122, 121,
-    12, 3, 20, 12, 20, 21, 12, 21, 4, 12, 4, 3, 29, 20, 37, 29,
-    37, 38, 29, 38, 21, 29, 21, 20, 46, 37, 54, 46, 54, 55, 46, 55,
-    38, 46, 38, 37, 63, 54, 71, 63, 71, 72, 63, 72, 55, 63, 55, 54,
-    80, 71, 88, 80, 88, 89, 80, 89, 72, 80, 72, 71, 97, 88, 105, 97,
-    105, 106, 97, 106, 89, 97, 89, 88, 114, 105, 122, 114, 122, 123, 114, 123,
-    106, 114, 106, 105, 131, 122, 139, 131, 139, 140, 131, 140, 123, 131, 123, 122,
-    13, 4, 21, 13, 21, 22, 13, 22, 5, 13, 5, 4, 30, 21, 38, 30,
-    38, 39, 30, 39, 22, 30, 22, 21, 47, 38, 55, 47, 55, 56, 47, 56,
-    39, 47, 39, 38, 64, 55, 72, 64, 72, 73, 64, 73, 56, 64, 56, 55,
-    81, 72, 89, 81, 89, 90, 81, 90, 73, 81, 73, 72, 98, 89, 106, 98,
-    106, 107, 98, 107, 90, 98, 90, 89, 115, 106, 123, 115, 123, 124, 115, 124,
-    107, 115, 107, 106, 132, 123, 140, 132, 140, 141, 132, 141, 124, 132, 124, 123,
-    14, 5, 22, 14, 22, 23, 14, 23, 6, 14, 6, 5, 31, 22, 39, 31,
-    39, 40, 31, 40, 23, 31, 23, 22, 48, 39, 56, 48, 56, 57, 48, 57,
-    40, 48, 40, 39, 65, 56, 73, 65, 73, 74, 65, 74, 57, 65, 57, 56,
-    82, 73, 90, 82, 90, 91, 82, 91, 74, 82, 74, 73, 99, 90, 107, 99,
-    107, 108, 99, 108, 91, 99, 91, 90, 116, 107, 124, 116, 124, 125, 116, 125,
-    108, 116, 108, 107, 133, 124, 141, 133, 141, 142, 133, 142, 125, 133, 125, 124,
-    15, 6, 23, 15, 23, 24, 15, 24, 7, 15, 7, 6, 32, 23, 40, 32,
-    40, 41, 32, 41, 24, 32, 24, 23, 49, 40, 57, 49, 57, 58, 49, 58,
-    41, 49, 41, 40, 66, 57, 74, 66, 74, 75, 66, 75, 58, 66, 58, 57,
-    83, 74, 91, 83, 91, 92, 83, 92, 75, 83, 75, 74, 100, 91, 108, 100,
-    108, 109, 100, 109, 92, 100, 92, 91, 117, 108, 125, 117, 125, 126, 117, 126,
-    109, 117, 109, 108, 134, 125, 142, 134, 142, 143, 134, 143, 126, 134, 126, 125,
-    16, 7, 24, 16, 24, 25, 16, 25, 8, 16, 8, 7, 33, 24, 41, 33,
-    41, 42, 33, 42, 25, 33, 25, 24, 50, 41, 58, 50, 58, 59, 50, 59,
-    42, 50, 42, 41, 67, 58, 75, 67, 75, 76, 67, 76, 59, 67, 59, 58,
-    84, 75, 92, 84, 92, 93, 84, 93, 76, 84, 76, 75, 101, 92, 109, 101,
-    109, 110, 101, 110, 93, 101, 93, 92, 118, 109, 126, 118, 126, 127, 118, 127,
-    110, 118, 110, 109, 135, 126, 143, 135, 143, 144, 135, 144, 127, 135, 127, 126
-  };
+  static constexpr std::array<std::uint16_t, 768> indices = mapchunk_triangle_indices;
 
   bool intersection_found = false;
   for (int i (0); i < indices.size(); i += 3)
@@ -862,7 +906,8 @@ void MapChunk::updateNormalsData()
   //gl.texSubImage2D(GL_TEXTURE_2D, 0, 0, px * 16 + py, mapbufsize, 1, GL_RGB, GL_FLOAT, mNormals);
 }
 
-bool MapChunk::changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius)
+bool MapChunk::changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius,
+                             Noggit::BrushFalloffCurve const* radial_falloff)
 {
   //float dist, xdiff, zdiff;
   bool changed = false;
@@ -870,7 +915,7 @@ bool MapChunk::changeTerrain(glm::vec3 const& pos, float change, float radius, i
   for (int i = 0; i < mapbufsize; ++i)
   {
     float dt = change;
-    if (changeTerrainProcessVertex(pos, mVertices[i], dt, radius, inner_radius, BrushType))
+    if (changeTerrainProcessVertex(pos, mVertices[i], dt, radius, inner_radius, BrushType, radial_falloff))
     {
       changed = true;
       mVertices[i].y += dt;
@@ -1125,6 +1170,7 @@ bool MapChunk::flattenTerrain ( glm::vec3 const& pos
                               , glm::vec3 const& origin
                               , math::degrees angle
                               , math::degrees orientation
+                              , Noggit::BrushFalloffCurve const* radial_falloff
                               )
 {
   if (BrushType == eFlattenType_Smooth_Inner)
@@ -1142,6 +1188,11 @@ bool MapChunk::flattenTerrain ( glm::vec3 const& pos
 	  {
 		  continue;
 	  }
+
+    float const curve_mul = (radial_falloff && radial_falloff->enabled())
+      ? radial_falloff->sample(std::clamp(dist / radius, 0.f, 1.f))
+      : 1.f;
+    float const eff_remain = remain * curve_mul;
 
 	  float const ah(origin.y
 		  + ((mVertices[i].x - origin.x) * glm::cos(math::radians(orientation)._)
@@ -1172,7 +1223,7 @@ bool MapChunk::flattenTerrain ( glm::vec3 const& pos
       float const u = std::clamp((t - plateau) / (1.f - plateau), 0.f, 1.f);
       float const smooth = u * u * (3.f - 2.f * u);
       float const falloff = 1.f - smooth;
-      mVertices[i].y = glm::mix(mVertices[i].y, ah, remain * falloff);
+      mVertices[i].y = glm::mix(mVertices[i].y, ah, eff_remain * falloff);
       changed = true;
       continue;
     }
@@ -1181,9 +1232,9 @@ bool MapChunk::flattenTerrain ( glm::vec3 const& pos
       ( 
         mVertices[i].y
       , ah
-      , BrushType == eFlattenType_Flat ? remain
-      : BrushType == eFlattenType_Linear ? remain * (1.f - dist / radius)
-      : BrushType == eFlattenType_Smooth ? pow (remain, 1.f + dist / radius)
+      , BrushType == eFlattenType_Flat ? eff_remain
+      : BrushType == eFlattenType_Linear ? eff_remain * (1.f - dist / radius)
+      : BrushType == eFlattenType_Smooth ? pow (eff_remain, 1.f + dist / radius)
       : throw std::logic_error ("bad brush type")
 
       );
@@ -1207,6 +1258,7 @@ bool MapChunk::flattenTerrainFast ( glm::vec3 const& pos
                                   , glm::vec3 const& origin
                                   , math::degrees angle
                                   , math::degrees orientation
+                                  , Noggit::BrushFalloffCurve const* radial_falloff
                                   )
 {
   if (BrushType == eFlattenType_Smooth_Inner)
@@ -1235,6 +1287,11 @@ bool MapChunk::flattenTerrainFast ( glm::vec3 const& pos
 
     float const dist = std::sqrt(dist_sq);
 
+    float const curve_mul = (radial_falloff && radial_falloff->enabled())
+      ? radial_falloff->sample(std::clamp(dist * inv_radius, 0.f, 1.f))
+      : 1.f;
+    float const eff_remain = remain * curve_mul;
+
     float const ah(origin.y
         + ((vtx.x - origin.x) * cos_ori + (vtx.z - origin.z) * sin_ori) * tan_ang
     );
@@ -1260,15 +1317,15 @@ bool MapChunk::flattenTerrainFast ( glm::vec3 const& pos
       float const u = std::clamp((t - plateau) / (1.f - plateau), 0.f, 1.f);
       float const smooth = u * u * (3.f - 2.f * u);
       float const falloff = 1.f - smooth;
-      float const w = std::min(1.f, remain * falloff * k_fast_flatten_mix);
+      float const w = std::min(1.f, eff_remain * falloff * k_fast_flatten_mix);
       mVertices[i].y = glm::mix(mVertices[i].y, ah, w);
       changed = true;
       continue;
     }
 
-    float t = BrushType == eFlattenType_Flat ? remain
-            : BrushType == eFlattenType_Linear ? remain * (1.f - dist * inv_radius)
-            : BrushType == eFlattenType_Smooth ? pow (remain, 1.f + dist * inv_radius)
+    float t = BrushType == eFlattenType_Flat ? eff_remain
+            : BrushType == eFlattenType_Linear ? eff_remain * (1.f - dist * inv_radius)
+            : BrushType == eFlattenType_Smooth ? pow (eff_remain, 1.f + dist * inv_radius)
             : throw std::logic_error ("bad brush type");
 
     t = std::min(1.f, t * k_fast_flatten_mix);
@@ -1377,6 +1434,7 @@ bool MapChunk::blurTerrain ( glm::vec3 const& pos
                            , int BrushType
                            , flatten_mode const& mode
                            /*, std::function<std::optional<float>(float, float)> height*/
+                           , Noggit::BrushFalloffCurve const* radial_falloff
                            )
 {
   bool changed = false;
@@ -1400,6 +1458,11 @@ bool MapChunk::blurTerrain ( glm::vec3 const& pos
     {
       continue;
     }
+
+    float const curve_mul = (radial_falloff && radial_falloff->enabled())
+      ? radial_falloff->sample(std::clamp(dist / radius, 0.f, 1.f))
+      : 1.f;
+    float const eff_remain = remain * curve_mul;
 
     int Rad = (int)(radius / UNITSIZE);
     float TotalHeight = 0;
@@ -1446,9 +1509,9 @@ bool MapChunk::blurTerrain ( glm::vec3 const& pos
       ( 
         y,
         target,
-        BrushType == eFlattenType_Flat ? remain
-      : BrushType == eFlattenType_Linear ? remain * (1.f - dist / radius)
-      : BrushType == eFlattenType_Smooth ? pow (remain, 1.f + dist / radius)
+        BrushType == eFlattenType_Flat ? eff_remain
+      : BrushType == eFlattenType_Linear ? eff_remain * (1.f - dist / radius)
+      : BrushType == eFlattenType_Smooth ? pow (eff_remain, 1.f + dist / radius)
       : throw std::logic_error ("bad brush type")
       );
 
@@ -1463,7 +1526,8 @@ bool MapChunk::blurTerrain ( glm::vec3 const& pos
   return changed;
 }
 
-bool MapChunk::blurTerrainFast (glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode)
+bool MapChunk::blurTerrainFast (glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode,
+                                Noggit::BrushFalloffCurve const* radial_falloff)
 {
   bool changed = false;
 
@@ -1493,6 +1557,11 @@ bool MapChunk::blurTerrainFast (glm::vec3 const& pos, float remain, float radius
 
     float const dist = std::sqrt(dist_sq);
 
+    float const curve_mul = (radial_falloff && radial_falloff->enabled())
+      ? radial_falloff->sample(std::clamp(dist * inv_radius, 0.f, 1.f))
+      : 1.f;
+    float const eff_remain = remain * curve_mul;
+
     float sum_y = 0.f;
     for (unsigned dir = 0; dir < 4; ++dir)
       sum_y += getNeighborVertex(i, dir).y;
@@ -1502,9 +1571,9 @@ bool MapChunk::blurTerrainFast (glm::vec3 const& pos, float remain, float radius
     if ((target > y && !mode.raise) || (target < y && !mode.lower))
       continue;
 
-    float t = BrushType == eFlattenType_Flat ? remain
-            : BrushType == eFlattenType_Linear ? remain * (1.f - dist * inv_radius)
-            : BrushType == eFlattenType_Smooth ? pow (remain, 1.f + dist * inv_radius)
+    float t = BrushType == eFlattenType_Flat ? eff_remain
+            : BrushType == eFlattenType_Linear ? eff_remain * (1.f - dist * inv_radius)
+            : BrushType == eFlattenType_Smooth ? pow (eff_remain, 1.f + dist * inv_radius)
             : throw std::logic_error ("bad brush type");
 
     t = std::min(1.f, t * k_fast_mix_scale);
@@ -1573,9 +1642,11 @@ bool MapChunk::smooth_inner_vertices(glm::vec3 const& pos, float remain, float r
 }
 
 bool MapChunk::changeTerrainProcessVertex(glm::vec3 const& pos, glm::vec3 const& vertex, float& dt,
-                                          float radiusOuter, float radiusInner, int brushType)
+                                          float radiusOuter, float radiusInner, int brushType,
+                                          Noggit::BrushFalloffCurve const* radial_falloff)
 {
-  float dist, xdiff, zdiff;
+  float dist = 0.f;
+  float xdiff, zdiff;
   bool changed = false;
 
   xdiff = vertex.x - pos.x;
@@ -1623,6 +1694,12 @@ bool MapChunk::changeTerrainProcessVertex(glm::vec3 const& pos, glm::vec3 const&
           break;
       }
     }
+  }
+
+  if (changed && radial_falloff && radial_falloff->enabled() && radiusOuter > 1e-5f)
+  {
+    float const t = std::clamp(dist / radiusOuter, 0.f, 1.f);
+    dt *= radial_falloff->sample(t);
   }
 
   return changed;

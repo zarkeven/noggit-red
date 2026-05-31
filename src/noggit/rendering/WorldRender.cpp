@@ -1,6 +1,9 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
-#include "WorldRender.hpp"
+#include <noggit/rendering/WorldRender.hpp>
+#include <noggit/MapHeaders.h>
+#include <noggit/rendering/RealtimeGpuShadowMap.hpp>
+#include <noggit/rendering/RealtimeSunDirection.hpp>
 #include <noggit/errorHandling.h>
 #include <noggit/Log.h>
 #include <noggit/rendering/PointLightFlicker.hpp>
@@ -9,6 +12,7 @@
 #include <math/frustum.hpp>
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 #include <noggit/application/NoggitApplication.hpp>
+#include <noggit/ModernLightTables.hpp>
 #include <noggit/DBC.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapTile.h>
@@ -17,7 +21,9 @@
 #include <noggit/Misc.h>
 #include <noggit/Model.h>
 #include <noggit/ModelInstance.h>
+#include <noggit/ModelManager.h>
 #include <noggit/project/CurrentProject.hpp>
+#include <noggit/WMOInstance.h>
 #include <noggit/World.h>
 #include <noggit/ui/tools/ChunkManipulator/ChunkClipboard.hpp>
 
@@ -50,6 +56,7 @@
 #include <array>
 #include <cmath>
 #include <chrono>
+#include <limits>
 #include <vector>
 
 #include <glm/gtc/constants.hpp>
@@ -71,6 +78,117 @@ namespace
   };
 
   static constexpr std::size_t kMaxTexLayerBillboardInstances = 24576u;
+
+  struct saved_shadow_pass_gl_state
+  {
+    GLint viewport[4] {};
+    GLboolean color_mask[4] {};
+    GLboolean cull_face_enabled = GL_FALSE;
+    GLboolean polygon_offset_fill_enabled = GL_FALSE;
+    GLboolean depth_mask = GL_TRUE;
+    GLint depth_func = GL_LEQUAL;
+    GLint framebuffer = 0;
+
+    saved_shadow_pass_gl_state()
+    {
+      gl.getIntegerv (GL_VIEWPORT, viewport);
+      gl.getBooleanv (GL_COLOR_WRITEMASK, color_mask);
+      cull_face_enabled = gl.isEnabled (GL_CULL_FACE);
+      polygon_offset_fill_enabled = gl.isEnabled (GL_POLYGON_OFFSET_FILL);
+      gl.getBooleanv (GL_DEPTH_WRITEMASK, &depth_mask);
+      gl.getIntegerv (GL_DEPTH_FUNC, &depth_func);
+      gl.getIntegerv (GL_FRAMEBUFFER_BINDING, &framebuffer);
+    }
+
+    ~saved_shadow_pass_gl_state()
+    {
+      gl.bindFramebuffer (GL_FRAMEBUFFER, static_cast<GLuint> (framebuffer));
+      gl.viewport (viewport[0], viewport[1], viewport[2], viewport[3]);
+      gl.colorMask (color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
+      gl.depthMask (depth_mask);
+
+      if (cull_face_enabled)
+      {
+        gl.enable (GL_CULL_FACE);
+      }
+      else
+      {
+        gl.disable (GL_CULL_FACE);
+      }
+
+      if (polygon_offset_fill_enabled)
+      {
+        gl.enable (GL_POLYGON_OFFSET_FILL);
+      }
+      else
+      {
+        gl.disable (GL_POLYGON_OFFSET_FILL);
+      }
+
+      gl.depthFunc (depth_func);
+      gl.activeTexture (GL_TEXTURE0);
+    }
+
+    saved_shadow_pass_gl_state (saved_shadow_pass_gl_state const&) = delete;
+    saved_shadow_pass_gl_state& operator= (saved_shadow_pass_gl_state const&) = delete;
+  };
+
+  static void restore_main_render_gl_state()
+  {
+    gl.bindFramebuffer (GL_FRAMEBUFFER, 0);
+    gl.disable (GL_CULL_FACE);
+    gl.disable (GL_POLYGON_OFFSET_FILL);
+    gl.depthFunc (GL_LEQUAL);
+    gl.colorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    gl.depthMask (GL_TRUE);
+    gl.activeTexture (GL_TEXTURE0);
+  }
+
+  static bool can_draw_gpu_sun_shadows (WorldRenderParams const& render_settings)
+  {
+    if (render_settings.minimap_render)
+    {
+      return false;
+    }
+
+    if (render_settings.display_mode != display_mode::in_3D)
+    {
+      return false;
+    }
+
+    return render_settings.draw_models || render_settings.draw_wmo;
+  }
+
+  static void bind_gpu_sun_shadow ( OpenGL::Scoped::use_program& shader
+                                 , WorldRenderParams const& render_settings
+                                 , Noggit::Rendering::RealtimeGpuShadowMap const& shadow_map
+                                 )
+  {
+    constexpr int k_shadow_tex_unit = 17;
+
+    shader.uniform("realtime_shadows_enabled", 0);
+    shader.uniform("shadow_darkness", 1.f);
+    shader.uniform("sun_shadow_matrix", glm::mat4(1.f));
+    shader.uniform("sun_shadow_light_dir", glm::vec3(0.f, -1.f, 0.f));
+    shader.uniform("sun_shadow_depth", k_shadow_tex_unit);
+
+    gl.activeTexture(GL_TEXTURE0 + k_shadow_tex_unit);
+    gl.bindTexture(GL_TEXTURE_2D, 0);
+    gl.activeTexture(GL_TEXTURE0);
+
+    if (!render_settings.draw_realtime_shadows || !shadow_map.ready())
+    {
+      return;
+    }
+
+    shader.uniform("realtime_shadows_enabled", 1);
+    shader.uniform("shadow_darkness", 0.55f);
+    shader.uniform("sun_shadow_matrix", shadow_map.matrices().view_proj_bias);
+    shader.uniform("sun_shadow_light_dir", shadow_map.light_travel_direction());
+    gl.activeTexture(GL_TEXTURE0 + k_shadow_tex_unit);
+    gl.bindTexture(GL_TEXTURE_2D, shadow_map.depth_texture());
+    gl.activeTexture(GL_TEXTURE0);
+  }
 
   static glm::vec4 tex_layer_digit_color(int n)
   {
@@ -248,6 +366,19 @@ namespace
 
 using namespace Noggit::Rendering;
 
+namespace
+{
+  //! Shader fog still uses Skies::fog_distance_end(); this only relaxes ADT/M2/WMO culling when fog is on.
+  float draw_cull_distance_with_fog(float view_distance, Skies const& skies)
+  {
+    float const fog_end = skies.fog_distance_end();
+    constexpr float kFogCullLift = 1.2f;
+    constexpr float kMinViewFractionWhenFog = 0.88f;
+    return std::max(fog_end * kFogCullLift, view_distance * kMinViewFractionWhenFog);
+  }
+
+}
+
 WorldRender::WorldRender(World* world)
 : BaseRender()
 , _world(world)
@@ -279,6 +410,11 @@ void WorldRender::upload()
   _buffers.upload();
   _vertex_arrays.upload();
 
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _mvp_ubo);
+  gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::MVPUniformBlock), NULL, GL_DYNAMIC_DRAW);
+  gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::MVP, _mvp_ubo, 0, sizeof(OpenGL::MVPUniformBlock));
+  gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
+
   gl.bindBuffer(GL_UNIFORM_BUFFER, _lighting_ubo);
   gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::LightingUniformBlock), NULL, GL_DYNAMIC_DRAW);
   gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::LIGHTING, _lighting_ubo, 0, sizeof(OpenGL::LightingUniformBlock));
@@ -287,6 +423,11 @@ void WorldRender::upload()
   gl.bindBuffer(GL_UNIFORM_BUFFER, _point_lights_ubo);
   gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::PointLightsUniformBlock), NULL, GL_DYNAMIC_DRAW);
   gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::POINT_LIGHTS, _point_lights_ubo, 0, sizeof(OpenGL::PointLightsUniformBlock));
+  gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _modern_fog_ubo);
+  gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::ModernFogUniformBlock), NULL, GL_DYNAMIC_DRAW);
+  gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::MODERN_FOG, _modern_fog_ubo, 0, sizeof(OpenGL::ModernFogUniformBlock));
   gl.bindBuffer(GL_UNIFORM_BUFFER, 0);
 
   _mcnk_program.reset(
@@ -305,6 +446,7 @@ void WorldRender::upload()
     mcnk_shader.bind_uniform_block("overlay_params", 2);
     mcnk_shader.bind_uniform_block("chunk_instances", 3);
     mcnk_shader.bind_uniform_block("point_lights", 5);
+    mcnk_shader.bind_uniform_block("modern_fog", 6);
 
     gl.bindBuffer(GL_UNIFORM_BUFFER, _terrain_params_ubo);
     gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::TerrainParamsUniformBlock), NULL, GL_STATIC_DRAW);
@@ -405,6 +547,7 @@ void WorldRender::upload()
     m2_shader.uniform("terrain_uv_mask", 0);
     m2_shader.bind_uniform_block("lighting", 1);
     m2_shader.bind_uniform_block("point_lights", 5);
+    m2_shader.bind_uniform_block("modern_fog", 6);
   }
 
   {
@@ -414,12 +557,14 @@ void WorldRender::upload()
     wmo_program.uniform("texture_samplers", samplers);
     wmo_program.bind_uniform_block("lighting", 1);
     wmo_program.bind_uniform_block("point_lights", 5);
+    wmo_program.bind_uniform_block("modern_fog", 6);
   }
 
   {
     OpenGL::Scoped::use_program m2_shader_instanced {*_m2_instanced_program.get()};
     m2_shader_instanced.bind_uniform_block("lighting", 1);
     m2_shader_instanced.bind_uniform_block("point_lights", 5);
+    m2_shader_instanced.bind_uniform_block("modern_fog", 6);
     m2_shader_instanced.uniform("bone_matrices", 0);
     m2_shader_instanced.uniform("tex1", 1);
     m2_shader_instanced.uniform("tex2", 2);
@@ -434,6 +579,7 @@ void WorldRender::upload()
 
     static std::vector<int> liquid_samplers {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 
+    liquid_render.bind_uniform_block("matrices", 0);
     liquid_render.bind_uniform_block("lighting", 1);
     liquid_render.bind_uniform_block("liquid_layers_params", 4);
     liquid_render.uniform("vertex_data", 0);
@@ -442,6 +588,154 @@ void WorldRender::upload()
 
   setupMccvVizBuffers();
   setupTextureLayerBillboardResources();
+  setupSoundEmitterBillboardResources();
+
+  _sun_shadow_m2_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("m2_vs", {"instanced"}) },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("m2_fs", {"M2_SHADOW_DEPTH_PASS"}) },
+    });
+
+  _sun_shadow_wmo_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("wmo_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("sun_shadow_wmo_depth_fs") },
+    });
+
+  {
+    OpenGL::Scoped::use_program m2_shadow_shader { *_sun_shadow_m2_program.get() };
+    m2_shadow_shader.uniform("bone_matrices", 0);
+    m2_shadow_shader.uniform("tex1", 1);
+    m2_shadow_shader.uniform("tex2", 2);
+    m2_shadow_shader.uniform("terrain_uv_mask", 0);
+  }
+
+  {
+    std::vector<int> samplers {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    OpenGL::Scoped::use_program wmo_shadow_shader { *_sun_shadow_wmo_program.get() };
+    wmo_shadow_shader.uniform("texture_samplers", samplers);
+  }
+}
+
+void WorldRender::invalidateRealtimeShadows()
+{
+  _gpu_sun_shadow.invalidate();
+}
+
+void WorldRender::drawSunShadowDepthPass ( glm::vec3 const& camera_pos
+                                         , glm::vec3 const& sun_dir
+                                         , float shadow_distance
+                                         , math::frustum const& frustum
+                                         , WorldRenderParams const& render_settings
+                                         , tsl::robin_map<Model*, std::vector<glm::mat4x4>> const& models_to_draw
+                                         , std::vector<WMOInstance*> const& wmos_to_draw
+                                         )
+{
+  ZoneScopedN ("WorldRender::drawSunShadowDepthPass");
+
+  if (!can_draw_gpu_sun_shadows (render_settings))
+  {
+    return;
+  }
+
+  saved_shadow_pass_gl_state gl_state_guard;
+  (void) gl_state_guard;
+
+  Noggit::Rendering::RealtimeGpuShadowMap::ScopedDepthPass const depth_pass { _gpu_sun_shadow };
+
+  glm::mat4x4 const& light_view = _gpu_sun_shadow.matrices().view;
+  glm::mat4x4 const& light_projection = _gpu_sun_shadow.matrices().projection;
+
+  if (render_settings.draw_wmo && _sun_shadow_wmo_program)
+  {
+    OpenGL::Scoped::use_program wmo_shader { *_sun_shadow_wmo_program.get() };
+    wmo_shader.uniform ("model_view", light_view);
+    wmo_shader.uniform ("projection", light_projection);
+
+    for (WMOInstance* instance : wmos_to_draw)
+    {
+      if (!instance)
+      {
+        continue;
+      }
+
+      instance->draw (
+        wmo_shader
+      , light_view
+      , light_projection
+      , frustum
+      , _cull_distance
+      , camera_pos
+      , false
+      , false
+      , false
+      , false
+      , _world->animtime
+      , false
+      , render_settings.display_mode
+      , false
+      , render_settings.draw_wmo_exterior
+      , false
+      , false
+      );
+    }
+  }
+
+  if (render_settings.draw_models && _sun_shadow_m2_program)
+  {
+    OpenGL::Scoped::use_program m2_shader { *_sun_shadow_m2_program.get() };
+    OpenGL::Scoped::bool_setter<GL_BLEND, GL_FALSE> const blend_off;
+    OpenGL::Scoped::depth_mask_setter<GL_TRUE> const depth_write_on;
+
+    OpenGL::M2RenderState model_render_state;
+    m2_shader.uniform ("model_view", light_view);
+    m2_shader.uniform ("projection", light_projection);
+    m2_shader.uniform ("anim_bones", render_settings.draw_model_animations ? 1 : 0);
+    m2_shader.uniform ("tex_unit_lookup_1", 0);
+    m2_shader.uniform ("tex_unit_lookup_2", 0);
+    m2_shader.uniform ("terrain_uv_mask", 0);
+
+    std::unordered_map<Model*, std::size_t> empty_boxes;
+
+    for (auto const& pair : models_to_draw)
+    {
+      Model* model = pair.first;
+      if (!model)
+      {
+        continue;
+      }
+
+      try
+      {
+        model->renderer()->draw (
+          light_view
+        , pair.second
+        , m2_shader
+        , model_render_state
+        , frustum
+        , _cull_distance
+        , camera_pos
+        , _world->animtime
+        , false
+        , empty_boxes
+        , render_settings.display_mode
+        , false
+        , true
+        , false
+        , false
+        , nullptr
+        , false
+        , true
+        );
+      }
+      catch (...)
+      {
+        continue;
+      }
+    }
+  }
+
+  restore_main_render_gl_state();
 }
 
 void WorldRender::draw (glm::mat4x4 const& model_view
@@ -472,6 +766,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     bool render_local_lightning = render_settings.editing_mode == editing_mode::light ? true : local_lightning;
     _skies->update_sky_colors(camera_pos, daytime, !render_local_lightning);
     updateLightingUniformBlock(render_settings.draw_fog, camera_pos);
+    updateModernFogUniformBlock(render_settings.draw_fog, camera_pos);
     updatePointLightsUniformBlock(render_settings.draw_point_lights, camera_pos);
   }
   else
@@ -682,10 +977,12 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     OpenGL::Scoped::use_program m2_shader {*_m2_program.get()};
     m2_shader.uniform("model_view", model_view);
     m2_shader.uniform("projection", projection);
+    bind_gpu_sun_shadow(m2_shader, render_settings, _gpu_sun_shadow);
+    m2_shader.uniform("realtime_shadows_enabled", 0);
 
     bool hadSky = false;
 
-    if (render_settings.draw_skybox && (render_settings.draw_wmo || _world->mapIndex.hasAGlobalWMO()))
+    if (render_settings.draw_wmo || _world->mapIndex.hasAGlobalWMO())
     {
       _world->_model_instance_storage.for_each_wmo_instance
           (
@@ -732,7 +1029,12 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
   }
 
-  _cull_distance= render_settings.draw_fog ? _skies->fog_distance_end() : _view_distance;
+  gl.enable(GL_BLEND);
+  gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+  _cull_distance = render_settings.draw_fog && _skies
+    ? draw_cull_distance_with_fog(_view_distance, *_skies)
+    : _view_distance;
 
   // Draw verylowres heightmap
   if (!_world->mapIndex.hasAGlobalWMO() && render_settings.draw_fog && render_settings.draw_terrain)
@@ -746,6 +1048,11 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       render_settings.display_mode);
   }
 
+  if (modern_features && render_settings.draw_fog && !render_settings.minimap_render)
+  {
+    drawVolumetricFogDebug(model_view, projection, camera_pos, _cull_distance);
+  }
+
   gl.enable(GL_DEPTH_TEST);
   gl.depthFunc(GL_LEQUAL); // less z-fighting artifacts this way, I think
   //gl.disable(GL_BLEND);
@@ -754,6 +1061,66 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
   _world->_n_rendered_tiles = 0;
   _world->_n_rendered_objects = 0;
+
+  tsl::robin_map<Model*, std::vector<glm::mat4x4>> models_to_draw;
+  std::vector<WMOInstance*> wmos_to_draw;
+  std::unordered_map<Model*, std::size_t> model_boxes_to_draw;
+
+  static int object_draw_frame = 0;
+  if (object_draw_frame == std::numeric_limits<int>::max())
+  {
+    object_draw_frame = 0;
+  }
+  else
+  {
+    ++object_draw_frame;
+  }
+
+  collectVisibleObjects (
+    object_draw_frame
+  , model_view
+  , camera_pos
+  , frustum
+  , render_settings
+  , minimap_render_settings
+  , models_to_draw
+  , wmos_to_draw
+  );
+
+  glm::vec3 const sun_dir = directional_lightning
+    ? wow_directional_light_toward_sun (glm::vec3 (
+        _lighting_ubo_data.LightDir_FogRate.x
+      , _lighting_ubo_data.LightDir_FogRate.y
+      , _lighting_ubo_data.LightDir_FogRate.z
+      ))
+    : editor_realtime_shadow_sun();
+
+  if (render_settings.draw_realtime_shadows && can_draw_gpu_sun_shadows (render_settings))
+  {
+    float const max_shadow_dist = std::min (
+      std::max (700.f, _view_distance * 0.5f)
+    , 1100.f
+    );
+    float const ortho_extent = std::min (std::max (max_shadow_dist * 0.35f, 240.f), 400.f);
+    _gpu_sun_shadow.prepare_frame (
+      camera_pos
+    , sun_dir
+    , ortho_extent
+    , max_shadow_dist * 1.15f
+    );
+
+    drawSunShadowDepthPass (
+      camera_pos
+    , sun_dir
+    , max_shadow_dist
+    , frustum
+    , render_settings
+    , models_to_draw
+    , wmos_to_draw
+    );
+
+    restore_main_render_gl_state();
+  }
 
   if (render_settings.draw_terrain && _mcnk_program)
   {
@@ -767,6 +1134,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       mcnk_shader.uniform("projection", projection);
 
       mcnk_shader.uniform("enable_mists_heightmapping", modern_features);
+      bind_gpu_sun_shadow(mcnk_shader, render_settings, _gpu_sun_shadow);
       mcnk_shader.uniform("albedo_only", 0);
       mcnk_shader.uniform("preview_pass", 0);
       mcnk_shader.uniform("preview_alpha", 1.0f);
@@ -775,12 +1143,35 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
       if (render_settings.cursor_type != CursorType::NONE)
       {
-        mcnk_shader.uniform("draw_cursor_circle", static_cast<int>(render_settings.cursor_type));
+        int draw_cursor_circle = 0;
+        if (render_settings.cursor_type == CursorType::STAMP)
+        {
+          draw_cursor_circle = 2;
+        }
+        else if (render_settings.cursor_type == CursorType::CIRCLE)
+        {
+          switch (render_settings.brush_cursor_style)
+          {
+            case BrushCursorStyle::TerrainWrap:
+              draw_cursor_circle = 1;
+              break;
+            case BrushCursorStyle::DottedOutline:
+              draw_cursor_circle = 3;
+              break;
+            default:
+              draw_cursor_circle = 0;
+              break;
+          }
+        }
+
+        mcnk_shader.uniform("draw_cursor_circle", draw_cursor_circle);
         mcnk_shader.uniform("cursor_position", glm::vec3(cursor_pos.x, cursor_pos.y, cursor_pos.z));
         mcnk_shader.uniform("cursorRotation", render_settings.cursorRotation);
         mcnk_shader.uniform("outer_cursor_radius", render_settings.brush_radius);
         mcnk_shader.uniform("inner_cursor_ratio", render_settings.inner_radius_ratio);
         mcnk_shader.uniform("cursor_color", cursor_color);
+        mcnk_shader.uniform("inner_cursor_color", render_settings.inner_cursor_outline_color);
+        mcnk_shader.uniform("outer_cursor_color", render_settings.outer_cursor_outline_color);
       }
       else
       {
@@ -801,11 +1192,16 @@ void WorldRender::draw (glm::mat4x4 const& model_view
           break;
         }
 
+        if (tile->loading_failed())
+        {
+          continue;
+        }
+
         if (render_settings.minimap_render)
           tile->renderer()->setOccluded(false);
 
-        if (tile->renderer()->isOccluded() && !tile->getChunkUpdateFlags() && !tile->renderer()->isOverridingOcclusionCulling())
-          continue;
+        // Terrain must not be skipped by tile occlusion queries. Culled tiles do not write depth, so
+        // GL_ANY_SAMPLES_PASSED stays 0 and the ADT can vanish until the camera enters its bounds.
 
         // skipping unfinished adts really improves performance so we don't have to reuplaod them every frame
         if (!tile->texturesFinishedLoading())
@@ -877,6 +1273,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     }
 
+    drawBrushCursorOverlay(mvp, cursor_pos, cursor_color, render_settings);
     drawMccvVertexAltViz(model_view, projection, mvp, camera_pos, cursor_color, render_settings);
     drawTextureLayerCountBillboards(model_view, projection, camera_pos, frustum, render_settings);
     drawRampPreview(mvp, render_settings);
@@ -1025,241 +1422,6 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
   std::unordered_map<Model*, std::size_t> model_with_particles;
 
-  tsl::robin_map<Model*, std::vector<glm::mat4x4>> models_to_draw;
-  std::vector<WMOInstance*> wmos_to_draw;
-  std::unordered_map<Model*, std::size_t> model_boxes_to_draw;
-
-  // frame counter loop. pretty hacky but works
-  // this is used to make sure no object is processed more than once within a frame
-  static int frame = 0;
-
-  if (frame == std::numeric_limits<int>::max())
-  {
-    frame = 0;
-  }
-  else
-  {
-    frame++;
-  }
-
-  for (auto const& pair : _world->_loaded_tiles_buffer)
-  {
-    MapTile* tile = pair.second;
-
-    if (!tile)
-    {
-      break;
-    }
-
-    if (render_settings.minimap_render)
-      tile->renderer()->setOccluded(false);
-
-    if (tile->renderer()->isOccluded() && !tile->getChunkUpdateFlags() && !tile->renderer()->isOverridingOcclusionCulling())
-      continue;
-
-    // early dist check
-    // TODO: optional
-    if (tile->camDist() > _cull_distance)
-      continue;
-
-
-    // TODO: subject to potential generalization
-    for (auto& pair : tile->getObjectInstances())
-    {
-      if (!pair.first->finishedLoading())
-        continue;
-
-      if (pair.second[0]->which() == eMODEL)
-      {
-        if (!render_settings.draw_models && !(render_settings.minimap_render && minimap_render_settings->use_filters))
-        {
-          // can optimize this with a tile.rendered_m2s_lastframe or just check if models are enabled
-          for (auto& instance : pair.second)
-          {
-            instance->_rendered_last_frame = false;
-          }
-          continue;
-        }
-
-        auto& instances = models_to_draw[reinterpret_cast<Model*>(pair.first)];
-
-        // memory allocation heuristic. all objects will pass if tile is entirely in frustum.
-        // otherwise we only allocate for a half
-
-        if (tile->renderer()->objectsFrustumCullTest() > 1)
-        {
-          instances.reserve(instances.size() + pair.second.size());
-        }
-        else
-        {
-          instances.reserve(instances.size() + pair.second.size() / 2);
-        }
-
-
-        for (auto& instance : pair.second)
-        {
-          instance->_rendered_last_frame = false;
-
-          // do not render twice the cross-referenced objects twice
-          if (instance->frame == frame)
-          {
-            instance->_rendered_last_frame = true;
-            continue;
-          }
-
-          auto m2_instance = static_cast<ModelInstance*>(instance);
-
-          if (!render_settings.draw_hidden_models && m2_instance->model->is_hidden())
-            continue;
-
-          instance->frame = frame;
-
-          bool render = false;
-          // experimental : if camera and object haven't moved/changed since last frame, we don't need to do frustum culling again
-          if (!render_settings.camera_moved && !m2_instance->extentsDirty()/* && not_moved*/)
-          {
-            if (m2_instance->_rendered_last_frame)
-            {
-              render = true; // skip frustum check
-            }
-          }
-          if (!render && m2_instance->isInRenderDist(_cull_distance, camera_pos, render_settings.display_mode)
-            && (tile->renderer()->objectsFrustumCullTest() > 1 || m2_instance->isInFrustum(frustum)))
-          {
-            render = true;
-          }
-
-          if (!render)
-            continue;
-
-          instances.emplace_back(m2_instance->transformMatrix());
-          m2_instance->_rendered_last_frame = true;
-
-
-          // if (render && !draw_models_with_box /* && !m2_instance->model->is_hidden()*/)
-          // {
-          //   // model box wasn't set in model draw(), add selection boxes
-          //   if (_world->selected_uids.contains(m2_instance->uid))
-          //     model_boxes_to_draw.emplace(m2_instance->model, instances.size());
-          // }
-
-        }
-
-      }
-      else if (pair.second[0]->which() == eWMO)
-      {
-        if (!render_settings.draw_wmo)
-        {
-          for (auto& instance : pair.second)
-          {
-            instance->_rendered_last_frame = false;
-          }
-          continue;
-        }
-
-        // memory allocation heuristic. all objects will pass if tile is entirely in frustum.
-        // otherwise we only allocate for a half
-
-        if (tile->renderer()->objectsFrustumCullTest() > 1)
-        {
-          wmos_to_draw.reserve(wmos_to_draw.size() + pair.second.size());
-        }
-        else
-        {
-          wmos_to_draw.reserve(wmos_to_draw.size() + pair.second.size() / 2);
-        }
-
-        for (auto& instance : pair.second)
-        {
-          instance->_rendered_last_frame = false;
-
-          // do not render twice the cross-referenced objects twice
-          if (instance->frame == frame)
-          {
-            instance->_rendered_last_frame = true;
-            continue;
-          }
-
-          auto wmo_instance = static_cast<WMOInstance*>(instance);
-
-          if (!render_settings.draw_hidden_models && wmo_instance->wmo->is_hidden())
-            continue;
-
-          instance->frame = frame;
-
-          // experimental : if camera and object haven't moved/changed since last frame, we don't need to do frustum culling again
-          bool render = false;
-          if (!render_settings.camera_moved && !wmo_instance->extentsDirty()/* && not_moved*/)
-          {
-            if (wmo_instance->_rendered_last_frame)
-            {
-              render = true; // skip visibility checks
-            }
-          }
-          if ((!render && tile->renderer()->objectsFrustumCullTest() > 1)
-              || frustum.intersects(wmo_instance->getExtents()[1], wmo_instance->getExtents()[0]))
-          {
-            render = true;
-          }
-
-          if (render)
-          {
-            wmos_to_draw.emplace_back(wmo_instance);
-            wmo_instance->_rendered_last_frame = true;
-
-            if (render_settings.draw_wmo_doodads)
-            {
-              // auto doodads = wmo_instance->get_visible_doodads(frustum, _cull_distance, camera_pos, draw_hidden_models, display);
-              // 
-              // for (auto& doodad : doodads)
-              // {
-              //     if (doodad->frame == frame)
-              //         continue;
-              //     doodad->frame = frame;
-              // 
-              //     auto& instances = models_to_draw[doodad->model.get()];
-              // 
-              //     instances.emplace_back(doodad->transformMatrix());
-              // }
-
-              // doodad->isInFrustum(frustum);
-
-              std::map<uint32_t, std::vector<wmo_doodad_instance>>* doodads = wmo_instance->get_doodads(render_settings.draw_hidden_models);
-              
-              if (!doodads)
-                continue;
-              
-              for (auto& pair : *doodads)
-              {
-                for (auto& doodad : pair.second)
-                {
-                    if (doodad.frame == frame)
-                        continue;
-                    doodad.frame = frame;
-
-                    // skip no geometry boxes for WMO doodads
-                    if (doodad.model->use_fake_geometry())
-                      continue;
-
-                    // apply size culling to wmo doodads?
-                    float dist = glm::distance(camera_pos, doodad.world_pos) - (doodad.model->bounding_box_radius * doodad.scale);
-
-                    if (!doodad.isInRenderDist(_cull_distance, camera_pos, render_settings.display_mode))
-                      continue;
-                    // TODO can check if in indoor group & exterior not hidden for further optimization. possibly check portals relations
-              
-                    auto& instances = models_to_draw[doodad.model.get()];
-              
-                    instances.emplace_back(doodad.transformMatrix());
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
   // WMOs / map objects (requires WMO program)
   if ((render_settings.draw_wmo || _world->mapIndex.hasAGlobalWMO()) && _wmo_program)
   {
@@ -1280,6 +1442,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
       gl.activeTexture(GL_TEXTURE0 + 16);
       gl.bindTexture(GL_TEXTURE_2D, wmo_terrain_blend ? _terrain_blend_color_tex : 0);
+
+      bind_gpu_sun_shadow(wmo_program, render_settings, _gpu_sun_shadow);
 
       // make this check per WMO or global WMO with tiles may not work
       bool disable_cull = false;
@@ -1370,10 +1534,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   }
 
 
-  // occlusion culling
-  // terrain tiles act as occluders for each other, water and M2/WMOs.
-  // occlusion culling is not performed on per model instance basis
-  // rendering a little extra is cheaper than querying.
+  // Occlusion culling: terrain always draws first (depth buffer), then queries test each tile AABB
+  // against that depth. M2/WMO/water on occluded tiles are skipped. Terrain is never skipped.
   // occlusion latency has 1-2 frames delay.
 
   constexpr bool occlusion_cull = true;
@@ -1399,7 +1561,15 @@ void WorldRender::draw (glm::mat4x4 const& model_view
           break;
         }
 
-        tile->renderer()->setOccluded(!tile->renderer()->getTileOcclusionQueryResult(camera_pos));
+        // Do not mark tiles occluded if terrain did not draw last frame (stale query / feedback loop).
+        if (!tile->_was_rendered_last_frame)
+        {
+          tile->renderer()->setOccluded(false);
+        }
+        else
+        {
+          tile->renderer()->setOccluded(!tile->renderer()->getTileOcclusionQueryResult(camera_pos));
+        }
         tile->renderer()->doTileOcclusionQuery(occluder_shader);
       }
 
@@ -1474,6 +1644,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
         m2_shader.uniform("tex_unit_lookup_2", 0);
         m2_shader.uniform("terrain_uv_mask", 0);
         m2_shader.uniform("pixel_shader", 0);
+        bind_gpu_sun_shadow(m2_shader, render_settings, _gpu_sun_shadow);
 
         for (auto const& pair : models_to_draw)
         {
@@ -1737,6 +1908,19 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
    */
 
+  // set anim time only once per frame
+  if (_liquid_program)
+  {
+    OpenGL::Scoped::use_program water_shader {*_liquid_program.get()};
+    water_shader.uniform("camera", glm::vec3(camera_pos.x, camera_pos.y, camera_pos.z));
+    water_shader.uniform("animtime", _world->animtime);
+
+    if (render_settings.draw_wmo || _world->mapIndex.hasAGlobalWMO())
+    {
+      water_shader.uniform("use_transform", 1);
+    }
+  }
+
   gl.enable(GL_BLEND);
   gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -1799,7 +1983,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
   }
 
-  if (render_settings.draw_water && _liquid_program)
+  if (render_settings.draw_water)
   {
     ZoneScopedN("World::draw() : Draw water");
 
@@ -1810,13 +1994,6 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
     gl.bindVertexArray(_liquid_chunk_vao);
 
-    water_shader.uniform("model_view", model_view);
-    water_shader.uniform("projection", projection);
-    water_shader.uniform("camera", glm::vec3(camera_pos.x, camera_pos.y, camera_pos.z));
-    water_shader.uniform("animtime", _world->animtime);
-    // liquid_vert.glsl: when use_transform is 1 it multiplies by `transform`; we never set that for world ADT water,
-    // so leaving use_transform on breaks rendering whenever WMOs are drawn / global WMO maps.
-    water_shader.uniform("transform", glm::mat4x4(1.f));
     water_shader.uniform("use_transform", 0);
 
     for (auto& pair : _world->_loaded_tiles_buffer)
@@ -1882,8 +2059,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     for (auto const& zoneLight : skies()->zoneLightsWotlk)
     {
       Sky* light = skies()->findSkyById(zoneLight.lightId);
-
-      assert(light != nullptr);
+      if (!light)
+        continue;
 
       if (glm::distance(light->pos, camera_pos) > (_cull_distance + light->r2) ) // TODO: frustum cull here
         continue;
@@ -2073,6 +2250,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       }
     }
   }
+
+  drawSoundEmitterBillboards(model_view, projection, camera_pos, frustum, render_settings);
 }
 
 void WorldRender::setupMccvVizBuffers()
@@ -2232,7 +2411,23 @@ void WorldRender::drawTextureLayerCountBillboards ( glm::mat4x4 const& model_vie
           continue;
         }
 
-        glm::vec3 const center = chunk->vcenter + glm::vec3(0.f, kChunkSize * 0.16f, 0.f);
+        float const cx = (chunk->vmin.x + chunk->vmax.x) * 0.5f;
+        float const cz = (chunk->vmin.z + chunk->vmax.z) * 0.5f;
+
+        float surface_y = chunk->vcenter.y;
+        if (!chunk->sampleTerrainHeightAt(cx, cz, surface_y))
+        {
+          glm::vec3 nearest;
+          if (chunk->GetVertex(cx, cz, &nearest))
+          {
+            surface_y = nearest.y;
+          }
+        }
+
+        // Small lift above the sampled mesh height (billboard is camera-facing, not axis-aligned).
+        float const lift = kChunkSize * 0.04f;
+        glm::vec3 const center(cx, surface_y + lift, cz);
+
         if (!frustum.intersectsSphere(center, kChunkSize * 0.6f))
         {
           continue;
@@ -2291,6 +2486,210 @@ tex_layer_billboard_done:
   gl.drawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(instances.size()));
 
   gl.bindTexture(GL_TEXTURE_2D, 0);
+}
+
+void WorldRender::setupSoundEmitterBillboardResources()
+{
+  ZoneScopedN("WorldRender::setupSoundEmitterBillboardResources");
+
+  _sound_emitter_billboard_ready = false;
+
+  _sound_emitter_billboard_program.reset(
+    new OpenGL::program{
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("sound_emitter_billboard_vs") },
+      { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("sound_emitter_billboard_fs") },
+    });
+
+  QImage icon(QStringLiteral(":/icons/sound_emitter.png"));
+  if (icon.isNull())
+  {
+    LogError << "WorldRender::setupSoundEmitterBillboardResources: failed to load sound emitter icon" << std::endl;
+    _sound_emitter_billboard_program.reset();
+    return;
+  }
+
+  icon = icon.convertToFormat(QImage::Format_RGBA8888);
+
+  if (_sound_emitter_icon_texture == 0)
+  {
+    gl.genTextures(1, &_sound_emitter_icon_texture);
+  }
+
+  gl.bindTexture(GL_TEXTURE_2D, _sound_emitter_icon_texture);
+  gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, icon.width(), icon.height(), 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 icon.constBits());
+  gl.bindTexture(GL_TEXTURE_2D, 0);
+
+  {
+    OpenGL::Scoped::vao_binder const vao_bind(_sound_emitter_billboard_vao);
+    OpenGL::Scoped::use_program prog{ *_sound_emitter_billboard_program.get() };
+
+    prog.attrib("quad_corner", _tex_layer_billboard_quad_vbo, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    prog.attrib_divisor("quad_corner", 0, 1);
+
+    prog.attrib("instance_center", _sound_emitter_instance_vbo, 4, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), nullptr);
+    prog.attrib_divisor("instance_center", 1, 1);
+  }
+
+  _sound_emitter_billboard_ready = true;
+}
+
+void WorldRender::drawSoundEmitterBillboards ( glm::mat4x4 const& model_view
+                                             , glm::mat4x4 const& projection
+                                             , glm::vec3 const& camera_pos
+                                             , math::frustum const& frustum
+                                             , WorldRenderParams const& render_settings
+                                             )
+{
+  if (!render_settings.draw_sound_emitters
+      || render_settings.minimap_render
+      || render_settings.display_mode != display_mode::in_3D)
+  {
+    return;
+  }
+  if (!_sound_emitter_billboard_ready || !_sound_emitter_billboard_program || !_sound_emitter_icon_texture)
+  {
+    return;
+  }
+
+  ZoneScopedN("WorldRender::drawSoundEmitterBillboards");
+
+  constexpr float kCullRadius = 24.f;
+  static constexpr std::size_t kMaxInstances = 8192u;
+
+  std::vector<glm::vec4> instances;
+  instances.reserve(512u);
+
+  for (MapTile* tile : _world->mapIndex.loaded_tiles())
+  {
+    if (!tile || tile->loading_failed())
+    {
+      continue;
+    }
+
+    for (unsigned z = 0; z < 16u; ++z)
+    {
+      for (unsigned x = 0; x < 16u; ++x)
+      {
+        MapChunk* chunk = tile->getChunk(x, z);
+        if (!chunk)
+        {
+          continue;
+        }
+
+        for (ENTRY_MCSE const& emitter : chunk->sound_emitters)
+        {
+          glm::vec3 const center(emitter.pos[0], emitter.pos[1], emitter.pos[2]);
+
+          if (!frustum.intersectsSphere(center, kCullRadius))
+          {
+            continue;
+          }
+
+          float selection_weight = 1.f;
+          if (render_settings.has_selected_sound_emitter)
+          {
+            glm::vec3 const sel_pos = render_settings.selected_sound_emitter_pos;
+            if (glm::distance(center, sel_pos) < 0.05f)
+              selection_weight = 2.f;
+          }
+
+          instances.emplace_back(center, selection_weight);
+
+          if (instances.size() >= kMaxInstances)
+          {
+            goto sound_emitter_billboard_done;
+          }
+        }
+      }
+    }
+  }
+
+sound_emitter_billboard_done:
+
+  if (instances.empty())
+  {
+    return;
+  }
+
+  gl.bufferData<GL_ARRAY_BUFFER>(_sound_emitter_instance_vbo,
+                                  static_cast<GLsizeiptr>(instances.size() * sizeof(glm::vec4)),
+                                  instances.data(),
+                                  GL_DYNAMIC_DRAW);
+
+  gl.enable(GL_BLEND);
+  gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  OpenGL::Scoped::bool_setter<GL_CULL_FACE, GL_FALSE> const cull_off;
+  OpenGL::Scoped::depth_mask_setter<GL_FALSE> const no_depth_write;
+  OpenGL::Scoped::bool_setter<GL_DEPTH_TEST, GL_TRUE> const depth_test;
+
+  float const d0 = glm::distance(camera_pos, glm::vec3(instances.front()));
+  float const half_size = glm::clamp(0.35f * d0 / 140.f, 0.18f, 2.5f) * 3.f;
+  glm::vec2 const half_ext(half_size, half_size);
+
+  constexpr GLint kIconUnit = 13;
+  gl.activeTexture(GL_TEXTURE0 + kIconUnit);
+  gl.bindTexture(GL_TEXTURE_2D, _sound_emitter_icon_texture);
+
+  OpenGL::Scoped::use_program prog{ *_sound_emitter_billboard_program.get() };
+  prog.uniform("model_view", model_view);
+  prog.uniform("projection", projection);
+  prog.uniform("camera_pos", camera_pos);
+  prog.uniform("billboard_half_extent", half_ext);
+  prog.uniform("icon_texture", kIconUnit);
+
+  OpenGL::Scoped::vao_binder const vao_bind(_sound_emitter_billboard_vao);
+  gl.drawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(instances.size()));
+
+  gl.bindTexture(GL_TEXTURE_2D, 0);
+}
+
+void WorldRender::drawBrushCursorOverlay ( glm::mat4x4 const& mvp
+                                         , glm::vec3 const& cursor_pos
+                                         , glm::vec4 const& cursor_color
+                                         , WorldRenderParams const& render_settings
+                                         )
+{
+  if (render_settings.cursor_type != CursorType::CIRCLE)
+  {
+    return;
+  }
+  if (render_settings.brush_radius <= 0.f)
+  {
+    return;
+  }
+  if (render_settings.minimap_render)
+  {
+    return;
+  }
+
+  Noggit::CursorRender::Mode mode;
+  switch (render_settings.brush_cursor_style)
+  {
+    case BrushCursorStyle::FlatCircle:
+      mode = Noggit::CursorRender::Mode::circle;
+      break;
+    case BrushCursorStyle::Sphere:
+      mode = Noggit::CursorRender::Mode::sphere;
+      break;
+    default:
+      return;
+  }
+
+  OpenGL::Scoped::bool_setter<GL_LINE_SMOOTH, GL_TRUE> const line_smooth;
+  gl.hint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+
+  _cursor_render.draw(mode
+                    , mvp
+                    , cursor_color
+                    , cursor_pos
+                    , render_settings.brush_radius
+                    , render_settings.inner_radius_ratio
+                    );
 }
 
 void WorldRender::drawMccvVertexAltViz ( glm::mat4x4 const& model_view
@@ -2649,6 +3048,9 @@ void WorldRender::unload()
     _sea_level_clip_vbo = 0;
   }
   _occluder_program.reset();
+  _sun_shadow_m2_program.reset();
+  _sun_shadow_wmo_program.reset();
+  _gpu_sun_shadow.unload();
 
   _mccv_viz_program.reset();
   _mccv_crosshair_ndc_program.reset();
@@ -2687,6 +3089,77 @@ void WorldRender::updateMVPUniformBlock(const glm::mat4x4& model_view, const glm
 
   _mvp_ubo_data.model_view = model_view;
   _mvp_ubo_data.projection = projection;
+
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _mvp_ubo);
+  gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::MVPUniformBlock), &_mvp_ubo_data);
+}
+
+void WorldRender::updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& camera_pos)
+{
+  ZoneScoped;
+
+  bool const modern = noggit_modern_features_enabled() && draw_fog;
+  _modern_fog_ubo_data = {};
+
+  if (!modern || !_skies)
+  {
+    gl.bindBuffer(GL_UNIFORM_BUFFER, _modern_fog_ubo);
+    gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::ModernFogUniformBlock), &_modern_fog_ubo_data);
+    return;
+  }
+
+  _modern_fog_ubo_data.meta.x = 1;
+  float const retail_density = _skies->fog_density();
+  // Retail FogDensity is much larger than legacy LightDir_FogRate.w; scale for sane editor preview.
+  _modern_fog_ubo_data.fog_density_end_height.x = retail_density > 0.f
+    ? std::clamp(retail_density * 0.35f, 0.f, 3.f)
+    : 0.f;
+  _modern_fog_ubo_data.fog_density_end_height.y = _skies->end_fog_color_distance();
+  _modern_fog_ubo_data.fog_density_end_height.z = _skies->fog_height();
+  _modern_fog_ubo_data.fog_density_end_height.w = _skies->fog_height_scaler();
+
+  glm::vec3 const end_col = _skies->end_fog_color();
+  _modern_fog_ubo_data.end_fog_color = { end_col.x, end_col.y, end_col.z, 0.f };
+
+  glm::vec3 const fh_col = _skies->fog_height_color();
+  _modern_fog_ubo_data.fog_height_color_density = {
+    fh_col.x, fh_col.y, fh_col.z, _skies->fog_height_density()
+  };
+
+  auto const hc = _skies->fog_height_coeff();
+  _modern_fog_ubo_data.height_coeff_01 = { hc[0], hc[1], hc[2], hc[3] };
+
+  auto const vfogs = _world->volumetricFogs();
+  int vfog_count = 0;
+  std::vector<std::pair<float, std::size_t>> vfog_order;
+  vfog_order.reserve(vfogs.size());
+  for (std::size_t i = 0; i < vfogs.size(); ++i)
+  {
+    float const d = glm::distance(camera_pos, vfogs[i].position);
+    vfog_order.emplace_back(d, i);
+  }
+  std::sort(vfog_order.begin(), vfog_order.end());
+
+  for (auto const& [dist, idx] : vfog_order)
+  {
+    (void)dist;
+    if (vfog_count >= OpenGL::kMaxGpuVolumetricFogs)
+      break;
+    auto const& v = vfogs[idx];
+    float const max_r = std::max({ v.radius[0], v.radius[1], v.radius[2] });
+    if (glm::distance(camera_pos, v.position) > max_r * 4.f + _cull_distance)
+      continue;
+
+    _modern_fog_ubo_data.vfog_pos_radius[vfog_count] = { v.position.x, v.position.y, v.position.z, max_r };
+    _modern_fog_ubo_data.vfog_color_intensity[vfog_count] = {
+      v.color.x, v.color.y, v.color.z, v.intensity[0]
+    };
+    ++vfog_count;
+  }
+  _modern_fog_ubo_data.meta.y = vfog_count;
+
+  gl.bindBuffer(GL_UNIFORM_BUFFER, _modern_fog_ubo);
+  gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::ModernFogUniformBlock), &_modern_fog_ubo_data);
 }
 
 void WorldRender::updateLightingUniformBlock(bool draw_fog, glm::vec3 const& camera_pos)
@@ -2790,6 +3263,24 @@ void WorldRender::updatePointLightsUniformBlock(bool enabled, glm::vec3 const& c
 
   gl.bindBuffer(GL_UNIFORM_BUFFER, _point_lights_ubo);
   gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::PointLightsUniformBlock), &_point_lights_ubo_data);
+}
+
+void WorldRender::drawVolumetricFogDebug(glm::mat4x4 const& model_view
+                                        , glm::mat4x4 const& projection
+                                        , glm::vec3 const& camera_pos
+                                        , float cull_distance)
+{
+  ZoneScoped;
+
+  for (auto const& vfog : _world->volumetricFogs())
+  {
+    float const max_r = std::max({ vfog.radius[0], vfog.radius[1], vfog.radius[2] });
+    if (glm::distance(camera_pos, vfog.position) > cull_distance + max_r)
+      continue;
+
+    glm::vec4 const col(vfog.color, 0.35f);
+    _sphere_render.draw(model_view * projection, vfog.position, col, max_r, 24, 16, 1.f);
+  }
 }
 
 void WorldRender::updateLightingUniformBlockMinimap(MinimapRenderSettings* settings)
@@ -3387,4 +3878,211 @@ bool WorldRender::saveMinimap(TileIndex const& tile_idx, MinimapRenderSettings* 
 OpenGL::TerrainParamsUniformBlock* Noggit::Rendering::WorldRender::getTerrainParamsUniformBlock()
 {
   return &_terrain_params_ubo_data;
+}
+
+void WorldRender::collectVisibleObjects ( int frame
+                                        , glm::mat4x4 const& /*model_view*/
+                                        , glm::vec3 const& camera_pos
+                                        , math::frustum const& frustum
+                                        , WorldRenderParams const& render_settings
+                                        , MinimapRenderSettings* minimap_render_settings
+                                        , tsl::robin_map<Model*, std::vector<glm::mat4x4>>& models_to_draw
+                                        , std::vector<WMOInstance*>& wmos_to_draw
+                                        )
+{
+  ZoneScopedN ("World::draw() : Collect visible objects");
+
+  for (auto const& tile_pair : _world->_loaded_tiles_buffer)
+  {
+    MapTile* tile = tile_pair.second;
+
+    if (!tile)
+    {
+      break;
+    }
+
+    if (render_settings.minimap_render)
+    {
+      tile->renderer()->setOccluded (false);
+    }
+
+    if (tile->renderer()->isOccluded() && !tile->getChunkUpdateFlags() && !tile->renderer()->isOverridingOcclusionCulling())
+    {
+      continue;
+    }
+
+    if (tile->camDist() > _cull_distance)
+    {
+      continue;
+    }
+
+    for (auto& object_pair : tile->getObjectInstances())
+    {
+      if (!object_pair.first->finishedLoading())
+      {
+        continue;
+      }
+
+      if (object_pair.second[0]->which() == eMODEL)
+      {
+        if (!render_settings.draw_models && !(render_settings.minimap_render && minimap_render_settings->use_filters))
+        {
+          for (auto& instance : object_pair.second)
+          {
+            instance->_rendered_last_frame = false;
+          }
+          continue;
+        }
+
+        auto& instances = models_to_draw[reinterpret_cast<Model*> (object_pair.first)];
+
+        if (tile->renderer()->objectsFrustumCullTest() > 1)
+        {
+          instances.reserve (instances.size() + object_pair.second.size());
+        }
+        else
+        {
+          instances.reserve (instances.size() + object_pair.second.size() / 2);
+        }
+
+        for (auto& instance : object_pair.second)
+        {
+          instance->_rendered_last_frame = false;
+
+          if (instance->frame == frame)
+          {
+            instance->_rendered_last_frame = true;
+            continue;
+          }
+
+          auto m2_instance = static_cast<ModelInstance*> (instance);
+
+          if (!render_settings.draw_hidden_models && m2_instance->model->is_hidden())
+          {
+            continue;
+          }
+
+          instance->frame = frame;
+
+          bool render = false;
+          if (!render_settings.camera_moved && !m2_instance->extentsDirty())
+          {
+            if (m2_instance->_rendered_last_frame)
+            {
+              render = true;
+            }
+          }
+          if (!render && m2_instance->isInRenderDist (_cull_distance, camera_pos, render_settings.display_mode)
+              && (tile->renderer()->objectsFrustumCullTest() > 1 || m2_instance->isInFrustum (frustum)))
+          {
+            render = true;
+          }
+
+          if (!render)
+          {
+            continue;
+          }
+
+          instances.emplace_back (m2_instance->transformMatrix());
+          m2_instance->_rendered_last_frame = true;
+        }
+      }
+      else if (object_pair.second[0]->which() == eWMO)
+      {
+        if (!render_settings.draw_wmo)
+        {
+          for (auto& instance : object_pair.second)
+          {
+            instance->_rendered_last_frame = false;
+          }
+          continue;
+        }
+
+        if (tile->renderer()->objectsFrustumCullTest() > 1)
+        {
+          wmos_to_draw.reserve (wmos_to_draw.size() + object_pair.second.size());
+        }
+        else
+        {
+          wmos_to_draw.reserve (wmos_to_draw.size() + object_pair.second.size() / 2);
+        }
+
+        for (auto& instance : object_pair.second)
+        {
+          instance->_rendered_last_frame = false;
+
+          if (instance->frame == frame)
+          {
+            instance->_rendered_last_frame = true;
+            continue;
+          }
+
+          auto wmo_instance = static_cast<WMOInstance*> (instance);
+
+          if (!render_settings.draw_hidden_models && wmo_instance->wmo->is_hidden())
+          {
+            continue;
+          }
+
+          instance->frame = frame;
+
+          bool render = false;
+          if (!render_settings.camera_moved && !wmo_instance->extentsDirty())
+          {
+            if (wmo_instance->_rendered_last_frame)
+            {
+              render = true;
+            }
+          }
+          if ((!render && tile->renderer()->objectsFrustumCullTest() > 1)
+              || frustum.intersects (wmo_instance->getExtents()[1], wmo_instance->getExtents()[0]))
+          {
+            render = true;
+          }
+
+          if (render)
+          {
+            wmos_to_draw.emplace_back (wmo_instance);
+            wmo_instance->_rendered_last_frame = true;
+
+            if (render_settings.draw_wmo_doodads)
+            {
+              std::map<std::uint32_t, std::vector<wmo_doodad_instance>>* doodads
+                = wmo_instance->get_doodads (render_settings.draw_hidden_models);
+
+              if (!doodads)
+              {
+                continue;
+              }
+
+              for (auto& doodad_pair : *doodads)
+              {
+                for (auto& doodad : doodad_pair.second)
+                {
+                  if (doodad.frame == frame)
+                  {
+                    continue;
+                  }
+                  doodad.frame = frame;
+
+                  if (doodad.model->use_fake_geometry())
+                  {
+                    continue;
+                  }
+
+                  if (!doodad.isInRenderDist (_cull_distance, camera_pos, render_settings.display_mode))
+                  {
+                    continue;
+                  }
+
+                  auto& doodad_instances = models_to_draw[doodad.model.get()];
+                  doodad_instances.emplace_back (doodad.transformMatrix());
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }

@@ -28,6 +28,11 @@ namespace math
   struct vector_4d;
 }
 
+namespace Noggit
+{
+  class BrushFalloffCurve;
+}
+
 namespace util
 {
   class sExtendableArray;
@@ -158,18 +163,23 @@ public:
   glm::uvec2 getUnitIndextAt(glm::vec3 pos);
 
   //! \todo implement Action stack for these
-  bool changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius);
-  bool flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
+  bool changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius,
+                     Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
+  bool flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation,
+                        Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
   //! Stronger per-tick blend and cheaper distance tests; pairs with UI "fast flatten / blur".
-  bool flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
+  bool flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation,
+                          Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
   //! Linear ramp between \a A and \a B in XZ; half-width \a radius; end caps \a cap_len; \a blend_strength 0..1 preserves more terrain when higher.
   bool applyTerrainRamp(glm::vec3 const& A, glm::vec3 const& B, float radius, float cap_len, float blend_strength);
   bool blurTerrain ( glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode
                    /*, std::function<std::optional<float>(float, float)> height*/
-                   );
-  bool blurTerrainFast (glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode);
+                   , Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
+  bool blurTerrainFast (glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode,
+                        Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
 
-  bool changeTerrainProcessVertex(glm::vec3 const& pos, glm::vec3 const& vertex, float& dt, float radiusOuter, float radiusInner, int brushType);
+  bool changeTerrainProcessVertex(glm::vec3 const& pos, glm::vec3 const& vertex, float& dt, float radiusOuter, float radiusInner, int brushType,
+                                  Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
   auto stamp(glm::vec3 const& pos, float dt, QImage const* img, float radiusOuter
   , float radiusInner, int brushType, bool sculpt) -> void;
   void selectVertex(glm::vec3 const& pos, float radius, std::unordered_set<glm::vec3*>& vertices);
@@ -202,6 +212,8 @@ public:
 
   bool GetVertex(float x, float z, glm::vec3 *V);
   void getVertexInternal(float x, float z, glm::vec3 * v);
+  //! Terrain mesh height at world XZ (raycast down); falls back to false if outside chunk.
+  bool sampleTerrainHeightAt(float world_x, float world_z, float& out_y) const;
   float getHeight(int x, int z);
   float getMinHeight() const;;
   float getMaxHeight() const;;

@@ -14,6 +14,8 @@
 #endif
 #include <noggit/map_index.hpp>
 #include <noggit/map_light_target.hpp>
+#include <noggit/ModernLightTables.hpp>
+#include <noggit/VolumetricFog.hpp>
 #include <noggit/Log.h>
 #include <noggit/uid_storage.hpp>
 #include <noggit/application/NoggitApplication.hpp>
@@ -766,7 +768,10 @@ namespace
 MapIndex::TileRange<false> MapIndex::loaded_tiles()
 {
   return tiles<false>
-    ([](TileIndex const&, MapTile* tile) { return !!tile && tile->finishedLoading(); });
+    ([](TileIndex const&, MapTile* tile)
+     {
+       return !!tile && tile->finishedLoading() && !tile->loading_failed();
+     });
 }
 
 MapIndex::TileRange<true> MapIndex::tiles_in_range(glm::vec3 const& pos, float radius)
@@ -900,6 +905,16 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
   {
     mphd.flags |= FLAG_SHADING;
     changed = true;
+  }
+
+  if (_world && noggit_modern_features_enabled())
+  {
+    std::string const fogs_path = BlizzardArchive::ClientData::normalizeFilenameInternal(
+      std::string("World\\Maps\\") + basename + "\\" + basename + "_fogs.wdt");
+    bool const try_load = mphd.fogsFileDataID != 0u
+      || (Noggit::Application::NoggitApplication::instance()->hasClientData()
+          && Noggit::Application::NoggitApplication::instance()->clientData()->exists(fogs_path));
+    _world->setVolumetricFogs(try_load ? load_volumetric_fogs_from_client(basename) : std::vector<VolumetricFogEntry>{});
   }
 
   // - MAIN ----------------------------------------------
@@ -1303,7 +1318,10 @@ void MapIndex::unloadTile(const TileIndex& tile)
   {
     // either log before or don't use a reference for the tile/make a copy
     // otherwise it can be deleted before the log because it comes from the adt itself (see unloadTiles)
-    Log << "Unloading Tile " << tile.x << "-" << tile.z << std::endl;
+    if (LoadTraceEnabled())
+    {
+      Log << "Unloading Tile " << tile.x << "-" << tile.z << std::endl;
+    }
 
     AsyncLoader::instance->ensure_deletable(mTiles[tile.z][tile.x].tile.get());
     mTiles[tile.z][tile.x].tile.reset();

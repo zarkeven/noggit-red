@@ -254,6 +254,15 @@ void Noggit::Action::undo(bool redo)
     _map_view->getWorld()->pointLights() = (redo ? _point_lights_post : _point_lights_pre);
     _map_view->invalidate();
   }
+  if (_flags & ActionFlags::eCHUNKS_SOUND_EMITTERS)
+  {
+    for (auto& pair : redo ? _chunk_sound_emitters_post : _chunk_sound_emitters_pre)
+    {
+      pair.first->sound_emitters = pair.second;
+      _map_view->getWorld()->markSoundEmitterChunkDirty(pair.first);
+    }
+    _map_view->invalidate();
+  }
 
 }
 
@@ -590,6 +599,18 @@ void Noggit::Action::finish()
   if (_flags & ActionFlags::ePOINT_LIGHTS_CHANGED && !_point_lights_pre.empty())
   {
     _point_lights_post = _map_view->getWorld()->pointLights();
+  }
+  if (_flags & ActionFlags::eCHUNKS_SOUND_EMITTERS)
+  {
+    _chunk_sound_emitters_post.resize(_chunk_sound_emitters_pre.size());
+
+    for (std::size_t i = 0; i < _chunk_sound_emitters_pre.size(); ++i)
+    {
+      auto& post = _chunk_sound_emitters_post.at(i);
+      auto& pre = _chunk_sound_emitters_pre.at(i);
+      post.first = pre.first;
+      post.second = pre.first->sound_emitters;
+    }
   }
 
   if (_post)
@@ -935,6 +956,19 @@ void Noggit::Action::registerPointLightsChange()
     return;
 
   _point_lights_pre = _map_view->getWorld()->pointLights();
+}
+
+void Noggit::Action::registerChunkSoundEmitterChange(MapChunk* chunk)
+{
+  _flags |= ActionFlags::eCHUNKS_SOUND_EMITTERS;
+
+  for (auto& pair : _chunk_sound_emitters_pre)
+  {
+    if (pair.first == chunk)
+      return;
+  }
+
+  _chunk_sound_emitters_pre.emplace_back(chunk, chunk->sound_emitters);
 }
 
 Noggit::Action::~Action()

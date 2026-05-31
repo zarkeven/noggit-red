@@ -1,6 +1,7 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/ChunkWater.hpp>
+#include <noggit/DBC.h>
 #include <noggit/TileWater.hpp>
 #include <noggit/liquid_layer.hpp>
 #include <noggit/MapChunk.h>
@@ -229,6 +230,34 @@ void ChunkWater::autoGen(MapChunk *chunk, float factor)
   {
     layer.update_opacity(chunk, factor);
   }
+  update_layers();
+}
+
+void ChunkWater::updateOpacityFromTerrain(MapChunk* chunk)
+{
+  static constexpr float river_opacity_factor = 0.0337f;
+  static constexpr float ocean_opacity_factor = 0.007f;
+
+  if (_layers.empty())
+  {
+    return;
+  }
+
+  for (liquid_layer& layer : _layers)
+  {
+    int const basic_type = LiquidTypeDB::getLiquidType(layer.liquidID());
+
+    if (basic_type == liquid_basic_types_magma || basic_type == liquid_basic_types_slime)
+    {
+      continue;
+    }
+
+    float const factor = (basic_type == liquid_basic_types_ocean)
+                       ? ocean_opacity_factor
+                       : river_opacity_factor;
+    layer.update_opacity(chunk, factor);
+  }
+
   update_layers();
 }
 

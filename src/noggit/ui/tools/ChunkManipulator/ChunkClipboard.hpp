@@ -44,7 +44,8 @@ namespace Noggit::Ui::Tools::ChunkManipulator
     HOLES = 0x80,
     FLAGS = 0x100,
     AREA_ID = 0x200,
-    POINT_LIGHTS = 0x400
+    POINT_LIGHTS = 0x400,
+    SOUND_EMITTERS = 0x800
   };
 
   [[nodiscard]] inline constexpr unsigned to_underlying(ChunkCopyFlags f) noexcept
@@ -65,7 +66,8 @@ namespace Noggit::Ui::Tools::ChunkManipulator
       | static_cast<unsigned>(ChunkCopyFlags::HOLES)
       | static_cast<unsigned>(ChunkCopyFlags::FLAGS)
       | static_cast<unsigned>(ChunkCopyFlags::AREA_ID)
-      | static_cast<unsigned>(ChunkCopyFlags::POINT_LIGHTS));
+      | static_cast<unsigned>(ChunkCopyFlags::POINT_LIGHTS)
+      | static_cast<unsigned>(ChunkCopyFlags::SOUND_EMITTERS));
   }
 
   [[nodiscard]] inline constexpr bool chunk_copy_flags_test(ChunkCopyFlags set, ChunkCopyFlags bit) noexcept
@@ -195,6 +197,7 @@ namespace Noggit::Ui::Tools::ChunkManipulator
     std::optional<mcnk_flags> flags;
     std::optional<int> area_id;
     std::optional<std::vector<ChunkPointLightCacheEntry>> point_lights;
+    std::optional<std::vector<ENTRY_MCSE>> sound_emitters;
   };
 
   class ChunkClipboard : public QObject

@@ -776,6 +776,23 @@ void Model::calcBones(glm::mat4x4 const& model_view
   }
 }
 
+void Model::updateAnimationForRender (glm::mat4x4 const& model_view, int anim_id, int anim_time)
+{
+  if (!(animated || animBones))
+  {
+    return;
+  }
+
+  if (_animations_seq_per_id.empty() || _animations_seq_per_id[anim_id].empty())
+  {
+    anim_calculated = false;
+    return;
+  }
+
+  animate (model_view, anim_id, anim_time);
+  anim_calculated = true;
+}
+
 void Model::animate(glm::mat4x4 const& model_view, int anim_id, int anim_time)
 {
   if (_animations_seq_per_id.empty() || _animations_seq_per_id[anim_id].empty())

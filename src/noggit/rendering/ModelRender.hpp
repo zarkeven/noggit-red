@@ -99,7 +99,7 @@ namespace Noggit::Rendering
     std::optional<ModelPixelShader> pixel_shader;
 
 
-    bool prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model *m, OpenGL::M2RenderState& model_render_state, M2TerrainGroundBind const* terrain_ground);
+    bool prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model *m, OpenGL::M2RenderState& model_render_state, M2TerrainGroundBind const* terrain_ground, bool shadow_depth_pass = false);
     void afterDraw();
     void bindTexture(size_t index, Model* m, OpenGL::M2RenderState& model_render_state, OpenGL::Scoped::use_program& m2_shader, M2TerrainGroundBind const* terrain_ground);
     void initUVTypes(Model* m);
@@ -149,6 +149,7 @@ namespace Noggit::Rendering
         , bool draw_animation_box
         , World* world_for_terrain_projection = nullptr
         , bool enable_terrain_texture_projection = false
+        , bool shadow_depth_pass = false
     );
 
     [[nodiscard]] bool hasTerrainGroundProjectionPasses() const;

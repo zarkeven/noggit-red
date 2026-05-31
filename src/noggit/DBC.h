@@ -4,6 +4,7 @@
 
 #include <noggit/DBCFile.h>
 
+#include <optional>
 #include <string>
 
 class AreaDB : public DBCFile
@@ -127,17 +128,16 @@ public:
     DBCFile("DBFilesClient\\LightParams.dbc")
   { }
 
-  /// Fields
+  /// Fields (WotLK 3.3.5a — see TrinityCore / wowdev DB/LightParams)
   static const size_t ID = 0;        // uint
   static const size_t highlightSky = 1;// bool
   static const size_t skybox = 2;      // uint ref to LightSkyBox
-  static const size_t cloudTypeID = 3; // uint
-  static const size_t glow = 4;        // uint
-  static const size_t water_shallow_alpha = 5;
-  static const size_t water_deep_alpha = 6;
-  static const size_t ocean_shallow_alpha = 7;
-  static const size_t ocean_deep_alpha = 8;
-  static const size_t flags = 9;
+  static const size_t glow = 3;        // float
+  static const size_t water_shallow_alpha = 4;
+  static const size_t water_deep_alpha = 5;
+  static const size_t ocean_shallow_alpha = 6;
+  static const size_t ocean_deep_alpha = 7;
+  static const size_t flags = 8;
 };
 
 class LightSkyboxDB : public DBCFile
@@ -332,6 +332,23 @@ public:
     static const size_t soundEntriesAdvancedID = 29;        // int
 };
 
+class SoundEntriesAdvancedDB : public DBCFile
+{
+public:
+    SoundEntriesAdvancedDB() :
+        DBCFile("DBFilesClient\\SoundEntriesAdvanced.dbc")
+    { }
+
+    /// Fields (WotLK 3.3.5a — see wowdev DB/SoundEntriesAdvanced)
+    static const size_t ID = 0;
+    static const size_t soundEntryID = 1;
+    static const size_t innerRadius2D = 2;
+    static const size_t timeIntervalMin = 9;
+    static const size_t timeIntervalMax = 10;
+    static const size_t innerRadiusOfInfluence = 15;
+    static const size_t outerRadiusOfInfluence = 16;
+};
+
 class WMOAreaTableDB : public DBCFile
 {
 public:
@@ -379,6 +396,12 @@ public:
 
 void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData);
 
+/// MCSE soundId references SoundEntriesAdvanced; returns the linked SoundEntries id when found.
+std::optional<std::uint32_t> resolveSoundEntryId(std::uint32_t mcse_sound_id);
+
+/// Returns the first SoundEntriesAdvanced row linking to \a sound_entry_id (MCSE stores advanced ids).
+std::optional<std::uint32_t> findSoundEntriesAdvancedId(std::uint32_t sound_entry_id);
+
 const char * getGroundEffectDoodad(unsigned int effectID, int DoodadNum);
 
 extern AreaDB gAreaDB;
@@ -399,5 +422,6 @@ extern SoundAmbienceDB gSoundAmbienceDB;
 extern ZoneMusicDB gZoneMusicDB;
 extern ZoneIntroMusicTableDB gZoneIntroMusicTableDB;
 extern SoundEntriesDB gSoundEntriesDB;
+extern SoundEntriesAdvancedDB gSoundEntriesAdvancedDB;
 extern WMOAreaTableDB gWMOAreaTableDB;
 extern GameObjectDisplayInfoDB gGameObjectDisplayInfoDB;

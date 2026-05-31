@@ -100,10 +100,6 @@ namespace
         return -1;
       }
       (void)_primary->sputn (s, n);
-      if (g_log_file.is_open())
-      {
-        g_log_file.flush();
-      }
       return n;
     }
 
@@ -115,6 +111,25 @@ namespace
   std::unique_ptr<tee_buf> g_tee_cout;
   std::unique_ptr<tee_buf> g_tee_clog;
   std::unique_ptr<tee_buf> g_tee_cerr;
+
+  class null_log_buf final : public std::streambuf
+  {
+  protected:
+    int_type overflow (int_type c) override
+    {
+      return traits_type::eq_int_type (c, traits_type::eof())
+           ? traits_type::not_eof (0)
+           : c;
+    }
+
+    std::streamsize xsputn (char const*, std::streamsize n) override
+    {
+      return n;
+    }
+  };
+
+  null_log_buf g_null_log_buf;
+  std::ostream g_null_log_stream (&g_null_log_buf);
 }
 
 std::ostream& _LogError (const char* pFile, int pLine)
@@ -124,6 +139,11 @@ std::ostream& _LogError (const char* pFile, int pLine)
 }
 std::ostream& _LogDebug (const char* pFile, int pLine)
 {
+  if (!LogDebugEnabled())
+  {
+    return g_null_log_stream;
+  }
+
   return std::cout << clock() * 1000 / CLOCKS_PER_SEC << " - (" << log_basename (pFile) << ":" << pLine
                    << "): [Debug] ";
 }
@@ -141,8 +161,23 @@ bool LoadTraceEnabled()
   }
 
   QSettings const settings;
-  return settings.value ("load_trace", true).toBool()
+  return settings.value ("load_trace", false).toBool()
       || settings.value ("additional_file_loading_log", false).toBool();
+}
+
+bool LogDebugEnabled()
+{
+  if (char const* const env = std::getenv ("NOGGIT_DEBUG_LOG"))
+  {
+    std::string_view const v (env);
+    if (v == "0" || v == "false" || v == "off" || v == "OFF")
+    {
+      return false;
+    }
+    return true;
+  }
+
+  return LoadTraceEnabled();
 }
 
 std::ostream& _Log (const char* pFile, int pLine)
@@ -209,10 +244,7 @@ void InitLogging (std::filesystem::path const& log_directory)
   std::clog.rdbuf (g_tee_clog.get());
   std::cerr.rdbuf (g_tee_cerr.get());
 
-  g_log_file << std::unitbuf;
-  std::cout << std::unitbuf;
-  std::clog << std::unitbuf;
-  std::cerr << std::unitbuf;
+  // Avoid std::unitbuf on the tee streams: it flushed the log file on nearly every character.
 
   std::time_t const now = std::time (nullptr);
   char timebuf[64]{};

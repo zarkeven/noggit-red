@@ -428,6 +428,13 @@ add_custom_command(TARGET noggit POST_BUILD
         "${PROJECT_SOURCE_DIR}/dist/noggit-definitions"
         "$<TARGET_FILE_DIR:noggit>/noggit-definitions")
 
+# retail Light / LightData / ZoneLight CSV defaults (modern fog)
+add_custom_command(TARGET noggit POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:noggit>/noggit-definitions/db2"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${PROJECT_SOURCE_DIR}/src/db2"
+        "$<TARGET_FILE_DIR:noggit>/noggit-definitions/db2")
+
 # deploy for Qt on Windows
 IF(WIN32)
   include(windeployqt)

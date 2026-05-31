@@ -19,6 +19,7 @@ class QSlider;
 
 namespace Noggit
 {
+  class BrushFalloffCurve;
 
   namespace Ui
   {
@@ -37,9 +38,9 @@ namespace Noggit
       Q_OBJECT
 
     public:
-      TerrainTool(MapView* map_view, QWidget* parent = nullptr, bool stamp = false);
+      TerrainTool(MapView* map_view, QWidget* parent = nullptr, bool stamp = false, bool expand_custom_brush_by_default = false);
 
-      void changeTerrain (World*, glm::vec3 const& pos, float dt);
+      void changeTerrain (World*, glm::vec3 const& pos, float dt, Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
 
       void nextType();
       void changeRadius(float change);

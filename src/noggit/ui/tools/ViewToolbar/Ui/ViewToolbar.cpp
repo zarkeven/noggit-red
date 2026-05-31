@@ -293,6 +293,7 @@ ViewToolbar::ViewToolbar(MapView *mapView, ViewToolbar *tb)
     add_tool_icon(mapView, &mapView->_draw_vertex_color, tr("Vertex Color"), FontNoggit::VISIBILITY_VERTEX_PAINTER, tb);
     add_tool_icon(mapView, &mapView->_draw_tileset, tr("Tileset"), FontNoggit::TOOL_TEXTURE_PAINT, tb);
     add_tool_icon(mapView, &mapView->_draw_baked_shadows, tr("Baked Shadows"), FontNoggit::VISIBILITY_BAKED_SHADOWS, tb); // TODO : better icon
+    add_tool_icon(mapView, &mapView->_draw_realtime_shadows, tr("Realtime shadows (M2 / WMO)"), FontNoggit::SUN, tb);
     add_tool_icon(mapView, &mapView->_draw_texture_layer_count_overlay, tr("Texture layer count per chunk"), texture_layer_overlay_tool_icon(), tb);
 
     addSeparator();
@@ -303,6 +304,8 @@ ViewToolbar::ViewToolbar(MapView *mapView, ViewToolbar *tb)
     // add_tool_icon(mapView, &mapView->_draw_lights_zones, tr("Light zones"), FontNoggit::VISIBILITY_LIGHT, tb);
     add_tool_icon(mapView, &mapView->_draw_point_lights, tr("Point/Spot Lights"), FontNoggit::VISIBILITY_LIGHT, tb);
     add_tool_icon(mapView, &mapView->_draw_point_light_spheres, tr("Point/Spot Light Visualization"), FontAwesomeIcon(FontAwesome::circle), tb);
+    add_tool_icon(mapView, &mapView->_draw_sound_emitters, tr("Sound Emitters"), FontNoggit::SOUND, tb);
+    add_tool_icon(mapView, &mapView->_play_sound_emitters, tr("Play Sound Emitters"), FontAwesomeIcon(FontAwesome::volumeup), tb);
     addSeparator();
 
     // Hole lines always on
@@ -526,6 +529,7 @@ void ViewToolbar::setCurrentMode(MapView* mapView, editing_mode mode)
     switch (current_mode)
     {
     case editing_mode::ground:
+    case editing_mode::terrain_unified:
         break;
     case editing_mode::flatten_blur:
         if (_flatten_secondary_tool.size() > 0)
@@ -578,10 +582,7 @@ void ViewToolbar::add_tool_icon(MapView* mapView,
                                 QVector<QWidgetAction*> sec_action_bar)
 {
     auto action = addAction(FontNoggitIcon{icon}, name);
-    connect (action, &QAction::triggered, [action, view_state] () {
-        action->setChecked(!view_state->get());
-        view_state->set(!view_state->get());
-    });
+    connect (action, &QAction::toggled, view_state, &Noggit::BoolToggleProperty::set);
 
     connect (action, &QAction::hovered, [mapView, sec_tool_bar, sec_action_bar] () {
         sec_tool_bar->clear();
@@ -594,18 +595,9 @@ void ViewToolbar::add_tool_icon(MapView* mapView,
         }
     });
 
-    connect (view_state, &Noggit::BoolToggleProperty::changed, [action, view_state, mapView] () {
-      
-      /* it has been removed from the bar
-        if (action->text() == "Game view" && view_state->get())
-        {
-            // hack, manually update camera when switch to game_view
-            mapView->setCameraDirty();
-            auto ground_pos = mapView->getWorld()->get_ground_height(mapView->getCamera()->position);
-            mapView->getCamera()->position.y = ground_pos.y + 2;
-        }*/
-
-        action->setChecked(view_state->get());
+    connect (view_state, &Noggit::BoolToggleProperty::changed, [action] (bool checked) {
+        QSignalBlocker const block (action);
+        action->setChecked (checked);
     });
 
     action->setCheckable(true);
@@ -620,10 +612,7 @@ void ViewToolbar::add_tool_icon(MapView* mapView,
                                 QVector<QWidgetAction*> sec_action_bar)
 {
     auto action = addAction(icon, name);
-    connect (action, &QAction::triggered, [action, view_state] () {
-        action->setChecked(!view_state->get());
-        view_state->set(!view_state->get());
-    });
+    connect (action, &QAction::toggled, view_state, &Noggit::BoolToggleProperty::set);
 
     connect (action, &QAction::hovered, [mapView, sec_tool_bar, sec_action_bar] () {
         sec_tool_bar->clear();
@@ -636,8 +625,9 @@ void ViewToolbar::add_tool_icon(MapView* mapView,
         }
     });
 
-    connect (view_state, &Noggit::BoolToggleProperty::changed, [action, view_state] () {
-        action->setChecked(view_state->get());
+    connect (view_state, &Noggit::BoolToggleProperty::changed, [action] (bool checked) {
+        QSignalBlocker const block (action);
+        action->setChecked (checked);
     });
 
     action->setCheckable(true);

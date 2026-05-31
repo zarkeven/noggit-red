@@ -43,6 +43,7 @@ public:
                   ) const;
 
   void autoGen(MapChunk* chunk, float factor);
+  void updateOpacityFromTerrain(MapChunk* chunk);
   void update_underground_vertices_depth(MapChunk* chunk);
   void CropWater(MapChunk* chunkTerrain);
 

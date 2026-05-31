@@ -4,6 +4,7 @@
 #include <noggit/ActionManager.hpp>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/Brush.h> // brush
+#include <noggit/BrushFalloffCurve.hpp>
 #include <noggit/ChunkWater.hpp>
 #include <noggit/Log.h>
 #include <noggit/MapChunk.h>
@@ -20,6 +21,7 @@
 #include <noggit/tool_enums.hpp>
 #include <noggit/ui/TexturingGUI.h>
 #include <noggit/WMOInstance.h> // WMOInstance
+#include <noggit/Sky.h>
 #include <noggit/World.h>
 #include <noggit/World.inl>
 #include <noggit/ui/tools/ChunkManipulator/ChunkClipboard.hpp>
@@ -121,7 +123,7 @@ World::World(const std::string& name, int map_id, Noggit::NoggitRenderContext co
     , mWmoFilename(mapIndex.globalWMOName)
     , mWmoEntry(mapIndex.wmoEntry)
     , animtime(0)
-    , time(1450)
+    , time(static_cast<float>(DAY_DURATION / 2)) // noon (2880 half-minutes per day)
     , basename(name)
     , _current_selection()
     , _settings(new QSettings())
@@ -1201,6 +1203,65 @@ MapChunk* World::getChunkAt(glm::vec3 const& pos)
   return nullptr;
 }
 
+namespace
+{
+  bool sound_emitter_ref_valid(SoundEmitterRef const& ref)
+  {
+    return ref.chunk && ref.index < ref.chunk->sound_emitters.size();
+  }
+}
+
+ENTRY_MCSE* World::getSelectedSoundEmitterEntry()
+{
+  if (!_selected_sound_emitter || !sound_emitter_ref_valid(*_selected_sound_emitter))
+  {
+    return nullptr;
+  }
+  return &_selected_sound_emitter->chunk->sound_emitters[_selected_sound_emitter->index];
+}
+
+ENTRY_MCSE const* World::getSelectedSoundEmitterEntry() const
+{
+  if (!_selected_sound_emitter || !sound_emitter_ref_valid(*_selected_sound_emitter))
+  {
+    return nullptr;
+  }
+  return &_selected_sound_emitter->chunk->sound_emitters[_selected_sound_emitter->index];
+}
+
+void World::markSoundEmitterChunkDirty(MapChunk* chunk)
+{
+  if (!chunk || !chunk->mt)
+  {
+    return;
+  }
+  mapIndex.setChanged(chunk->mt);
+}
+
+void World::relocateSelectedSoundEmitter(MapChunk* new_chunk)
+{
+  if (!_selected_sound_emitter || !sound_emitter_ref_valid(*_selected_sound_emitter) || !new_chunk)
+  {
+    return;
+  }
+
+  if (_selected_sound_emitter->chunk == new_chunk)
+  {
+    return;
+  }
+
+  MapChunk* const old_chunk = _selected_sound_emitter->chunk;
+  ENTRY_MCSE emitter = old_chunk->sound_emitters[_selected_sound_emitter->index];
+  old_chunk->sound_emitters.erase(old_chunk->sound_emitters.begin()
+                                  + static_cast<std::ptrdiff_t>(_selected_sound_emitter->index));
+  markSoundEmitterChunkDirty(old_chunk);
+
+  _selected_sound_emitter->chunk = new_chunk;
+  _selected_sound_emitter->index = new_chunk->sound_emitters.size();
+  new_chunk->sound_emitters.push_back(emitter);
+  markSoundEmitterChunkDirty(new_chunk);
+}
+
 bool World::isInIndoorWmoGroup(std::array<glm::vec3, 2> obj_bounds, glm::mat4x4 obj_transform)
 {
     bool is_indoor = false;
@@ -1290,6 +1351,9 @@ selection_result World::intersect (glm::mat4x4 const& model_view
       if (!tile->finishedLoading())
         continue;
 
+      if (tile->loading_failed())
+        continue;
+
       if (tile->intersect(ray, &results))
         break;
     }
@@ -1325,6 +1389,228 @@ selection_result World::intersect (glm::mat4x4 const& model_view
   return std::move(results);
 }
 
+namespace
+{
+  void intersect_model_at_transform ( Model* model
+                                    , glm::mat4x4 const& world_transform
+                                    , glm::mat4x4 const& model_view
+                                    , math::ray const& ray
+                                    , float& closest
+                                    , float ray_epsilon
+                                    , int animtime
+                                    , bool animate
+                                    )
+  {
+    if (!model || !model->finishedLoading() || model->loading_failed())
+    {
+      return;
+    }
+
+    glm::mat4x4 const inv = glm::inverse (world_transform);
+    math::ray subray (inv, ray);
+    glm::vec3 const scale_vec (
+      glm::length (glm::vec3 (world_transform[0]))
+    , glm::length (glm::vec3 (world_transform[1]))
+    , glm::length (glm::vec3 (world_transform[2]))
+    );
+    float const scale = std::max (scale_vec.x, std::max (scale_vec.y, scale_vec.z));
+
+    if (!subray.intersect_bounds (
+          fixCoordSystem (model->bounding_box_min)
+        , fixCoordSystem (model->bounding_box_max)
+        ))
+    {
+      return;
+    }
+
+    for (auto&& result : model->intersect (model_view, subray, animtime, animate))
+    {
+      float const dist = result.first * scale;
+      if (dist > ray_epsilon && dist < closest)
+      {
+        closest = dist;
+      }
+    }
+  }
+}
+
+bool World::isSunOccluded ( glm::vec3 const& from
+                          , glm::vec3 const& sun_dir
+                          , float max_dist
+                          , glm::mat4x4 const& model_view
+                          , bool animate_models
+                          , bool draw_models
+                          , bool draw_wmo
+                          , bool draw_hidden_models
+                          , bool draw_wmo_exterior
+                          , tsl::robin_map<Model*, std::vector<glm::mat4x4>> const* culled_models
+                          , std::vector<WMOInstance*> const* culled_wmos
+                          , std::span<SunOccluderInstance const> occluders
+                          )
+{
+  if (max_dist <= 0.f)
+  {
+    return false;
+  }
+
+  constexpr float k_ray_epsilon = 0.35f;
+  math::ray const ray (from + sun_dir * k_ray_epsilon, sun_dir);
+  float closest = max_dist;
+
+  if (!occluders.empty())
+  {
+    for (SunOccluderInstance const& occluder : occluders)
+    {
+      if (occluder.model && draw_models)
+      {
+        if (!draw_hidden_models && occluder.model->is_hidden())
+        {
+          continue;
+        }
+        intersect_model_at_transform (
+          occluder.model, occluder.model_transform, model_view, ray, closest, k_ray_epsilon, animtime, animate_models
+        );
+      }
+      else if (occluder.wmo && draw_wmo)
+      {
+        WMOInstance* wmo_instance = occluder.wmo;
+        if (!draw_hidden_models && wmo_instance->wmo->is_hidden())
+        {
+          continue;
+        }
+        wmo_instance->ensureExtents();
+        std::array<glm::vec3, 2> const& ext = wmo_instance->getExtents();
+        if (auto const bound_hit = ray.intersect_bounds (ext[0], ext[1]))
+        {
+          if (*bound_hit >= closest || *bound_hit <= k_ray_epsilon)
+          {
+            continue;
+          }
+        }
+        else
+        {
+          continue;
+        }
+
+        selection_result wmo_hit;
+        wmo_instance->intersect (ray, &wmo_hit, draw_wmo_exterior);
+        for (selection_entry const& hit : wmo_hit)
+        {
+          if (hit.first > k_ray_epsilon && hit.first < closest)
+          {
+            closest = hit.first;
+          }
+        }
+      }
+
+      if (closest <= k_ray_epsilon * 2.f)
+      {
+        return true;
+      }
+    }
+
+    return closest < max_dist;
+  }
+
+  bool const use_culled_lists = culled_models != nullptr || culled_wmos != nullptr;
+
+  if (use_culled_lists)
+  {
+    if (draw_models && culled_models)
+    {
+      for (auto const& pair : *culled_models)
+      {
+        Model* model = pair.first;
+        if (!model)
+        {
+          continue;
+        }
+        if (!draw_hidden_models && model->is_hidden())
+        {
+          continue;
+        }
+        for (glm::mat4x4 const& transform : pair.second)
+        {
+          intersect_model_at_transform (
+            model, transform, model_view, ray, closest, k_ray_epsilon, animtime, animate_models
+          );
+          if (closest <= k_ray_epsilon * 2.f)
+          {
+            return true;
+          }
+        }
+      }
+    }
+
+    if (draw_wmo && culled_wmos)
+    {
+      for (WMOInstance* wmo_instance : *culled_wmos)
+      {
+        if (!wmo_instance)
+        {
+          continue;
+        }
+        if (!draw_hidden_models && wmo_instance->wmo->is_hidden())
+        {
+          continue;
+        }
+        wmo_instance->ensureExtents();
+        std::array<glm::vec3, 2> const& ext = wmo_instance->getExtents();
+        if (auto const bound_hit = ray.intersect_bounds (ext[0], ext[1]))
+        {
+          if (*bound_hit >= closest || *bound_hit <= k_ray_epsilon)
+          {
+            continue;
+          }
+        }
+        else
+        {
+          continue;
+        }
+
+        selection_result wmo_hit;
+        wmo_instance->intersect (ray, &wmo_hit, draw_wmo_exterior);
+        for (selection_entry const& hit : wmo_hit)
+        {
+          if (hit.first > k_ray_epsilon && hit.first < closest)
+          {
+            closest = hit.first;
+            if (closest <= k_ray_epsilon * 2.f)
+            {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  else
+  {
+    selection_result const hits = intersect (
+      model_view
+    , ray
+    , false
+    , true
+    , false
+    , draw_wmo
+    , draw_models
+    , draw_hidden_models
+    , draw_wmo_exterior
+    , animate_models
+    );
+
+    for (selection_entry const& hit : hits)
+    {
+      if (hit.first > k_ray_epsilon && hit.first < closest)
+      {
+        closest = hit.first;
+      }
+    }
+  }
+
+  return closest < max_dist;
+}
+
 void World::update_models_emitters(float dt)
 {
   ZoneScoped;
@@ -1352,6 +1638,7 @@ void World::clearHeight(glm::vec3 const& pos)
   });
   for_all_chunks_on_tile(pos, [this] (MapChunk* chunk) {
       recalc_norms (chunk);
+      updateWaterOpacityForChunk(chunk);
   });
 }
 
@@ -1562,7 +1849,8 @@ auto World::stamp(glm::vec3 const& pos, float dt, QImage const* img, float radiu
 }
 
 
-void World::changeObjectsWithTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius, bool iter_wmos_, bool iter_m2s)
+void World::changeObjectsWithTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius, bool iter_wmos_, bool iter_m2s,
+                                     Noggit::BrushFalloffCurve const* radial_falloff)
 {
     // applies the terrain brush to the terrain objects hit
     ZoneScoped;
@@ -1579,7 +1867,8 @@ void World::changeObjectsWithTerrain(glm::vec3 const& pos, float change, float r
 
     float dt = change;
 
-    float dist, xdiff, zdiff;
+    float dist = 0.f;
+    float xdiff, zdiff;
     bool changed = false;
 
     xdiff = obj->pos.x - pos.x;
@@ -1630,13 +1919,16 @@ void World::changeObjectsWithTerrain(glm::vec3 const& pos, float change, float r
     }
     if (changed)
     {
+        if (radial_falloff && radial_falloff->enabled() && radius > 1e-5f)
+          dt *= radial_falloff->sample(std::clamp(dist / radius, 0.f, 1.f));
         move_model(obj, 0.0f, dt, 0.0f);
         // set_model_pos(obj, glm::vec3(obj->pos.x, obj->pos.y + dt, obj->pos.z));
     }
   }
 }
 
-void World::changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius)
+void World::changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius,
+                          Noggit::BrushFalloffCurve const* radial_falloff)
 {
   ZoneScoped;
 
@@ -1645,13 +1937,15 @@ void World::changeTerrain(glm::vec3 const& pos, float change, float radius, int 
     , [&] (MapChunk* chunk)
       {
         NOGGIT_CUR_ACTION->registerChunkTerrainChange(chunk);
-        return chunk->changeTerrain(pos, change, radius, BrushType, inner_radius);
+        return chunk->changeTerrain(pos, change, radius, BrushType, inner_radius, radial_falloff);
       }
     , [this] (MapChunk* chunk)
       {
         recalc_norms (chunk);
       }
     );
+
+  updateWaterOpacityInRange(pos, radius);
 }
 
 std::vector<selected_object_type> World::getObjectsInRange(glm::vec3 const& pos, float radius, bool ignore_height, bool iter_wmos_, bool iter_m2s)
@@ -1712,7 +2006,8 @@ std::vector<selected_object_type> World::getObjectsInRange(glm::vec3 const& pos,
     return objects_hit_list;
 }
 
-void World::flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation)
+void World::flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation,
+                           Noggit::BrushFalloffCurve const* radial_falloff)
 {
   ZoneScoped;
   for_all_chunks_in_range
@@ -1720,16 +2015,19 @@ void World::flattenTerrain(glm::vec3 const& pos, float remain, float radius, int
     , [&] (MapChunk* chunk)
       {
         NOGGIT_CUR_ACTION->registerChunkTerrainChange(chunk);
-        return chunk->flattenTerrain(pos, remain, radius, BrushType, mode, origin, angle, orientation);
+        return chunk->flattenTerrain(pos, remain, radius, BrushType, mode, origin, angle, orientation, radial_falloff);
       }
     , [this] (MapChunk* chunk)
       {
         recalc_norms (chunk);
       }
     );
+
+  updateWaterOpacityInRange(pos, radius);
 }
 
-void World::flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation)
+void World::flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation,
+                               Noggit::BrushFalloffCurve const* radial_falloff)
 {
   ZoneScoped;
   for_all_chunks_in_range
@@ -1737,13 +2035,15 @@ void World::flattenTerrainFast(glm::vec3 const& pos, float remain, float radius,
     , [&] (MapChunk* chunk)
       {
         NOGGIT_CUR_ACTION->registerChunkTerrainChange(chunk);
-        return chunk->flattenTerrainFast(pos, remain, radius, BrushType, mode, origin, angle, orientation);
+        return chunk->flattenTerrainFast(pos, remain, radius, BrushType, mode, origin, angle, orientation, radial_falloff);
       }
     , [this] (MapChunk* chunk)
       {
         recalc_norms (chunk);
       }
     );
+
+  updateWaterOpacityInRange(pos, radius);
 }
 
 void World::applyTerrainRamp(glm::vec3 const& A, glm::vec3 const& B, float radius, float cap_len, float blend_strength)
@@ -1773,6 +2073,8 @@ void World::applyTerrainRamp(glm::vec3 const& A, glm::vec3 const& B, float radiu
         recalc_norms(chunk);
       }
     );
+
+  updateWaterOpacityInRange(mid, range);
 }
 
 std::vector<std::pair<SceneObject*, float>> World::getObjectsGroundDistance(glm::vec3 const& pos, float radius, bool iter_wmos_, bool iter_m2s)
@@ -1796,7 +2098,8 @@ std::vector<std::pair<SceneObject*, float>> World::getObjectsGroundDistance(glm:
     return objects_ground_distance;
 }
 
-void World::blurTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode)
+void World::blurTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode,
+                        Noggit::BrushFalloffCurve const* radial_falloff)
 {
   ZoneScoped;
   for_all_chunks_in_range
@@ -1815,6 +2118,7 @@ void World::blurTerrain(glm::vec3 const& pos, float remain, float radius, int Br
                                       auto res (GetVertex (x, z, &vec));
                                       return res ? std::optional<float>(vec.y) : std::nullopt;
                                     }*/
+                                  , radial_falloff
                                   );
       }
     , [this] (MapChunk* chunk)
@@ -1822,9 +2126,12 @@ void World::blurTerrain(glm::vec3 const& pos, float remain, float radius, int Br
         recalc_norms (chunk);
       }
     );
+
+  updateWaterOpacityInRange(pos, radius);
 }
 
-void World::blurTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode)
+void World::blurTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode,
+                            Noggit::BrushFalloffCurve const* radial_falloff)
 {
   ZoneScoped;
   for_all_chunks_in_range
@@ -1832,13 +2139,15 @@ void World::blurTerrainFast(glm::vec3 const& pos, float remain, float radius, in
     , [&] (MapChunk* chunk)
       {
         NOGGIT_CUR_ACTION->registerChunkTerrainChange(chunk);
-        return chunk->blurTerrainFast (pos, remain, radius, BrushType, mode);
+        return chunk->blurTerrainFast (pos, remain, radius, BrushType, mode, radial_falloff);
       }
     , [this] (MapChunk* chunk)
       {
         recalc_norms (chunk);
       }
     );
+
+  updateWaterOpacityInRange(pos, radius);
 }
 
 void World::recalc_norms (MapChunk* chunk) const
@@ -3072,6 +3381,53 @@ void World::autoGenWaterTrans(const TileIndex& pos, float factor)
   });
 }
 
+void World::setAutoWaterOpacityOnTerrainEdit(bool enabled)
+{
+  _auto_water_opacity_on_terrain_edit = enabled;
+}
+
+bool World::autoWaterOpacityOnTerrainEdit() const
+{
+  return _auto_water_opacity_on_terrain_edit;
+}
+
+void World::updateWaterOpacityForChunk(MapChunk* chunk)
+{
+  if (!_auto_water_opacity_on_terrain_edit || !chunk)
+  {
+    return;
+  }
+
+  ChunkWater* water = chunk->liquid_chunk();
+  if (!water || water->getLayers()->empty())
+  {
+    return;
+  }
+
+  water->updateOpacityFromTerrain(chunk);
+
+  if (NOGGIT_CUR_ACTION)
+  {
+    NOGGIT_CUR_ACTION->registerChunkLiquidChange(chunk);
+  }
+}
+
+void World::updateWaterOpacityInRange(glm::vec3 const& pos, float radius)
+{
+  if (!_auto_water_opacity_on_terrain_edit)
+  {
+    return;
+  }
+
+  ZoneScoped;
+
+  for_all_chunks_in_range(pos, radius, [this](MapChunk* chunk)
+  {
+    updateWaterOpacityForChunk(chunk);
+    return false;
+  });
+}
+
 void World::CleanupEmptyTexturesChunks()
 {
     ZoneScoped;
@@ -3281,6 +3637,7 @@ void World::updateSelectedVertices()
   {
     chunk->registerChunkUpdate(ChunkUpdateFlags::VERTEX);
     recalc_norms (chunk);
+    updateWaterOpacityForChunk(chunk);
   }
 }
 

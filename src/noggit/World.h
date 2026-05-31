@@ -11,16 +11,23 @@
 #include <noggit/ContextObject.hpp>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_set>
 #include <vector>
 #include <array>
+#include <noggit/SunOccluderInstance.hpp>
 #include <noggit/rendering/WorldRender.hpp>
+#include <noggit/VolumetricFog.hpp>
+#include <noggit/MapHeaders.h>
+
+#include <external/tsl/robin_map.h>
 
 namespace Noggit
 {
   struct object_paste_params;
   struct VertexSelectionCache;
+  class BrushFalloffCurve;
 }
 
 namespace Noggit::Ui::Tools::ChunkManipulator
@@ -36,7 +43,11 @@ namespace BlizzardDatabaseLib::Structures
 struct TileIndex;
 struct flatten_mode;
 
+class Model;
+class WMOInstance;
+
 class Brush;
+class MapChunk;
 class MapTile;
 class QPixmap;
 class QProgressDialog;
@@ -46,6 +57,16 @@ static const float detail_size = 8.0f;
 
 using StripType = uint16_t;
 
+struct SoundEmitterRef
+{
+  MapChunk* chunk = nullptr;
+  std::size_t index = 0;
+
+  friend bool operator==(SoundEmitterRef const& lhs, SoundEmitterRef const& rhs) noexcept
+  {
+    return lhs.chunk == rhs.chunk && lhs.index == rhs.index;
+  }
+};
 
 class World
 {
@@ -109,7 +130,9 @@ protected:
   Noggit::world_tile_update_queue _tile_update_queue;
 
   std::vector<PointLight> _point_lights;
+  std::vector<VolumetricFogEntry> _volumetric_fogs;
   std::optional<std::size_t> _selected_point_light_index;
+  std::optional<SoundEmitterRef> _selected_sound_emitter;
 public:
   std::vector<selection_group> _selection_groups;
 
@@ -159,6 +182,21 @@ public:
                              , bool animate
                              );
 
+  //! When occluders is non-empty, only those instances are tested (per-ray filtered shadow bake).
+  bool isSunOccluded ( glm::vec3 const& from
+                     , glm::vec3 const& sun_dir
+                     , float max_dist
+                     , glm::mat4x4 const& model_view
+                     , bool animate_models
+                     , bool draw_models
+                     , bool draw_wmo
+                     , bool draw_hidden_models
+                     , bool draw_wmo_exterior
+                     , tsl::robin_map<Model*, std::vector<glm::mat4x4>> const* culled_models = nullptr
+                     , std::vector<WMOInstance*> const* culled_wmos = nullptr
+                     , std::span<SunOccluderInstance const> occluders = {}
+                     );
+
   MapChunk* getChunkAt(glm::vec3 const& pos);
 
   bool isInIndoorWmoGroup(std::array<glm::vec3, 2> obj_bounds, glm::mat4x4 obj_transform);
@@ -179,8 +217,20 @@ public:
   std::vector<PointLight> const& pointLights() const { return _point_lights; }
   std::vector<PointLight>& pointLights() { return _point_lights; }
 
+  std::vector<VolumetricFogEntry> const& volumetricFogs() const { return _volumetric_fogs; }
+  void setVolumetricFogs(std::vector<VolumetricFogEntry> fogs) { _volumetric_fogs = std::move(fogs); }
+
   std::optional<std::size_t> selectedPointLightIndex() const { return _selected_point_light_index; }
   void selectedPointLightIndex(std::optional<std::size_t> index) { _selected_point_light_index = index; }
+
+  [[nodiscard]] std::optional<SoundEmitterRef> selectedSoundEmitter() const { return _selected_sound_emitter; }
+  void setSelectedSoundEmitter(std::optional<SoundEmitterRef> ref) { _selected_sound_emitter = std::move(ref); }
+  void clearSelectedSoundEmitter() { _selected_sound_emitter.reset(); }
+  [[nodiscard]] ENTRY_MCSE* getSelectedSoundEmitterEntry();
+  [[nodiscard]] ENTRY_MCSE const* getSelectedSoundEmitterEntry() const;
+  void markSoundEmitterChunkDirty(MapChunk* chunk);
+  //! Moves the selected emitter into \a new_chunk when translate crosses a chunk boundary.
+  void relocateSelectedSoundEmitter(MapChunk* new_chunk);
 
   //! ADT tile indices (0..63) and MCNK indices (0..15) for a world position.
   static void worldPosToAdtMcnk(glm::vec3 const& pos, std::uint16_t& out_adt_x, std::uint16_t& out_adt_z, int& out_mcnk_x, int& out_mcnk_z);
@@ -289,19 +339,25 @@ public:
   template<typename Fun>
     void for_tile_at_force(const TileIndex& pos, Fun&&);
 
-  void changeObjectsWithTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius, bool iter_wmos_ = true, bool iter_m2s = true);
-  void changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius);
+  void changeObjectsWithTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius, bool iter_wmos_ = true, bool iter_m2s = true,
+                                Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
+  void changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius,
+                     Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
   std::vector<selected_object_type> getObjectsInRange(glm::vec3 const& pos, float radius, bool ignore_height = true, bool iter_wmos_ = true, bool iter_m2s = true);
   void changeShader(glm::vec3 const& pos, glm::vec4 const& color, float change, float radius, bool editMode);
   void stampShader(glm::vec3 const& pos, glm::vec4 const& color, float change, float radius, bool editMode, QImage* img, bool paint, bool use_image_colors);
   void replaceShader(glm::vec3 const& pos, glm::vec4 const& color, float radius, QImage* img, bool use_image_mask, bool use_image_colors);
   glm::vec3 pickShaderColor(glm::vec3 const& pos);
-  void flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
-  void flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
+  void flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation,
+                        Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
+  void flattenTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation,
+                          Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
   void applyTerrainRamp(glm::vec3 const& A, glm::vec3 const& B, float radius, float cap_len, float blend_strength);
   std::vector<std::pair<SceneObject*, float>> getObjectsGroundDistance(glm::vec3 const& pos, float radius, bool iter_wmos_, bool iter_m2s);
-  void blurTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode);
-  void blurTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode);
+  void blurTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode,
+                   Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
+  void blurTerrainFast(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode,
+                        Noggit::BrushFalloffCurve const* radial_falloff = nullptr);
   bool paintTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, scoped_blp_texture_reference texture);
   bool stampTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, scoped_blp_texture_reference texture, QImage* img, bool paint);
   bool sprayTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, float spraySize, float sprayPressure, scoped_blp_texture_reference texture);
@@ -430,6 +486,8 @@ public:
   int getWaterType(const TileIndex& tile, int layer) const;
   void autoGenWaterTrans(const TileIndex&, float factor);
 
+  void setAutoWaterOpacityOnTerrainEdit(bool enabled);
+  bool autoWaterOpacityOnTerrainEdit() const;
 
   void fixAllGaps();
 
@@ -527,5 +585,9 @@ protected:
 
   // unsigned _n_loaded_objects; // done from instance storage size currently
   unsigned _n_rendered_objects = 0;
+
+  bool _auto_water_opacity_on_terrain_edit = true;
+  void updateWaterOpacityInRange(glm::vec3 const& pos, float radius);
+  void updateWaterOpacityForChunk(MapChunk* chunk);
 
 };

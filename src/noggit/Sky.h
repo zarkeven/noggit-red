@@ -4,8 +4,10 @@
 #include <noggit/ModelInstance.h>
 #include <noggit/ContextObject.hpp>
 #include <noggit/rendering/Primitives.hpp>
+#include <noggit/ModernLightData.hpp>
 #include <opengl/scoped.hpp>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -164,8 +166,12 @@ public:
     std::vector<SkyColor> colorRows[NUM_SkyColorNames];
     std::vector<SkyFloatParam> floatParams[NUM_SkyFloatParamsNames];
 
-    // potential structure rework, more similar to retail/classic LightData.db
-    // std::vector<LightData> lightData;
+    std::vector<LightDataKeyframe> light_data_keyframes;
+    bool uses_modern_light_data = false;
+
+    [[nodiscard]] bool has_modern_light_data() const { return uses_modern_light_data && !light_data_keyframes.empty(); }
+    bool interpolate_light_data(int time, LightDataKeyframe& out) const;
+    [[nodiscard]] std::vector<SkyColor> color_row_preview(int color_index) const;
 
     bool highlight_sky() const;
     float river_shallow_alpha() const;
@@ -214,6 +220,7 @@ public:
   std::string name;
 
   explicit Sky(DBCFile::Iterator data, Noggit::NoggitRenderContext context);
+  explicit Sky(ModernLightRecord const& data, Noggit::NoggitRenderContext context);
 
   int getId() const;;
 
@@ -228,6 +235,7 @@ public:
 
   glm::vec3 colorFor(int r, int t) const;
   float floatParamFor(int r, int t) const;
+  bool lightDataFor(int time, LightDataKeyframe& out) const;
 
   float weight = 0.0f;
   bool global = false;
@@ -253,6 +261,8 @@ class Skies
 {
 private:
   void loadZoneLights(int map_id);
+  void apply_light_data_fog(LightDataKeyframe const& kf);
+  void blend_light_data_fog(LightDataKeyframe const& kf, float weight, float weight_remain);
 
   int numSkies = 0;
   int cs = -1;
@@ -281,6 +291,16 @@ private:
   float _cloud_density = 1.0f;
   float _unknown_float_param4 = 1.0f;
   float _unknown_float_param5 = 1.0f;
+
+  float _fog_density = 0.f;
+  glm::vec3 _end_fog_color{0.f};
+  float _end_fog_color_distance = 0.f;
+  glm::vec3 _fog_height_color{0.f};
+  float _fog_height = 0.f;
+  float _fog_height_scaler = 0.f;
+  float _fog_height_density = 0.f;
+  float _fog_height_coeff[4]{};
+  float _main_fog_coeff[4]{};
 
 public:
   // Light Zones
@@ -358,6 +378,15 @@ public:
   float glow() const;;
 
   float fogRate() const;
+  float fog_density() const;
+  glm::vec3 end_fog_color() const;
+  float end_fog_color_distance() const;
+  glm::vec3 fog_height_color() const;
+  float fog_height() const;
+  float fog_height_scaler() const;
+  float fog_height_density() const;
+  std::array<float, 4> fog_height_coeff() const;
+  std::array<float, 4> main_fog_coeff() const;
 
   void unload();
 

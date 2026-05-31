@@ -103,6 +103,11 @@ map_horizon::map_horizon(const std::string& basename, const MapIndex * const ind
   if (!Application::NoggitApplication::instance()->clientData()->exists(_filename))
   {
     LogError << "file \"World\\Maps\\" << basename << "\\" << basename << ".wdl\" does not exist." << std::endl;
+    // Still build the Qt minimap from the WDT (tile flags) so UI code never draws a null QImage.
+    if (index)
+    {
+      set_minimap(index);
+    }
     return;
   }
 

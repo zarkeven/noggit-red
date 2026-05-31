@@ -179,7 +179,11 @@ void MapTile::finishLoading()
 
   BlizzardArchive::ClientFile theFile(_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
 
-  Log << "Opening tile " << index.x << ", " << index.z << " (\"" << _file_key.stringRepr() << "\") from " << (theFile.isExternal() ? "disk" : "MPQ") << "." << std::endl;
+  if (LoadTraceEnabled())
+  {
+    Log << "Opening tile " << index.x << ", " << index.z << " (\"" << _file_key.stringRepr() << "\") from "
+        << (theFile.isExternal() ? "disk" : "MPQ") << "." << std::endl;
+  }
 
   // - Parsing the file itself. --------------------------
 
@@ -1968,6 +1972,11 @@ bool MapTile::childrenFinishedLoading()
 // TODO : we can store a cache of unloaded models/textures to check fast instead of re iterating everything.
 bool MapTile::texturesFinishedLoading()
 {
+  if (loading_failed())
+  {
+    return false;
+  }
+
   if (_textures_finished_loading)
     return true;
 
@@ -1976,6 +1985,11 @@ bool MapTile::texturesFinishedLoading()
   {
     for (int j = 0; j < 16; ++j)
     {
+      if (!mChunks[j][i])
+      {
+        return false;
+      }
+
       auto& chunk = *mChunks[j][i];
       auto& chunk_textures = *(chunk.texture_set->getTextures());
       for (int k = 0; k < chunk.texture_set->num(); ++k)
@@ -1991,6 +2005,11 @@ bool MapTile::texturesFinishedLoading()
 
 bool MapTile::objectsFinishedLoading()
 {
+  if (loading_failed())
+  {
+    return false;
+  }
+
   if (_objects_finished_loading)
     return true;
 

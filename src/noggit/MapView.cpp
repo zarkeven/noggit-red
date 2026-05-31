@@ -1,8 +1,11 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
+#include <algorithm>
+
 #include <noggit/DBC.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapView.h>
 #include <noggit/MapHeaders.h>
+#include <noggit/ModernLightTables.hpp>
 #include <noggit/Misc.h>
 #include <noggit/ModelManager.h> // ModelManager
 #include <noggit/TextureManager.h> // TextureManager, Texture
@@ -26,6 +29,7 @@
 #include <noggit/ui/TexturePicker.h>
 #include <noggit/ui/TexturingGUI.h>
 #include <noggit/ui/RampCreationTool.hpp>
+#include <noggit/ui/BrushCursorTool.hpp>
 #include <noggit/ui/Toolbar.h> // Noggit::Ui::toolbar
 #include <noggit/ui/Water.h>
 #include <noggit/ui/ZoneIDBrowser.h>
@@ -84,6 +88,7 @@
 #include <noggit/ToolDrawParameters.hpp>
 #include <noggit/tools/RaiseLowerTool.hpp>
 #include <noggit/tools/FlattenBlurTool.hpp>
+#include <noggit/tools/TerrainUnifiedTool.hpp>
 #include <noggit/tools/TexturingTool.hpp>
 #include <noggit/tools/HoleTool.hpp>
 #include <noggit/tools/AreaTool.hpp>
@@ -95,6 +100,7 @@
 #include <noggit/tools/StampTool.hpp>
 #include <noggit/tools/LightTool.hpp>
 #include <noggit/tools/PointLightTool.hpp>
+#include <noggit/tools/SoundEmitterTool.hpp>
 #include <noggit/tools/ScriptingTool.hpp>
 #include <noggit/tools/ChunkTool.hpp>
 #include <noggit/tools/AreaTriggerTool.hpp>
@@ -342,6 +348,12 @@ void MapView::set_editing_mode(editing_mode mode)
     clearPointLightPropertyEditFallback();
   }
 
+  if (mode != editing_mode::sound_emitter)
+  {
+    _world->clearSelectedSoundEmitter();
+    setDrawSoundEmittersForEditing(false);
+  }
+
   _toolbar->check_tool (mode);
   this->activateWindow();
 
@@ -353,6 +365,23 @@ void MapView::set_editing_mode(editing_mode mode)
 editing_mode MapView::get_editing_mode() const
 {
   return terrainMode;
+}
+
+void MapView::setTerrainUnifiedSurfaceOverlayVisible(bool surface_family_active)
+{
+  if (terrainMode != editing_mode::terrain_unified || ui_hidden)
+  {
+    return;
+  }
+
+  _viewport_overlay_ui->flattenRaiseLowerBar->setVisible(surface_family_active);
+  if (surface_family_active)
+  {
+    QSignalBlocker const br(_viewport_overlay_ui->flattenRaiseToggle);
+    QSignalBlocker const bl(_viewport_overlay_ui->flattenLowerToggle);
+    _viewport_overlay_ui->flattenRaiseToggle->setChecked(_left_sec_toolbar->flattenRaiseChecked());
+    _viewport_overlay_ui->flattenLowerToggle->setChecked(_left_sec_toolbar->flattenLowerChecked());
+  }
 }
 
 void MapView::setToolPropertyWidgetVisibility(editing_mode mode)
@@ -378,6 +407,12 @@ void MapView::setToolPropertyWidgetVisibility(editing_mode mode)
       _viewport_overlay_ui->flattenRaiseToggle->setChecked(_left_sec_toolbar->flattenRaiseChecked());
       _viewport_overlay_ui->flattenLowerToggle->setChecked(_left_sec_toolbar->flattenLowerChecked());
     }
+    break;
+
+  case editing_mode::terrain_unified:
+    _viewport_overlay_ui->gizmoBar->setVisible(false);
+    // Flatten raise/lower strip is toggled dynamically by TerrainUnifiedTool (surface family).
+    _viewport_overlay_ui->flattenRaiseLowerBar->setVisible(false);
     break;
 
   default:
@@ -1080,6 +1115,100 @@ void MapView::recordPointLightListChange(std::function<void()> mut)
   }
 }
 
+void MapView::touchSoundEmitterPropertyUndoBatch()
+{
+  if (!_world)
+    return;
+
+  auto const sel = _world->selectedSoundEmitter();
+  if (!sel || !sel->chunk || sel->index >= sel->chunk->sound_emitters.size())
+    return;
+
+  if (_sound_emitter_gizmo_edit_action)
+    return;
+
+  if (NOGGIT_CUR_ACTION)
+  {
+    if (!_sound_emitter_property_undo_session
+        || (NOGGIT_CUR_ACTION->getFlags() & Noggit::ActionFlags::eCHUNKS_SOUND_EMITTERS) == 0
+        || NOGGIT_CUR_ACTION->getModalityControllers() != Noggit::ActionModalityControllers::eNONE)
+      return;
+
+    _sound_emitter_property_undo_timer.start(400);
+    return;
+  }
+
+  if (Noggit::Action* const action = NOGGIT_ACTION_MGR->beginAction(this,
+                                                                    Noggit::ActionFlags::eCHUNKS_SOUND_EMITTERS,
+                                                                    Noggit::ActionModalityControllers::eNONE))
+  {
+    action->registerChunkSoundEmitterChange(sel->chunk);
+    _sound_emitter_property_undo_session = true;
+    _sound_emitter_property_undo_timer.start(400);
+  }
+}
+
+void MapView::flushSoundEmitterPropertyUndoBatch()
+{
+  if (_sound_emitter_property_undo_timer.isActive())
+    _sound_emitter_property_undo_timer.stop();
+
+  if (!_sound_emitter_property_undo_session)
+    return;
+
+  if (NOGGIT_CUR_ACTION
+      && (NOGGIT_CUR_ACTION->getFlags() & Noggit::ActionFlags::eCHUNKS_SOUND_EMITTERS)
+      && NOGGIT_CUR_ACTION->getModalityControllers() == Noggit::ActionModalityControllers::eNONE)
+  {
+    NOGGIT_ACTION_MGR->endAction();
+  }
+
+  _sound_emitter_property_undo_session = false;
+}
+
+void MapView::recordSoundEmitterChange(std::function<void()> mut)
+{
+  flushSoundEmitterPropertyUndoBatch();
+
+  if (NOGGIT_CUR_ACTION)
+  {
+    mut();
+    return;
+  }
+
+  if (Noggit::Action* const action = NOGGIT_ACTION_MGR->beginAction(this,
+                                                                    Noggit::ActionFlags::eCHUNKS_SOUND_EMITTERS,
+                                                                    Noggit::ActionModalityControllers::eNONE))
+  {
+    mut();
+    NOGGIT_ACTION_MGR->endAction();
+  }
+  else
+  {
+    mut();
+  }
+}
+
+void MapView::setDrawSoundEmittersForEditing(bool editing)
+{
+  if (editing)
+  {
+    if (!_draw_sound_emitters_for_editing)
+    {
+      _draw_sound_emitters_before_editing = _draw_sound_emitters.get();
+      _draw_sound_emitters.set(true);
+      _draw_sound_emitters_for_editing = true;
+    }
+  }
+  else if (_draw_sound_emitters_for_editing)
+  {
+    if (_draw_sound_emitters_before_editing.has_value())
+      _draw_sound_emitters.set(*_draw_sound_emitters_before_editing);
+    _draw_sound_emitters_before_editing.reset();
+    _draw_sound_emitters_for_editing = false;
+  }
+}
+
 void MapView::setPointLightGizmoSuppressedForColorPick(bool suppressed)
 {
   if (_point_light_suppress_gizmo_for_color_pick == suppressed)
@@ -1319,6 +1448,12 @@ void MapView::setupEditMenu()
   edit_menu->addAction(createTextSeparator("Options"));
   edit_menu->addSeparator();
   ADD_TOGGLE_NS (edit_menu, "Locked cursor mode", _locked_cursor_mode);
+
+  edit_menu->addSeparator();
+  {
+    QAction* action = edit_menu->addAction(tr("Brush cursor..."));
+    connect(action, &QAction::triggered, this, [this] { openBrushCursorTool(); });
+  }
 
   edit_menu->addSeparator();
   edit_menu->addAction(createTextSeparator("State"));
@@ -2159,6 +2294,12 @@ void MapView::setupViewMenu()
   ADD_TOGGLE (view_menu, "WMO doodads", Qt::Key_F2, _draw_wmo_doodads);
   ADD_TOGGLE (view_menu, "Terrain",     Qt::Key_F3, _draw_terrain);
   ADD_TOGGLE (view_menu, "Water",       Qt::Key_F4, _draw_water);
+  ADD_TOGGLE_NS (view_menu, "Auto water opacity (terrain)", _auto_water_opacity_on_terrain_edit);
+  connect(&_auto_water_opacity_on_terrain_edit, &Noggit::BoolToggleProperty::changed, this,
+          [this]
+          {
+            _world->setAutoWaterOpacityOnTerrainEdit(_auto_water_opacity_on_terrain_edit.get());
+          });
   ADD_TOGGLE (view_menu, "WMOs",        Qt::Key_F6, _draw_wmo);
 
   ADD_TOGGLE_POST (view_menu, "Sea level (y = 0)", Qt::SHIFT | Qt::Key_F8, _draw_sea_level_plane,
@@ -2232,6 +2373,13 @@ void MapView::setupViewMenu()
           _world->renderer()->getTerrainParamsUniformBlock()->draw_shadows = _draw_baked_shadows.get();
           _world->renderer()->markTerrainParamsUniformBlockDirty();
       });
+
+  ADD_TOGGLE_NS(view_menu, "Realtime shadows (M2 / WMO)", _draw_realtime_shadows);
+  connect (&_draw_realtime_shadows, &Noggit::BoolToggleProperty::changed, this, [this] (bool)
+    {
+      _world->renderer()->invalidateRealtimeShadows();
+      update();
+    });
 
   ADD_TOGGLE_NS (view_menu, "Flight Bounds", _draw_mfbo);
 
@@ -2618,6 +2766,8 @@ void MapView::setupHotkeys()
   addHotkey(Qt::Key_Plus, MOD_alt, "increaseRadius"_hash);
   addHotkey(Qt::Key_Minus, MOD_alt, "decreaseRadius"_hash);
 
+  addHotkey(Qt::Key_C, MOD_shift, [this] { cycleBrushCursorStyle(); });
+
   addHotkey (Qt::Key_1, MOD_shift, [this] { _camera.move_speed = 15.0f; });
   addHotkey (Qt::Key_2, MOD_shift, [this] { _camera.move_speed = 50.0f; });
   addHotkey (Qt::Key_3, MOD_shift, [this] { _camera.move_speed = 200.0f; });
@@ -2629,9 +2779,45 @@ void MapView::setupHotkeys()
   addHotkey(Qt::Key_4, MOD_alt, "setBrushLevel75Pct"_hash);
   addHotkey(Qt::Key_5, MOD_alt, "setBrushLevel100Pct"_hash);
 
-  addHotkey(Qt::Key_1, MOD_none, [this] { set_editing_mode(editing_mode::ground); }
+  addHotkey(Qt::Key_1, MOD_none, [this] {
+    bool const classic = _settings->value(QStringLiteral("terrain_tools/classic_split"), false).toBool();
+    if (classic)
+      set_editing_mode(editing_mode::ground);
+    else
+    {
+      if (get_editing_mode() == editing_mode::terrain_unified)
+      {
+        if (auto* t = dynamic_cast<Noggit::TerrainUnifiedTool*>(activeTool().get()))
+          t->setUnifiedFamilyToSculpt();
+      }
+      else
+      {
+        set_editing_mode(editing_mode::terrain_unified);
+        if (auto* t = dynamic_cast<Noggit::TerrainUnifiedTool*>(activeTool().get()))
+          t->setUnifiedFamilyToSculpt();
+      }
+    }
+  }
     , [this] { return !_mod_num_down && !NOGGIT_CUR_ACTION;  });
-  addHotkey (Qt::Key_2, MOD_none, [this] { set_editing_mode (editing_mode::flatten_blur); }
+  addHotkey (Qt::Key_2, MOD_none, [this] {
+    bool const classic = _settings->value(QStringLiteral("terrain_tools/classic_split"), false).toBool();
+    if (classic)
+      set_editing_mode (editing_mode::flatten_blur);
+    else
+    {
+      if (get_editing_mode() == editing_mode::terrain_unified)
+      {
+        if (auto* t = dynamic_cast<Noggit::TerrainUnifiedTool*>(activeTool().get()))
+          t->setUnifiedFamilyToSurface();
+      }
+      else
+      {
+        set_editing_mode(editing_mode::terrain_unified);
+        if (auto* t = dynamic_cast<Noggit::TerrainUnifiedTool*>(activeTool().get()))
+          t->setUnifiedFamilyToSurface();
+      }
+    }
+  }
     , [this] { return !_mod_num_down && !NOGGIT_CUR_ACTION;  });
   addHotkey (Qt::Key_3, MOD_none, [this] { set_editing_mode (editing_mode::paint); }
     , [this] { return !_mod_num_down && !NOGGIT_CUR_ACTION;  });
@@ -2765,8 +2951,16 @@ void MapView::createGUI()
 
   setupAssetBrowser();
 
-  _tools.emplace_back(std::make_unique<Noggit::RaiseLowerTool>(this))->setupUi(_tool_panel_dock);
-  _tools.emplace_back(std::make_unique<Noggit::FlattenBlurTool>(this))->setupUi(_tool_panel_dock);
+  bool const classic_terrain_split = _settings->value(QStringLiteral("terrain_tools/classic_split"), false).toBool();
+  if (classic_terrain_split)
+  {
+    _tools.emplace_back(std::make_unique<Noggit::RaiseLowerTool>(this))->setupUi(_tool_panel_dock);
+    _tools.emplace_back(std::make_unique<Noggit::FlattenBlurTool>(this))->setupUi(_tool_panel_dock);
+  }
+  else
+  {
+    _tools.emplace_back(std::make_unique<Noggit::TerrainUnifiedTool>(this))->setupUi(_tool_panel_dock);
+  }
   _tools.emplace_back(std::make_unique<Noggit::TexturingTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::HoleTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::AreaTool>(this))->setupUi(_tool_panel_dock);
@@ -2778,6 +2972,7 @@ void MapView::createGUI()
   _tools.emplace_back(std::make_unique<Noggit::StampTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::LightTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::PointLightTool>(this))->setupUi(_tool_panel_dock);
+  _tools.emplace_back(std::make_unique<Noggit::SoundEmitterTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::ScriptingTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::ChunkTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::AreaTriggerTool>(this))->setupUi(_tool_panel_dock);
@@ -2795,6 +2990,7 @@ void MapView::createGUI()
   setupFileMenu();
   setupEditMenu();
   setupViewMenu();
+  _world->setAutoWaterOpacityOnTerrainEdit(_auto_water_opacity_on_terrain_edit.get());
   setupToolsMenu();
   setupAssistMenu();
   setupHelpMenu();
@@ -2810,7 +3006,7 @@ void MapView::createGUI()
 
   connect(_main_window, &Noggit::Ui::Windows::NoggitWindow::exitPromptOpened, this, &MapView::on_exit_prompt);
 
-  set_editing_mode (editing_mode::ground);
+  set_editing_mode(classic_terrain_split ? editing_mode::ground : editing_mode::terrain_unified);
 
   // do we need to do this every tick ?
 #ifdef USE_MYSQL_UID_STORAGE
@@ -3006,6 +3202,11 @@ MapView::MapView( math::degrees camera_yaw0
   _point_light_property_undo_timer.setSingleShot(true);
   connect(&_point_light_property_undo_timer, &QTimer::timeout, this, [this] {
     flushPointLightPropertyUndoBatch();
+  });
+
+  _sound_emitter_property_undo_timer.setSingleShot(true);
+  connect(&_sound_emitter_property_undo_timer, &QTimer::timeout, this, [this] {
+    flushSoundEmitterPropertyUndoBatch();
   });
 
   // reduce frame rate in background
@@ -3303,7 +3504,8 @@ void MapView::paintGL()
 
   _last_update = now;
 
-  if (_gizmo_on.get() && _world->has_selection() && !_world->selectedPointLightIndex().has_value())
+  if (_gizmo_on.get() && _world->has_selection() && !_world->selectedPointLightIndex().has_value()
+      && !_world->selectedSoundEmitter().has_value())
   {
     ImGui::SetCurrentContext(_imgui_context);
     QtImGui::newFrame();
@@ -3538,6 +3740,132 @@ void MapView::paintGL()
     _point_light_gizmo_was_over = false;
   }
 
+  // Sound emitter gizmo: translate position and scale influence box.
+  if (terrainMode == editing_mode::sound_emitter && _gizmo_on.get() && _world->selectedSoundEmitter().has_value()
+      && _display_mode == display_mode::in_3D)
+  {
+    flushSoundEmitterPropertyUndoBatch();
+    ImGui::SetCurrentContext(_imgui_context);
+    QtImGui::newFrame();
+
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::SetNextWindowPos(ImVec2(-100.f, -100.f));
+    ImGui::Begin("SoundEmitterGizmo", nullptr, ImGuiWindowFlags_::ImGuiWindowFlags_NoTitleBar
+                                                  | ImGuiWindowFlags_::ImGuiWindowFlags_NoBackground);
+
+    ImGuizmo::SetID(static_cast<int>(Noggit::Ui::Tools::ViewportGizmo::GizmoContext::MAP_VIEW) + 1338);
+    ImGuizmo::SetDrawlist();
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetScaleGizmoAxisLock(true);
+    ImGuizmo::BeginFrame();
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+
+    ENTRY_MCSE* entry = _world->getSelectedSoundEmitterEntry();
+    if (entry)
+    {
+      glm::vec3 const pos(entry->pos[0], entry->pos[1], entry->pos[2]);
+      glm::vec3 const box_size = glm::max(glm::vec3(entry->size[0], entry->size[1], entry->size[2]), glm::vec3(0.01f));
+
+      glm::mat4x4 object_matrix = glm::translate(glm::mat4x4(1.f), pos) * glm::scale(glm::mat4x4(1.f), box_size);
+      glm::mat4x4 delta_matrix = glm::mat4x4(1.f);
+
+      ImGuizmo::Manipulate(glm::value_ptr(_model_view), glm::value_ptr(_projection),
+                           _gizmo_operation, _gizmo_mode,
+                           glm::value_ptr(object_matrix), glm::value_ptr(delta_matrix), nullptr);
+
+      _sound_emitter_gizmo_was_over = ImGuizmo::IsOver();
+
+      bool const using_gizmo = ImGuizmo::IsUsing();
+      if (using_gizmo)
+      {
+        auto const sel = *_world->selectedSoundEmitter();
+        if (!_sound_emitter_gizmo_edit_action && !NOGGIT_CUR_ACTION)
+        {
+          if (Noggit::Action* action = NOGGIT_ACTION_MGR->beginAction(this, Noggit::ActionFlags::eCHUNKS_SOUND_EMITTERS,
+                                                                    Noggit::ActionModalityControllers::eLMB))
+          {
+            action->registerChunkSoundEmitterChange(sel.chunk);
+            _sound_emitter_gizmo_edit_action = true;
+          }
+        }
+
+        glm::vec3 new_scale;
+        glm::quat new_orientation;
+        glm::vec3 new_translation;
+        glm::vec3 new_skew_;
+        glm::vec4 new_perspective_;
+        glm::decompose(delta_matrix, new_scale, new_orientation, new_translation, new_skew_, new_perspective_);
+
+        bool changed = false;
+        switch (_gizmo_operation)
+        {
+          case ImGuizmo::OPERATION::TRANSLATE:
+            if (new_translation.x != 0.0f || new_translation.y != 0.0f || new_translation.z != 0.0f)
+            {
+              entry->pos[0] += new_translation.x;
+              entry->pos[1] += new_translation.y;
+              entry->pos[2] += new_translation.z;
+
+              glm::vec3 const new_pos(entry->pos[0], entry->pos[1], entry->pos[2]);
+              if (MapChunk* new_chunk = _world->getChunkAt(new_pos);
+                  new_chunk && new_chunk != sel.chunk)
+              {
+                if (NOGGIT_CUR_ACTION)
+                  NOGGIT_CUR_ACTION->registerChunkSoundEmitterChange(new_chunk);
+                _world->relocateSelectedSoundEmitter(new_chunk);
+                entry = _world->getSelectedSoundEmitterEntry();
+              }
+              else
+              {
+                _world->markSoundEmitterChunkDirty(sel.chunk);
+              }
+              changed = true;
+            }
+            break;
+          case ImGuizmo::OPERATION::SCALE:
+            if (new_scale.x != 1.0f || new_scale.y != 1.0f || new_scale.z != 1.0f)
+            {
+              ENTRY_MCSE* scale_entry = _world->getSelectedSoundEmitterEntry();
+              if (scale_entry)
+              {
+                scale_entry->size[0] = std::max(scale_entry->size[0] * new_scale.x, 0.01f);
+                scale_entry->size[1] = std::max(scale_entry->size[1] * new_scale.y, 0.01f);
+                scale_entry->size[2] = std::max(scale_entry->size[2] * new_scale.z, 0.01f);
+                if (auto const current_sel = _world->selectedSoundEmitter())
+                  _world->markSoundEmitterChunkDirty(current_sel->chunk);
+                changed = true;
+              }
+            }
+            break;
+          default:
+            break;
+        }
+
+        if (changed)
+          invalidate();
+      }
+      else if (_sound_emitter_gizmo_edit_action)
+      {
+        if (NOGGIT_CUR_ACTION)
+          NOGGIT_ACTION_MGR->endAction();
+        _sound_emitter_gizmo_edit_action = false;
+      }
+    }
+    else
+    {
+      _sound_emitter_gizmo_was_over = false;
+    }
+
+    ImGui::End();
+    ImGui::Render();
+  }
+  else
+  {
+    _sound_emitter_gizmo_was_over = false;
+  }
+
   if (_world->uid_duplicates_found() && !_uid_duplicate_warning_shown)
   {
     _uid_duplicate_warning_shown = true;
@@ -3594,8 +3922,14 @@ MapView::~MapView()
     // Now it crashes in application exit.
     // delete texturingTool;
 
-    _tools[static_cast<int>(editing_mode::paint)].reset();
-    _tools[static_cast<int>(editing_mode::object)].reset();
+    for (auto& t : _tools)
+    {
+      if (!t)
+        continue;
+      editing_mode const m = t->editingMode();
+      if (m == editing_mode::paint || m == editing_mode::object)
+        t.reset();
+    }
   }
   
   if (_force_uid_check)
@@ -3614,6 +3948,7 @@ MapView::~MapView()
   WMOManager::report();
 
   flushPointLightPropertyUndoBatch();
+  flushSoundEmitterPropertyUndoBatch();
   NOGGIT_ACTION_MGR->disconnect();
 
   _buffers.unload();
@@ -3932,6 +4267,9 @@ void MapView::tick (float dt)
     _world->update_models_emitters(dt);
   }
 
+  glm::vec3 const camera_pos = _debug_cam_mode.get() ? _debug_cam.position : _camera.position;
+  _sound_emitter_audio.update(_world.get(), camera_pos, _play_sound_emitters.get());
+
   if (_world->has_selection())
   {
     lastSelected = currentSelection;
@@ -4196,10 +4534,110 @@ bool MapView::screenNearSelectedPointLight(QPointF mouse_px) const
   return dist_px <= k_slop_px;
 }
 
+bool MapView::screenNearSelectedSoundEmitter(QPointF mouse_px) const
+{
+  ENTRY_MCSE const* entry = _world->getSelectedSoundEmitterEntry();
+  if (!entry)
+    return false;
+
+  glm::vec3 const pos(entry->pos[0], entry->pos[1], entry->pos[2]);
+  glm::vec4 const clip = _projection * _model_view * glm::vec4(pos, 1.0f);
+  if (clip.w <= 0.0f)
+    return false;
+
+  glm::vec3 const ndc = glm::vec3(clip) / clip.w;
+  if (ndc.x < -1.2f || ndc.x > 1.2f || ndc.y < -1.2f || ndc.y > 1.2f)
+    return false;
+
+  float const sx = (ndc.x * 0.5f + 0.5f) * static_cast<float>(width());
+  float const sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(height());
+
+  float const dx = sx - static_cast<float>(mouse_px.x());
+  float const dy = sy - static_cast<float>(mouse_px.y());
+  float const dist_px = std::sqrt(dx * dx + dy * dy);
+
+  static constexpr float k_slop_px = 120.f;
+  return dist_px <= k_slop_px;
+}
+
 void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
 {
   if (_world->get_selected_model_count() && _gizmo_on.get() && (_transform_gizmo.isUsing() || _transform_gizmo.isOver()))
     return;
+
+  // Sound emitters are only selectable in the sound emitter tool.
+  if (terrainMode == editing_mode::sound_emitter && !mouseMove && _display_mode == display_mode::in_3D
+      && !_transform_gizmo.isUsing() && !ImGuizmo::IsUsing())
+  {
+    float best_px = std::numeric_limits<float>::max();
+    float best_depth = std::numeric_limits<float>::max();
+    std::optional<SoundEmitterRef> best_ref = std::nullopt;
+
+    for (MapTile* tile : _world->mapIndex.loaded_tiles())
+    {
+      if (!tile || tile->loading_failed())
+        continue;
+
+      for (unsigned z = 0; z < 16u; ++z)
+      {
+        for (unsigned x = 0; x < 16u; ++x)
+        {
+          MapChunk* chunk = tile->getChunk(x, z);
+          if (!chunk)
+            continue;
+
+          for (std::size_t i = 0; i < chunk->sound_emitters.size(); ++i)
+          {
+            auto const& emitter = chunk->sound_emitters[i];
+            glm::vec3 const pos(emitter.pos[0], emitter.pos[1], emitter.pos[2]);
+
+            glm::vec4 const clip = _projection * _model_view * glm::vec4(pos, 1.0f);
+            if (clip.w <= 0.0f)
+              continue;
+
+            glm::vec3 const ndc = glm::vec3(clip) / clip.w;
+            if (ndc.x < -1.2f || ndc.x > 1.2f || ndc.y < -1.2f || ndc.y > 1.2f)
+              continue;
+
+            float const sx = (ndc.x * 0.5f + 0.5f) * static_cast<float>(width());
+            float const sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(height());
+
+            float const dx = sx - static_cast<float>(_last_mouse_pos.x());
+            float const dy = sy - static_cast<float>(_last_mouse_pos.y());
+            float const dist_px = std::sqrt(dx * dx + dy * dy);
+
+            static constexpr float k_pick_px = 20.f;
+            if (dist_px <= k_pick_px)
+            {
+              if (dist_px < best_px || (dist_px == best_px && ndc.z < best_depth))
+              {
+                best_px = dist_px;
+                best_depth = ndc.z;
+                best_ref = SoundEmitterRef{ chunk, i };
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (best_ref.has_value())
+    {
+      _world->setSelectedSoundEmitter(*best_ref);
+      _world->reset_selection();
+      invalidate();
+      return;
+    }
+
+    bool const mod_multiselect = _mod_shift_down || _mod_ctrl_down;
+    if (!mod_multiselect
+        && _gizmo_on.get()
+        && _world->selectedSoundEmitter().has_value()
+        && (_sound_emitter_gizmo_was_over || screenNearSelectedSoundEmitter(_last_mouse_pos)))
+    {
+      return;
+    }
+  }
 
   // Point lights are only selectable in the point light tool (see set_editing_mode for clear on mode change).
   if (terrainMode == editing_mode::point_light && !mouseMove && _display_mode == display_mode::in_3D
@@ -4275,6 +4713,7 @@ void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
       _world->reset_selection();
       _world->selectedPointLightIndex(std::nullopt);
       clearPointLightPropertyEditFallback();
+      _world->clearSelectedSoundEmitter();
     }
   }
   else
@@ -4284,6 +4723,7 @@ void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
     {
       _world->selectedPointLightIndex(std::nullopt);
       clearPointLightPropertyEditFallback();
+      _world->clearSelectedSoundEmitter();
     }
 
     if (terrainMode == editing_mode::object || terrainMode == editing_mode::minimap)
@@ -4494,7 +4934,8 @@ void MapView::draw_map()
     // When a point light is selected, world selection is often still empty; treat per-frame picking as hover-only
     // (mouseMove=true) so empty ray hits do not clear the light every frame. World point-light picking itself is
     // only active in editing_mode::point_light (see doSelection).
-    bool const hover_only = _world->selectedPointLightIndex().has_value();
+    bool const hover_only = _world->selectedPointLightIndex().has_value()
+                         || _world->selectedSoundEmitter().has_value();
     doSelection(true, hover_only);
   }
 
@@ -4509,6 +4950,9 @@ void MapView::draw_map()
 
   renderParams.cursorRotation = _cursorRotation;
   renderParams.cursor_type = _cursorType;
+  renderParams.brush_cursor_style = _brush_cursor_style;
+  renderParams.inner_cursor_outline_color = _inner_cursor_outline_color;
+  renderParams.outer_cursor_outline_color = brushCursorOuterOutlineColorForRender();
   renderParams.brush_radius = radius;
   renderParams.show_unpaintable_chunks = show_unpaintable;
   renderParams.draw_only_inside_light_sphere = _left_sec_toolbar->drawOnlyInsideSphereLight();
@@ -4517,6 +4961,14 @@ void MapView::draw_map()
   renderParams.draw_point_lights = _draw_point_lights.get();
   renderParams.draw_point_light_spheres = _draw_point_light_spheres.get();
   renderParams.point_light_sphere_opacity = _point_light_sphere_opacity;
+  renderParams.draw_sound_emitters = _draw_sound_emitters.get() || _draw_sound_emitters_for_editing;
+  if (auto const sel = _world->selectedSoundEmitter();
+      sel && sel->chunk && sel->index < sel->chunk->sound_emitters.size())
+  {
+    auto const& e = sel->chunk->sound_emitters[sel->index];
+    renderParams.selected_sound_emitter_pos = glm::vec3(e.pos[0], e.pos[1], e.pos[2]);
+    renderParams.has_selected_sound_emitter = true;
+  }
   renderParams.inner_radius_ratio = inner_radius;
   renderParams.angle = angle;
   renderParams.orientation = orientation;
@@ -4550,6 +5002,7 @@ void MapView::draw_map()
   renderParams.render_select_wmo_groups_bounds = _render_wmo_groups_bounds;
 
   renderParams.draw_texture_layer_count_overlay = _draw_texture_layer_count_overlay.get();
+  renderParams.draw_realtime_shadows = _draw_realtime_shadows.get();
 
   if (terrainMode == editing_mode::mccv && _mod_alt_down && _draw_terrain.get())
   {
@@ -5217,8 +5670,31 @@ void MapView::save(save_mode mode)
       if (auto* const app = Noggit::Application::NoggitApplication::instance();
           app && app->hasClientData())
       {
-        Noggit::Integrations::EpsilonPatchExporter::instance().export_map (
-          *epsilon_cfg, _world->basename, app->clientData());
+        if (epsilon_cfg->export_map_basename.empty())
+        {
+          Log << "Epsilon patch export: no export map set in settings; skipping." << std::endl;
+        }
+        else
+        {
+          auto to_lower = [] (std::string s) {
+            for (char& c : s)
+              if (c >= 'A' && c <= 'Z')
+                c = static_cast<char>(c - 'A' + 'a');
+            return s;
+          };
+
+          if (to_lower (_world->basename) != to_lower (epsilon_cfg->export_map_basename))
+          {
+            Log << "Epsilon patch export: open map \"" << _world->basename
+                << "\" does not match export map \"" << epsilon_cfg->export_map_basename
+                << "\"; skipping." << std::endl;
+          }
+          else
+          {
+            Noggit::Integrations::EpsilonPatchExporter::instance().export_map (
+              *epsilon_cfg, epsilon_cfg->export_map_basename, app->clientData(), _world.get());
+          }
+        }
       }
     }
 
@@ -5314,6 +5790,11 @@ void MapView::unloadOpenglData()
 
   for (MapTile* tile : _world->mapIndex.loaded_tiles())
   {
+    if (!tile || tile->loading_failed())
+    {
+      continue;
+    }
+
     tile->renderer()->unload();
     tile->Water.renderer()->unload();
 
@@ -5321,7 +5802,10 @@ void MapView::unloadOpenglData()
     {
       for (int j = 0; j < 16; ++j)
       {
-        tile->getChunk(i, j)->unload();
+        if (MapChunk* chunk = tile->getChunk(i, j))
+        {
+          chunk->unload();
+        }
       }
     }
   }
@@ -5411,6 +5895,106 @@ void MapView::clearRampPoints()
 void MapView::openRampCreationTool()
 {
   ensureRampToolWindow();
+}
+
+namespace
+{
+  QString brushCursorStyleDisplayName(BrushCursorStyle style)
+  {
+    switch (style)
+    {
+      case BrushCursorStyle::TerrainWrap: return QObject::tr("Terrain wrap");
+      case BrushCursorStyle::FlatCircle: return QObject::tr("Flat circle");
+      case BrushCursorStyle::Sphere: return QObject::tr("Sphere");
+      case BrushCursorStyle::NoOutline: return QObject::tr("No outline");
+      case BrushCursorStyle::DottedOutline: return QObject::tr("Dotted outline");
+    }
+    return QObject::tr("Terrain wrap");
+  }
+}
+
+void MapView::setBrushCursorStyle(BrushCursorStyle style, bool persist, bool show_status)
+{
+  _brush_cursor_style = style;
+  if (persist)
+  {
+    _settings->setValue("brush_cursor/style", static_cast<int>(style));
+  }
+  if (show_status)
+  {
+    _main_window->statusBar()->showMessage(
+      tr("Brush cursor: %1").arg(brushCursorStyleDisplayName(style)), 3000);
+  }
+  if (_brush_cursor_tool_window)
+  {
+    _brush_cursor_tool_window->syncFromMapView();
+  }
+}
+
+void MapView::cycleBrushCursorStyle()
+{
+  int const max_style = static_cast<int>(BrushCursorStyle::DottedOutline);
+  int const next = (static_cast<int>(_brush_cursor_style) + 1) % (max_style + 1);
+  setBrushCursorStyle(static_cast<BrushCursorStyle>(next));
+}
+
+BrushCursorStyle MapView::brushCursorStyle() const
+{
+  return _brush_cursor_style;
+}
+
+void MapView::setBrushCursorOutlineColors(glm::vec4 inner, glm::vec4 outer, bool persist)
+{
+  _inner_cursor_outline_color = inner;
+  _outer_cursor_outline_color = outer;
+  if (persist)
+  {
+    _settings->setValue("brush_cursor/inner_color",
+                        QColor::fromRgbF(inner.r, inner.g, inner.b, inner.a));
+    _settings->setValue("brush_cursor/outer_color",
+                        QColor::fromRgbF(outer.r, outer.g, outer.b, outer.a));
+  }
+}
+
+glm::vec4 MapView::brushCursorInnerOutlineColor() const
+{
+  return _inner_cursor_outline_color;
+}
+
+glm::vec4 MapView::brushCursorOuterOutlineColor() const
+{
+  return _outer_cursor_outline_color;
+}
+
+glm::vec4 MapView::brushCursorOuterOutlineColorForRender()
+{
+  if (get_editing_mode() == editing_mode::mccv
+      && _brush_cursor_style == BrushCursorStyle::DottedOutline)
+  {
+    return activeTool()->drawParameters().cursor_color;
+  }
+  return _outer_cursor_outline_color;
+}
+
+void MapView::openBrushCursorTool()
+{
+  ensureBrushCursorToolWindow();
+}
+
+void MapView::ensureBrushCursorToolWindow()
+{
+  if (!_brush_cursor_tool_window)
+  {
+    _brush_cursor_tool_window = new Noggit::Ui::BrushCursorTool(this, _main_window);
+    QObject::connect(_brush_cursor_tool_window, &QObject::destroyed, this, [this]
+    {
+      _brush_cursor_tool_window = nullptr;
+    });
+  }
+  _brush_cursor_tool_window->syncFromMapView();
+  _brush_cursor_tool_window->show();
+  _brush_cursor_tool_window->raise();
+  _brush_cursor_tool_window->activateWindow();
 }
 
 void MapView::ensureRampToolWindow()
@@ -5602,6 +6186,16 @@ void MapView::onSettingsSave()
   glm::vec4 wireframe_color(c.redF(), c.greenF(), c.blueF(), c.alphaF());
   params->wireframe_color = wireframe_color;
 
+  _brush_cursor_style = static_cast<BrushCursorStyle>(
+    std::clamp(_settings->value("brush_cursor/style", 0).toInt(), 0,
+               static_cast<int>(BrushCursorStyle::DottedOutline)));
+
+  QColor inner_outline = _settings->value("brush_cursor/inner_color", QColor(255, 255, 255)).value<QColor>();
+  _inner_cursor_outline_color = glm::vec4(inner_outline.redF(), inner_outline.greenF(), inner_outline.blueF(), inner_outline.alphaF());
+
+  QColor outer_outline = _settings->value("brush_cursor/outer_color", QColor(255, 0, 0)).value<QColor>();
+  _outer_cursor_outline_color = glm::vec4(outer_outline.redF(), outer_outline.greenF(), outer_outline.blueF(), outer_outline.alphaF());
+
   _world->renderer()->directional_lightning = _settings->value("directional_lightning", true).toBool();
   _world->renderer()->local_lightning = _settings->value("local_lightning", true).toBool();
 
@@ -5640,6 +6234,7 @@ void MapView::onSettingsSave()
 
   auto app_config = Noggit::Application::NoggitApplication::instance()->getConfiguration();
   app_config->modern_features = _settings->value("modern_features", false).toBool();
+  ModernLightTables::instance().invalidate();
 
   bool const new_discord_enabled = _settings->value("integrations/discord_rich_presence", false).toBool();
   std::string const new_discord_app_id = _settings->value("integrations/discord_app_id", "959654402141085748").toString().toStdString();

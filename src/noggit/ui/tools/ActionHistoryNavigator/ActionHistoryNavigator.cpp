@@ -9,11 +9,43 @@
 #include <QListWidget>
 #include <QButtonGroup>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QRadioButton>
 #include <QDateTime>
 
 using namespace Noggit::Ui::Tools;
 using namespace Noggit::Ui;
+
+namespace
+{
+  QRadioButton* radioFromRow(QListWidget* stack, int row)
+  {
+    if (!stack || row < 0 || row >= stack->count())
+    {
+      return nullptr;
+    }
+
+    QListWidgetItem* item = stack->item(row);
+    if (!item)
+    {
+      return nullptr;
+    }
+
+    QWidget* widget = stack->itemWidget(item);
+    if (!widget)
+    {
+      return nullptr;
+    }
+
+    QLayout* layout = widget->layout();
+    if (!layout || layout->count() <= 0)
+    {
+      return nullptr;
+    }
+
+    return qobject_cast<QRadioButton*>(layout->itemAt(0)->widget());
+  }
+}
 
 ActionHistoryNavigator::ActionHistoryNavigator(QWidget* parent)
 : QWidget(parent)
@@ -38,11 +70,11 @@ ActionHistoryNavigator::ActionHistoryNavigator(QWidget* parent)
   _action_stack->setResizeMode(QListView::Adjust);
 
 
-  connect(action_mgr, &Noggit::ActionManager::popBack, this, &ActionHistoryNavigator::popBack);
-  connect(action_mgr, &Noggit::ActionManager::popFront, this, &ActionHistoryNavigator::popFront);
-  connect(action_mgr, &Noggit::ActionManager::addedAction, this, &ActionHistoryNavigator::pushAction);
-  connect(action_mgr, &Noggit::ActionManager::purged, this, &ActionHistoryNavigator::purge);
-  connect(action_mgr, &Noggit::ActionManager::currentActionChanged, this, &ActionHistoryNavigator::changeCurrentAction);
+  connect(action_mgr, &Noggit::ActionManager::popBack, this, &ActionHistoryNavigator::popBack, Qt::QueuedConnection);
+  connect(action_mgr, &Noggit::ActionManager::popFront, this, &ActionHistoryNavigator::popFront, Qt::QueuedConnection);
+  connect(action_mgr, &Noggit::ActionManager::addedAction, this, &ActionHistoryNavigator::pushAction, Qt::QueuedConnection);
+  connect(action_mgr, &Noggit::ActionManager::purged, this, &ActionHistoryNavigator::purge, Qt::QueuedConnection);
+  connect(action_mgr, &Noggit::ActionManager::currentActionChanged, this, &ActionHistoryNavigator::changeCurrentAction, Qt::QueuedConnection);
 
   connect(_active_action_button_group, &QButtonGroup::idClicked
           , [=](int index)
@@ -141,30 +173,34 @@ void ActionHistoryNavigator::pushAction(Noggit::Action* action)
 
 void ActionHistoryNavigator::popFront()
 {
+  if (_action_stack->count() <= 0)
+  {
+    return;
+  }
 
-  auto radio = static_cast<QRadioButton*>(static_cast<QHBoxLayout*>(_action_stack->itemWidget(
-    _action_stack->item(0))->layout())->itemAt(0)->widget());
-  _active_action_button_group->removeButton(radio);
-  delete radio;
+  if (QRadioButton* radio = radioFromRow(_action_stack, 0))
+  {
+    _active_action_button_group->removeButton(radio);
+  }
 
-  _action_stack->removeItemWidget(_action_stack->item(0));
-  auto item = _action_stack->takeItem(0);
-  delete item;
-
+  delete _action_stack->takeItem(0);
   updateStackSizeLabel();
 }
 
 void ActionHistoryNavigator::popBack()
 {
-  auto radio = static_cast<QRadioButton*>(static_cast<QHBoxLayout*>(_action_stack->itemWidget(
-    _action_stack->item(_action_stack->count() - 1))->layout())->itemAt(0)->widget());
-  _active_action_button_group->removeButton(radio);
-  delete radio;
+  int const row = _action_stack->count() - 1;
+  if (row < 0)
+  {
+    return;
+  }
 
-  _action_stack->removeItemWidget(_action_stack->item(_action_stack->count() - 1));
-  auto item = _action_stack->takeItem(_action_stack->count() - 1);
-  delete item;
+  if (QRadioButton* radio = radioFromRow(_action_stack, row))
+  {
+    _active_action_button_group->removeButton(radio);
+  }
 
+  delete _action_stack->takeItem(row);
   updateStackSizeLabel();
 }
 
@@ -172,10 +208,10 @@ void ActionHistoryNavigator::purge()
 {
   for (int i = 0; i < _action_stack->count(); ++i)
   {
-    auto radio = static_cast<QRadioButton*>(static_cast<QHBoxLayout*>(_action_stack->itemWidget(
-      _action_stack->item(i))->layout())->itemAt(0)->widget());
-    _active_action_button_group->removeButton(radio);
-    delete radio;
+    if (QRadioButton* radio = radioFromRow(_action_stack, i))
+    {
+      _active_action_button_group->removeButton(radio);
+    }
   }
   _action_stack->clear();
 
@@ -187,20 +223,23 @@ void ActionHistoryNavigator::changeCurrentAction(unsigned index)
   QSignalBlocker const _(_action_stack);
 
   int idx = _action_stack->count() - 1 - index;
-  if (idx >= 0)
+  if (idx >= 0 && idx < _action_stack->count())
   {
-    static_cast<QRadioButton*>(static_cast<QHBoxLayout*>(_action_stack->itemWidget(
-      _action_stack->item(idx))->layout())->itemAt(0)->widget())->setChecked(true);
+    if (QRadioButton* radio = radioFromRow(_action_stack, idx))
+    {
+      radio->setChecked(true);
+    }
   }
-  else if (_action_stack->count())
+  else if (_action_stack->count() > 0)
   {
     _active_action_button_group->setExclusive(false);
-    static_cast<QRadioButton*>(static_cast<QHBoxLayout*>(_action_stack->itemWidget(
-      _action_stack->item(0))->layout())->itemAt(0)->widget())->setChecked(false);
+    if (QRadioButton* radio = radioFromRow(_action_stack, 0))
+    {
+      radio->setChecked(false);
+    }
     _active_action_button_group->setExclusive(true);
   }
 
-  //_action_stack->setCurrentItem(_action_stack->item(_action_stack->count() - 1 - index));
   updateStackSizeLabel();
 }
 
