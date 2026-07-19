@@ -34,16 +34,21 @@ namespace Noggit::Rendering
     explicit LiquidTextureManager(Noggit::NoggitRenderContext context);
     LiquidTextureManager() = delete;
 
+    using LiquidTextureProfile = std::tuple<GLuint, glm::vec2, int, unsigned>;
+
     void upload();
     void unload();
 
-    tsl::robin_map<unsigned, std::tuple<GLuint, glm::vec2, int, unsigned>> const& getTextureFrames() { return _texture_frames_map; };
+    tsl::robin_map<unsigned, LiquidTextureProfile> const& getTextureFrames() { return _texture_frames_map; };
+
+    //! Exact liquid type profile, else id 1, else any loaded profile.
+    [[nodiscard]] LiquidTextureProfile const* findProfile(unsigned liquid_type_id) const;
 
   private:
     bool _uploaded = false;
 
     // liquidTypeRecID : (array, (animation_x, animation_y), liquid_type)
-    tsl::robin_map<unsigned, std::tuple<GLuint, glm::vec2, int, unsigned>> _texture_frames_map;
+    tsl::robin_map<unsigned, LiquidTextureProfile> _texture_frames_map;
 
     Noggit::NoggitRenderContext _context;
   };

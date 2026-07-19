@@ -160,6 +160,29 @@ namespace Noggit
       return _selected_tiles;
     }
 
+    void minimap_widget::set_checkout_overlays(std::vector<checkout_overlay_entry> overlays)
+    {
+      _checkout_overlays = std::move(overlays);
+      update();
+    }
+
+    void minimap_widget::clear_checkout_overlays()
+    {
+      _checkout_overlays.clear();
+      update();
+    }
+
+    bool minimap_widget::use_orange_selection_overlay() const
+    {
+      return _orange_selection_overlay;
+    }
+
+    void minimap_widget::set_use_orange_selection_overlay(bool state)
+    {
+      _orange_selection_overlay = state;
+      update();
+    }
+
     void minimap_widget::camera(Noggit::Camera* camera)
     {
       _camera = camera;
@@ -258,15 +281,37 @@ namespace Noggit
               
               if (_use_selection && _selected_tiles->at(64 * i + j))
               {
-                painter.setPen(QColor::fromRgbF(1.0f, 0.0f, 0.0f, 1.f));
-                painter.drawRect ( QRect ( tile_size * i + 1
-                    , tile_size * j + 1
-                    , tile_size - 2
-                    , tile_size - 2
-                    )
-                );
+                if (_orange_selection_overlay)
+                {
+                  painter.fillRect(QRect(tile_size * i, tile_size * j, tile_size, tile_size)
+                                  , QColor(255, 255, 255, 128));
+                }
+                else
+                {
+                  painter.setPen(QColor::fromRgbF(1.0f, 0.0f, 0.0f, 1.f));
+                  painter.drawRect ( QRect ( tile_size * i + 1
+                      , tile_size * j + 1
+                      , tile_size - 2
+                      , tile_size - 2
+                      )
+                  );
+                }
               }
             }
+          }
+
+          for (checkout_overlay_entry const& overlay : _checkout_overlays)
+          {
+            if (overlay.x >= 64 || overlay.z >= 64)
+            {
+              continue;
+            }
+
+            painter.fillRect(QRect(static_cast<int>(tile_size * overlay.x)
+                                , static_cast<int>(tile_size * overlay.z)
+                                , tile_size
+                                , tile_size)
+                            , QColor(255, 0, 0, 128));
           }
         }
 
@@ -434,6 +479,15 @@ namespace Noggit
       QPoint tile = locateTile(event);
 
       std::string str("ADT: " + std::to_string(tile.x()) + "_" + std::to_string(tile.y()));
+
+      for (checkout_overlay_entry const& overlay : _checkout_overlays)
+      {
+        if (static_cast<int>(overlay.x) == tile.x() && static_cast<int>(overlay.z) == tile.y())
+        {
+          str += " — checked out by " + overlay.owner;
+          break;
+        }
+      }
 
       QToolTip::showText(mapToGlobal(QPoint(event->pos().x(), event->pos().y() + 5)), QString::fromStdString(str));
 

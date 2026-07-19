@@ -14,7 +14,7 @@ layout (std140) uniform lighting
 };
 
 uniform float animtime;
-uniform sampler2DArray texture_samplers[14] ;
+uniform sampler2DArray texture_samplers[14];
 
 in float depth_;
 in vec2 tex_coord_;
@@ -97,7 +97,7 @@ vec2 rot2(vec2 p, float degree)
 void main()
 {
   // lava || slime
-  if(type == 2 || type == 3)
+  if(type == 2u || type == 3u)
   {
     out_color = get_tex_color(tex_coord_ + vec2(anim_uv.x*animtime / 2880.0, anim_uv.y*animtime / 2880.0), tex_array, tex_frame);
   }
@@ -105,12 +105,25 @@ void main()
   {
     vec2 uv = rot2(tex_coord_ * anim_uv.x, anim_uv.y);
     vec4 texel = get_tex_color(uv, tex_array, tex_frame);
+
     // depth_ is per-vertex water depth (terrain below surface): 0 at shore, 1 in deep water.
-    vec4 lerp = (type == 1)
+    vec4 lerp = (type == 1u)
               ? mix(OceanColorLight, OceanColorDark, depth_)
               : mix(RiverColorLight, RiverColorDark, depth_);
 
-    float alpha = (type == 1) ? 1.0 : min(1.0, lerp.a);
+    float alpha = 1.0;
+    if (type == 1u)
+    {
+      alpha = 1.0;
+    }
+    else
+    {
+      float shallow_a = RiverColorLight.a;
+      float deep_a = RiverColorDark.a;
+      alpha = mix(shallow_a, deep_a, depth_);
+      alpha = max(alpha, 0.55);
+    }
+
     out_color = vec4(clamp(texel.rgb + lerp.rgb, 0.0, 1.0), alpha);
   }
 

@@ -258,6 +258,7 @@ void WMOGroupRender::unload()
 
   _uploaded = false;
   _vao_is_setup = false;
+  _shadow_vao_is_setup = false;
 }
 
 void WMOGroupRender::setupVao(OpenGL::Scoped::use_program& wmo_shader)
@@ -288,12 +289,27 @@ void WMOGroupRender::setupVao(OpenGL::Scoped::use_program& wmo_shader)
   _vao_is_setup = true;
 }
 
+void WMOGroupRender::setupShadowVao(OpenGL::Scoped::use_program& wmo_shader)
+{
+  OpenGL::Scoped::index_buffer_manual_binder indices(_indices_buffer);
+  {
+    OpenGL::Scoped::vao_binder const _(_shadow_vao);
+
+    wmo_shader.attrib("position", _vertices_buffer, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+    indices.bind();
+  }
+
+  _shadow_vao_is_setup = true;
+}
+
 void WMOGroupRender::draw(OpenGL::Scoped::use_program& wmo_shader
     , math::frustum const& // frustum
     , const float& //cull_distance
     , const glm::vec3& //camera
     , bool // draw_fog
     , bool // world_has_skies
+    , bool shadow_depth_pass
 )
 {
   if (!_uploaded)
@@ -308,13 +324,33 @@ void WMOGroupRender::draw(OpenGL::Scoped::use_program& wmo_shader
     }
   }
 
-  if (!_vao_is_setup)
-  [[unlikely]]
+  if (shadow_depth_pass)
+  {
+    if (!_shadow_vao_is_setup)
+    {
+      setupShadowVao(wmo_shader);
+    }
+  }
+  else if (!_vao_is_setup)
   {
     setupVao(wmo_shader);
   }
 
-  OpenGL::Scoped::vao_binder const _ (_vao);
+  OpenGL::Scoped::vao_binder const _ (shadow_depth_pass ? _shadow_vao : _vao);
+
+  if (shadow_depth_pass)
+  {
+    OpenGL::Scoped::bool_setter<GL_CULL_FACE, GL_FALSE> const no_cull;
+
+    OpenGL::Scoped::index_buffer_manual_binder indices(_indices_buffer);
+
+    for (auto& draw_call : _draw_calls)
+    {
+      gl.drawElements (GL_TRIANGLES, draw_call.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(sizeof(std::uint16_t)*draw_call.index_start));
+    }
+
+    return;
+  }
 
   gl.activeTexture(GL_TEXTURE0);
   gl.bindTexture(GL_TEXTURE_BUFFER, _render_batch_tex);
@@ -348,9 +384,7 @@ void WMOGroupRender::draw(OpenGL::Scoped::use_program& wmo_shader
     }
 
     gl.drawElements (GL_TRIANGLES, draw_call.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(sizeof(std::uint16_t)*draw_call.index_start));
-
   }
-
 }
 
 void WMOGroupRender::initRenderBatches()

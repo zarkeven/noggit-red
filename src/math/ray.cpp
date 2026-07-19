@@ -26,11 +26,21 @@ namespace math
   }
 
   ray::ray(glm::vec3 origin, glm::vec3 const& direction)
-    : _origin(std::move(origin)), _direction(glm::normalize(direction))
+    : _origin(std::move(origin))
   {
+    float const len_sq = glm::dot(direction, direction);
+    if (len_sq > std::numeric_limits<float>::epsilon())
+    {
+      _direction = direction * (1.f / std::sqrt(len_sq));
+    }
+    else
+    {
+      _direction = glm::vec3(0.f, -1.f, 0.f);
+    }
+
     if (std::isnan(_direction.x) || std::isnan(_direction.y) || std::isnan(_direction.z))
     {
-      assert(false);
+      _direction = glm::vec3(0.f, -1.f, 0.f);
     }
   }
 

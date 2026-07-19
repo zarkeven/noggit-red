@@ -117,6 +117,8 @@ public:
 private:
   DBCFile() = default;
 
+  void loadFromBuffer(char const* buffer, std::size_t size);
+
   std::string filename;
   std::uint32_t recordSize = 0;
   std::uint32_t recordCount = 0;

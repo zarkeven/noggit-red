@@ -47,6 +47,7 @@ void WMORender::draw(OpenGL::Scoped::use_program& wmo_shader
     , bool interior_only
     , bool render_group_bounds
     , bool grouped
+    , bool shadow_depth_pass
 )
 {
 
@@ -56,11 +57,15 @@ void WMORender::draw(OpenGL::Scoped::use_program& wmo_shader
     return;
   }
 
-  wmo_shader.uniform("ambient_color",glm::vec3(_wmo->ambient_light_color));
+  if (!shadow_depth_pass)
+  {
+    wmo_shader.uniform("ambient_color",glm::vec3(_wmo->ambient_light_color));
+  }
 
   for (auto& group : _wmo->groups)
   {
-      if (interior_only && !group.is_indoor())
+      // Shadow casters must include exterior groups even when the view hides them.
+      if (!shadow_depth_pass && interior_only && !group.is_indoor())
       {
           continue;
       }
@@ -79,6 +84,7 @@ void WMORender::draw(OpenGL::Scoped::use_program& wmo_shader
         , camera
         , draw_fog
         , world_has_skies
+        , shadow_depth_pass
     );
 
     /*

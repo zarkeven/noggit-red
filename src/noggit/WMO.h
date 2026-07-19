@@ -24,6 +24,13 @@ class WMOInstance;
 class WMOManager;
 class Model;
 
+namespace Noggit::Wmo
+{
+  void load_root(WMO& wmo, BlizzardArchive::ClientFile& file);
+  [[nodiscard]] bool load_group(WMOGroup& group);
+  void ensure_split_child_groups_loaded(WMO& wmo);
+}
+
 namespace math
 {
   struct ray;
@@ -162,6 +169,9 @@ struct wmo_group_header
 class WMOGroup 
 {
   friend class Noggit::Rendering::WMOGroupRender;
+  friend void Noggit::Wmo::load_root(WMO& wmo, BlizzardArchive::ClientFile& file);
+  friend bool Noggit::Wmo::load_group(WMOGroup& group);
+  friend void Noggit::Wmo::ensure_split_child_groups_loaded(WMO& wmo);
 
 public:
   WMOGroup(WMO *wmo, BlizzardArchive::ClientFile* f, int num, char const* names);
@@ -225,6 +235,8 @@ private:
   std::unique_ptr<wmo_liquid> lq;
 
   std::vector <wmo_triangle_material_info> _material_infos;
+  std::vector<std::uint16_t> _mpy2_flags;
+  std::vector<std::uint16_t> _mpy2_material_ids;
   std::vector<wmo_batch> _batches;
 
   std::vector<::glm::vec3> _vertices;
@@ -300,9 +312,23 @@ static_assert ( sizeof (mohd_flags) == sizeof (std::uint16_t)
               , "bitfields shall be implemented packed"
               );
 
+struct WMOAmbientVolume
+{
+  glm::vec3 pos{};
+  float start = 0.f;
+  float end = 0.f;
+  glm::vec4 color1{0.f};
+  glm::vec4 color2{0.f};
+  glm::vec4 color3{0.f};
+  std::uint32_t flags = 0;
+  std::uint16_t doodad_set_id = 0;
+};
+
 class WMO : public AsyncObject
 {
   friend class Noggit::Rendering::WMORender;
+  friend void Noggit::Wmo::load_root(WMO& wmo, BlizzardArchive::ClientFile& file);
+  friend void Noggit::Wmo::ensure_split_child_groups_loaded(WMO& wmo);
 
 public:
   explicit WMO(BlizzardArchive::Listfile::FileKey const& file_key, Noggit::NoggitRenderContext context );
@@ -336,6 +362,13 @@ public:
   std::vector<WMOFog> fogs;
 
   std::vector<WMODoodadSet> doodadsets;
+
+  bool uses_modi_doodads = false;
+  std::vector<std::uint32_t> doodad_file_data_ids;
+  std::vector<std::uint32_t> doodad_color_mult;
+  std::vector<std::uint32_t> group_file_data_ids;
+  std::vector<WMOAmbientVolume> global_ambient_volumes;
+  std::vector<WMOAmbientVolume> doodad_ambient_volumes;
 
   std::optional<scoped_model_reference> skybox;
 

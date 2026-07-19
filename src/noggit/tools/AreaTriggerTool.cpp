@@ -15,6 +15,8 @@
 #include <external/glm/gtc/type_ptr.hpp>
 #include <external/glm/gtx/matrix_decompose.hpp>
 
+#include <QApplication>
+
 #include <type_traits>
 #include <variant>
 
@@ -95,11 +97,28 @@ namespace Noggit
     mapView()->disableGizmoBar();
   }
 
+  void AreaTriggerTool::onMousePress(MousePressParameters const& params)
+  {
+    if (params.button == Qt::MouseButton::MiddleButton)
+    {
+      _mmb_press_pos = params.mouse_position;
+      _mmb_pressed = true;
+    }
+  }
+
   void AreaTriggerTool::onMouseRelease(MouseReleaseParameters const& params)
   {
     if (params.button == Qt::MouseButton::MiddleButton)
     {
-      jump_to_area_trigger(params);
+      bool const was_short_click = _mmb_pressed
+        && (_mmb_press_pos - params.mouse_position).manhattanLength()
+             <= QApplication::startDragDistance();
+      _mmb_pressed = false;
+
+      if (was_short_click)
+      {
+        jump_to_area_trigger(params);
+      }
       return;
     }
 

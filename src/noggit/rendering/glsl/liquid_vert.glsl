@@ -68,7 +68,11 @@ float makeNaN(float nonneg)
 
 int get_texture_frame(int n_frames)
 {
-  return int(ceil(animtime / 60)) % n_frames;
+  if (n_frames <= 0)
+  {
+    return 0;
+  }
+  return int(ceil(animtime / 60.0)) % n_frames;
 }
 
 void main()

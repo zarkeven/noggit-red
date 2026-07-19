@@ -7,10 +7,13 @@
 
 #include <opengl/shader.hpp>
 
+#include <algorithm>
+
 using namespace Noggit::Rendering;
 
 LiquidRender::LiquidRender(MapTile* map_tile)
 : _map_tile(map_tile)
+, _need_buffer_update(true)
 {
 }
 
@@ -39,10 +42,13 @@ void LiquidRender::draw(math::frustum const& frustum
     _map_tile->Water.recalcExtents();
   }
 
-  std::size_t n_render_blocks = _render_layers.size();
-
   for (auto& render_layer : _render_layers)
   {
+    if (!render_layer.vertex_data_tex || !render_layer.chunk_data_buf || render_layer.n_used_chunks == 0)
+    {
+      continue;
+    }
+
     gl.bindBufferRange(GL_UNIFORM_BUFFER, OpenGL::ubo_targets::CHUNK_LIQUID_INSTANCE_INDEX, render_layer.chunk_data_buf, 0, sizeof(OpenGL::LiquidChunkInstanceDataUniformBlock) * 256);
 
     gl.activeTexture(GL_TEXTURE0);
@@ -55,9 +61,10 @@ void LiquidRender::draw(math::frustum const& frustum
     }
     else
     {
-      // In some cases samplers_upload_buf becomes empty and causes crash
       if (samplers_upload_buf.size() < N_SAMPLERS)
-          samplers_upload_buf.resize(N_SAMPLERS);
+      {
+        samplers_upload_buf.resize(N_SAMPLERS);
+      }
 
       std::fill(samplers_upload_buf.begin(), samplers_upload_buf.end(), -1);
 
@@ -69,7 +76,9 @@ void LiquidRender::draw(math::frustum const& frustum
       for (std::size_t j = 0; j < N_SAMPLERS; ++j)
       {
         if (samplers_upload_buf[j] < 0)
+        {
           break;
+        }
 
         gl.activeTexture(static_cast<GLenum>(GL_TEXTURE0 + 2 + j));
         gl.bindTexture(GL_TEXTURE_2D_ARRAY, samplers_upload_buf[j]);
@@ -77,24 +86,25 @@ void LiquidRender::draw(math::frustum const& frustum
 
       gl.drawArraysInstanced(GL_TRIANGLES, 0, 8 * 8 * 6, render_layer.n_used_chunks);
     }
-
   }
-
-
 }
+
 void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
 {
-  tsl::robin_map<unsigned, std::tuple<GLuint, glm::vec2, int, unsigned>> const& tex_frames = tex_manager->getTextureFrames();
-
-  // create opengl resources if needed
   if (_need_buffer_update)
   {
     _map_tile->Water._has_data = false;
 
     std::size_t layer_counter = 0;
-    for(;;)
+    for (;;)
     {
       std::size_t n_chunks = 0;
+
+      if (layer_counter < _render_layers.size())
+      {
+        _render_layers[layer_counter].texture_samplers.clear();
+      }
+
       for (std::size_t z = 0; z < 16; ++z)
       {
         for (std::size_t x = 0; x < 16; ++x)
@@ -102,7 +112,9 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
           ChunkWater* chunk = _map_tile->Water.chunks[z][x].get();
 
           if (layer_counter >= chunk->getLayers()->size())
+          {
             continue;
+          }
 
           if (!_map_tile->Water._has_data)
           {
@@ -111,7 +123,6 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
 
           liquid_layer& layer = (*chunk->getLayers())[layer_counter];
 
-          // create layer
           if (layer_counter >= _render_layers.size())
           {
             auto& render_layer = _render_layers.emplace_back();
@@ -124,12 +135,24 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
 
             gl.genBuffers(1, &render_layer.chunk_data_buf);
             gl.bindBuffer(GL_UNIFORM_BUFFER, render_layer.chunk_data_buf);
-            gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::LiquidChunkInstanceDataUniformBlock) * 256, NULL, GL_DYNAMIC_DRAW);}
+            gl.bufferData(GL_UNIFORM_BUFFER, sizeof(OpenGL::LiquidChunkInstanceDataUniformBlock) * 256, NULL, GL_DYNAMIC_DRAW);
+          }
 
           auto& layer_params = _render_layers[layer_counter];
 
-          // fill per-chunk data
-          std::tuple<GLuint, glm::vec2, int, unsigned> const& tex_profile = tex_frames.at(layer.liquidID());
+          if (n_chunks >= layer_params.chunk_data.size())
+          {
+            continue;
+          }
+
+          LiquidTextureManager::LiquidTextureProfile const* const tex_profile_ptr
+            = tex_manager->findProfile(static_cast<unsigned>(layer.liquidID()));
+          if (!tex_profile_ptr)
+          {
+            continue;
+          }
+
+          LiquidTextureManager::LiquidTextureProfile const& tex_profile = *tex_profile_ptr;
           OpenGL::LiquidChunkInstanceDataUniformBlock& params_data = layer_params.chunk_data[n_chunks];
 
           params_data.xbase = layer.getChunk()->xbase;
@@ -142,7 +165,7 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
 
           if (it != layer_params.texture_samplers.end())
           {
-            sampler_index = std::distance(layer_params.texture_samplers.begin(), it);
+            sampler_index = static_cast<unsigned int>(std::distance(layer_params.texture_samplers.begin(), it));
           }
           else
           {
@@ -151,8 +174,8 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
           }
 
           params_data.texture_array = sampler_index;
-          params_data.type = std::get<2>(tex_profile);
-          params_data.n_texture_frames = std::get<3>(tex_profile);
+          params_data.type = static_cast<unsigned>(std::get<2>(tex_profile));
+          params_data.n_texture_frames = std::max(1u, std::get<3>(tex_profile));
 
           glm::vec2 anim = std::get<1>(tex_profile);
           params_data.anim_u = anim.x;
@@ -163,10 +186,7 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
           params_data.subchunks_1 = subchunks & 0xFF'FF'FF'FF;
           params_data.subchunks_2 = subchunks >> 32;
 
-          // fill vertex data
           auto& vertices = layer.getVertices();
-          // auto& tex_coords = layer.getTexCoords();
-          // auto& depth = layer.getDepth();
 
           for (int z_v = 0; z_v < 9; ++z_v)
           {
@@ -174,7 +194,12 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
             {
               const unsigned v_index = z_v * 9 + x_v;
               glm::vec2& tex_coord = vertices[v_index].uv;
-              layer_params.vertex_data[n_chunks][v_index] = glm::vec4(vertices[v_index].position.y, vertices[v_index].depth, tex_coord.x, tex_coord.y);
+              layer_params.vertex_data[n_chunks][v_index] = glm::vec4(
+                vertices[v_index].position.y,
+                vertices[v_index].depth,
+                tex_coord.x,
+                tex_coord.y
+              );
             }
           }
 
@@ -182,8 +207,7 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
         }
       }
 
-
-      if (!n_chunks) // break and clean-up
+      if (!n_chunks)
       {
         if (long diff = static_cast<long>(_render_layers.size() - layer_counter); diff > 0)
         {
@@ -208,8 +232,8 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
         gl.bindTexture(GL_TEXTURE_2D_ARRAY, layer_params.vertex_data_tex);
         gl.bindBuffer(GL_UNIFORM_BUFFER, layer_params.chunk_data_buf);
 
-        gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::LiquidChunkInstanceDataUniformBlock) * 256, layer_params.chunk_data.data());
-        gl.texSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 9, 9, 256, GL_RGBA, GL_FLOAT, layer_params.vertex_data.data());
+        gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::LiquidChunkInstanceDataUniformBlock) * n_chunks, layer_params.chunk_data.data());
+        gl.texSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 9, 9, static_cast<GLsizei>(n_chunks), GL_RGBA, GL_FLOAT, layer_params.vertex_data.data());
       }
 
       layer_counter++;
@@ -218,7 +242,6 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
     _need_buffer_update = false;
   }
 }
-
 
 void LiquidRender::unload()
 {
@@ -231,10 +254,8 @@ void LiquidRender::unload()
   }
 
   _render_layers.clear();
-
 }
 
 void LiquidRender::upload()
 {
-
 }

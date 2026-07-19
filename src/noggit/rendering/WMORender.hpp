@@ -47,6 +47,7 @@ namespace Noggit::Rendering
         , bool interior_only
         , bool draw_select_group_bounds
         , bool grouped
+        , bool shadow_depth_pass = false
     );
 
     bool drawSkybox(glm::mat4x4 const& model_view

@@ -15,6 +15,7 @@
 #include <noggit/WMOInstance.h> // WMOInstance
 #include <noggit/World.h>
 #include <noggit/World.inl>
+#include <noggit/integrations/MapCheckoutManager.hpp>
 
 #include <math/ray.hpp>
 
@@ -619,6 +620,11 @@ std::uint32_t MapTile::effectiveAdtPointLightCap() const
   return _adt_point_light_cap_enc == 0 ? 104u : static_cast<std::uint32_t>(_adt_point_light_cap_enc);
 }
 
+std::uint8_t MapTile::adtPointLightCapEncoded() const
+{
+  return _adt_point_light_cap_enc;
+}
+
 void MapTile::setAdtPointLightCap(std::uint32_t cap_wow_style)
 {
   _adt_point_light_cap_enc = (cap_wow_style == 104u)
@@ -647,6 +653,18 @@ void MapTile::saveTile(World* world)
 
 void MapTile::save(World* world, bool save_using_mclq_liquids)
 {
+  auto& checkout_mgr = Noggit::Integrations::MapCheckoutManager::instance();
+  if (!checkout_mgr.canSaveTile(index))
+  {
+    if (auto const owner = checkout_mgr.ownerOf(index))
+    {
+      checkout_mgr.recordBlockedSave(index, *owner);
+    }
+    return;
+  }
+
+  checkout_mgr.recordSuccessfulSave(index);
+
   Log << "Saving ADT \"" << _file_key.stringRepr() << "\"." << std::endl;
 
   int lID;  // This is a global counting variable. Do not store something in here you need later.

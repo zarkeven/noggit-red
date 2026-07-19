@@ -1453,6 +1453,11 @@ bool World::isSunOccluded ( glm::vec3 const& from
     return false;
   }
 
+  if (glm::dot(sun_dir, sun_dir) <= 1e-8f)
+  {
+    return false;
+  }
+
   constexpr float k_ray_epsilon = 0.35f;
   math::ray const ray (from + sun_dir * k_ray_epsilon, sun_dir);
   float closest = max_dist;
@@ -4695,7 +4700,13 @@ bool World::is_point_occluded_by_terrain(const glm::vec3& point,
     return true;
   }*/
 
-  math::ray ray(camera_position, point - camera_position); // 3d display mode only.
+  glm::vec3 const dir = point - camera_position;
+  if (glm::dot(dir, dir) <= std::numeric_limits<float>::epsilon())
+  {
+    return false;
+  }
+
+  math::ray ray(camera_position, dir); // 3d display mode only.
 
   // intersect only terrain with a ray to object's position
   selection_result terrain_intersect_results

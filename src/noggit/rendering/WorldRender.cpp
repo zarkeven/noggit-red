@@ -144,6 +144,87 @@ namespace
     gl.activeTexture (GL_TEXTURE0);
   }
 
+  static float distance_sq (glm::vec3 const& a, glm::vec3 const& b)
+  {
+    glm::vec3 const d = a - b;
+    return glm::dot (d, d);
+  }
+
+  static float expand_shadow_ortho_for_casters (
+    glm::vec3 const& camera_pos
+  , float base_extent
+  , tsl::robin_map<Model*, std::vector<glm::mat4x4>> const& models_to_draw
+  , std::vector<WMOInstance*> const& wmos_to_draw
+  )
+  {
+    float extent = base_extent;
+
+    auto expand_point = [&] (glm::vec3 const& world_pos)
+    {
+      glm::vec2 const delta {
+        world_pos.x - camera_pos.x
+      , world_pos.z - camera_pos.z
+      };
+      extent = std::max (extent, std::max (std::abs (delta.x), std::abs (delta.y)) + 128.f);
+    };
+
+    for (WMOInstance* inst : wmos_to_draw)
+    {
+      if (!inst)
+      {
+        continue;
+      }
+
+      std::array<glm::vec3, 2> const& ext = inst->getExtents();
+      for (int ix = 0; ix < 2; ++ix)
+      {
+        for (int iy = 0; iy < 2; ++iy)
+        {
+          for (int iz = 0; iz < 2; ++iz)
+          {
+            expand_point ({
+              ix ? ext[1].x : ext[0].x
+            , iy ? ext[1].y : ext[0].y
+            , iz ? ext[1].z : ext[0].z
+            });
+          }
+        }
+      }
+    }
+
+    for (auto const& pair : models_to_draw)
+    {
+      if (!pair.first)
+      {
+        continue;
+      }
+
+      glm::vec3 const bb_min = misc::transform_model_box_coords (pair.first->bounding_box_min);
+      glm::vec3 const bb_max = misc::transform_model_box_coords (pair.first->bounding_box_max);
+
+      for (glm::mat4x4 const& inst : pair.second)
+      {
+        for (int ix = 0; ix < 2; ++ix)
+        {
+          for (int iy = 0; iy < 2; ++iy)
+          {
+            for (int iz = 0; iz < 2; ++iz)
+            {
+              glm::vec3 const local {
+                ix ? bb_max.x : bb_min.x
+              , iy ? bb_max.y : bb_min.y
+              , iz ? bb_max.z : bb_min.z
+              };
+              expand_point (glm::vec3 (inst * glm::vec4 (local, 1.f)));
+            }
+          }
+        }
+      }
+    }
+
+    return std::min (extent, 1200.f);
+  }
+
   static bool can_draw_gpu_sun_shadows (WorldRenderParams const& render_settings)
   {
     if (render_settings.minimap_render)
@@ -182,7 +263,7 @@ namespace
     }
 
     shader.uniform("realtime_shadows_enabled", 1);
-    shader.uniform("shadow_darkness", 0.55f);
+    shader.uniform("shadow_darkness", 0.45f);
     shader.uniform("sun_shadow_matrix", shadow_map.matrices().view_proj_bias);
     shader.uniform("sun_shadow_light_dir", shadow_map.light_travel_direction());
     gl.activeTexture(GL_TEXTURE0 + k_shadow_tex_unit);
@@ -598,7 +679,7 @@ void WorldRender::upload()
 
   _sun_shadow_wmo_program.reset(
     new OpenGL::program{
-      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("wmo_vs") },
+      { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("sun_shadow_wmo_depth_vs") },
       { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("sun_shadow_wmo_depth_fs") },
     });
 
@@ -611,9 +692,7 @@ void WorldRender::upload()
   }
 
   {
-    std::vector<int> samplers {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
     OpenGL::Scoped::use_program wmo_shadow_shader { *_sun_shadow_wmo_program.get() };
-    wmo_shadow_shader.uniform("texture_samplers", samplers);
   }
 }
 
@@ -649,6 +728,9 @@ void WorldRender::drawSunShadowDepthPass ( glm::vec3 const& camera_pos
   if (render_settings.draw_wmo && _sun_shadow_wmo_program)
   {
     OpenGL::Scoped::use_program wmo_shader { *_sun_shadow_wmo_program.get() };
+    OpenGL::Scoped::bool_setter<GL_BLEND, GL_FALSE> const blend_off;
+    OpenGL::Scoped::depth_mask_setter<GL_TRUE> const depth_write_on;
+
     wmo_shader.uniform ("model_view", light_view);
     wmo_shader.uniform ("projection", light_projection);
 
@@ -659,25 +741,33 @@ void WorldRender::drawSunShadowDepthPass ( glm::vec3 const& camera_pos
         continue;
       }
 
-      instance->draw (
-        wmo_shader
-      , light_view
-      , light_projection
-      , frustum
-      , _cull_distance
-      , camera_pos
-      , false
-      , false
-      , false
-      , false
-      , _world->animtime
-      , false
-      , render_settings.display_mode
-      , false
-      , render_settings.draw_wmo_exterior
-      , false
-      , false
-      );
+      try
+      {
+        instance->draw (
+          wmo_shader
+        , light_view
+        , light_projection
+        , frustum
+        , _cull_distance
+        , camera_pos
+        , false
+        , false
+        , false
+        , false
+        , _world->animtime
+        , false
+        , render_settings.display_mode
+        , true
+        , true
+        , false
+        , false
+        , true
+        );
+      }
+      catch (...)
+      {
+        continue;
+      }
     }
   }
 
@@ -751,6 +841,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
   ZoneScoped;
 
+  Noggit::register_crash_render_stage("WorldRender::draw:enter");
+
   glm::mat4x4 const mvp(projection * model_view);
   math::frustum const frustum (mvp);
 
@@ -764,10 +856,13 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     int daytime = static_cast<int>(_world->time) % 2880;
     // always render local lights in sky/lightning editing mode.
     bool render_local_lightning = render_settings.editing_mode == editing_mode::light ? true : local_lightning;
-    _skies->update_sky_colors(camera_pos, daytime, !render_local_lightning);
-    updateLightingUniformBlock(render_settings.draw_fog, camera_pos);
-    updateModernFogUniformBlock(render_settings.draw_fog, camera_pos);
-    updatePointLightsUniformBlock(render_settings.draw_point_lights, camera_pos);
+    bool const sky_updated = _skies->update_sky_colors(camera_pos, daytime, !render_local_lightning);
+    if (sky_updated)
+    {
+      updateLightingUniformBlock(render_settings.draw_fog, camera_pos);
+    }
+    updateModernFogUniformBlock(render_settings.draw_fog, camera_pos, render_settings.camera_moved);
+    updatePointLightsUniformBlock(render_settings.draw_point_lights, camera_pos, render_settings.camera_moved);
   }
   else
   {
@@ -1048,7 +1143,9 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       render_settings.display_mode);
   }
 
-  if (modern_features && render_settings.draw_fog && !render_settings.minimap_render)
+  if (modern_features && render_settings.draw_fog && !render_settings.minimap_render
+      && (render_settings.editing_mode == editing_mode::light
+          || render_settings.editing_mode == editing_mode::point_light))
   {
     drawVolumetricFogDebug(model_view, projection, camera_pos, _cull_distance);
   }
@@ -1101,7 +1198,13 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       std::max (700.f, _view_distance * 0.5f)
     , 1100.f
     );
-    float const ortho_extent = std::min (std::max (max_shadow_dist * 0.35f, 240.f), 400.f);
+    float const base_ortho_extent = std::min (std::max (max_shadow_dist * 0.5f, 320.f), 800.f);
+    float const ortho_extent = expand_shadow_ortho_for_casters (
+      camera_pos
+    , base_ortho_extent
+    , models_to_draw
+    , wmos_to_draw
+    );
     _gpu_sun_shadow.prepare_frame (
       camera_pos
     , sun_dir
@@ -1109,6 +1212,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     , max_shadow_dist * 1.15f
     );
 
+    // Rebake every frame: casters (M2/WMO) move independently of the camera texel snap heuristic.
     drawSunShadowDepthPass (
       camera_pos
     , sun_dir
@@ -1208,9 +1312,10 @@ void WorldRender::draw (glm::mat4x4 const& model_view
           continue;
 
         // Limit rate uploading alphamap data to avoid long frame times (causes freezes)
-        // TODO make it dynamic based on target frame time and last frame times
+        // Skip uploads entirely while the camera is moving — stutter-free navigation.
+        unsigned int const max_chunk_updates = render_settings.camera_moved ? 0u : _frame_max_chunk_updates;
         bool skip_updates = false;
-        if (num_chunks_uploaded_alphamap > _frame_max_chunk_updates)
+        if (num_chunks_uploaded_alphamap > max_chunk_updates)
           skip_updates = true;
 
         if (render_settings.draw_chunk_manipulator_selection && !render_settings.minimap_render
@@ -1244,7 +1349,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
             , skip_updates
         );
 
-        // Chunk Manipulator live paste preview: draw ghost terrain using cached height rows (50% opacity).
+        // Chunk Manipulator live paste preview: draw ghost terrain using cached height rows (30% opacity).
         if (render_settings.draw_chunk_manipulator_selection && !render_settings.minimap_render
             && render_settings.display_mode == display_mode::in_3D)
         {
@@ -1255,7 +1360,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
             gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
             tile->renderer()->updateChunkManipulatorPreviewHeightmap(it_rows->second);
-            tile->renderer()->drawChunkManipulatorPreview(mcnk_shader, 0.5f);
+            tile->renderer()->drawChunkManipulatorPreview(mcnk_shader, 0.3f);
           }
         }
 
@@ -1302,19 +1407,31 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   // Render top-down albedo into an FBO around the camera, then sample it in the WMO shader.
   {
     QSettings settings;
-    bool const wmo_terrain_blend = settings.value("wmo_terrain_blend", modern_features).toBool();
+    bool const wmo_terrain_blend = settings.value("wmo_terrain_blend", false).toBool();
 
     if (wmo_terrain_blend && modern_features && render_settings.draw_terrain && render_settings.draw_wmo && _mcnk_program)
     {
       glm::vec2 const center_xz(camera_pos.x, camera_pos.z);
-      float const move_thresh = _terrain_blend_world_size * 0.25f;
-      bool const moved =
+      float const move_thresh = _terrain_blend_world_size * 0.4f;
+      bool const center_shifted =
         glm::distance(center_xz, _terrain_blend_last_center_xz) > move_thresh || _terrain_blend_fbo == nullptr;
 
-      if (moved)
+      if (center_shifted)
       {
-        _terrain_blend_last_center_xz = center_xz;
-        _terrain_blend_origin_xz = center_xz - glm::vec2(_terrain_blend_world_size * 0.5f);
+        _terrain_blend_rebake_pending = true;
+        _terrain_blend_pending_center_xz = center_xz;
+      }
+
+      // Rebaking draws the full terrain again into an FBO; defer until movement stops so fly/walk stays smooth.
+      bool const should_rebake = _terrain_blend_rebake_pending
+                              && (!render_settings.camera_moved || _terrain_blend_fbo == nullptr);
+
+      if (should_rebake)
+      {
+        glm::vec2 const bake_center = _terrain_blend_pending_center_xz;
+        _terrain_blend_rebake_pending = false;
+        _terrain_blend_last_center_xz = bake_center;
+        _terrain_blend_origin_xz = bake_center - glm::vec2(_terrain_blend_world_size * 0.5f);
         _terrain_blend_inv_size = (_terrain_blend_world_size > 1e-5f) ? (1.f / _terrain_blend_world_size) : 0.f;
 
         if (!_terrain_blend_fbo)
@@ -1338,11 +1455,12 @@ void WorldRender::draw (glm::mat4x4 const& model_view
         gl.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         // Top-down ortho covering [_terrain_blend_origin_xz, origin+world_size].
-        glm::vec3 const eye(center_xz.x, camera_pos.y + 4096.f, center_xz.y);
-        glm::vec3 const target(center_xz.x, 0.f, center_xz.y);
+        glm::vec3 const eye(bake_center.x, camera_pos.y + 4096.f, bake_center.y);
+        glm::vec3 const target(bake_center.x, 0.f, bake_center.y);
         glm::mat4 const bake_view = glm::lookAt(eye, target, glm::vec3(0.f, 0.f, -1.f));
         float const half = _terrain_blend_world_size * 0.5f;
         glm::mat4 const bake_proj = glm::ortho(-half, half, -half, half, 1.f, 16384.f);
+        math::frustum const bake_frustum (bake_proj * bake_view);
 
         OpenGL::Scoped::use_program mcnk_shader{ *_mcnk_program.get() };
         mcnk_shader.uniform("model_view", bake_view);
@@ -1365,12 +1483,17 @@ void WorldRender::draw (glm::mat4x4 const& model_view
             break;
           if (!tile->texturesFinishedLoading())
             continue;
+
+          auto const tile_extents = tile->getTerrainWaterCullExtents();
+          if (!bake_frustum.intersects(tile_extents[1], tile_extents[0]))
+            continue;
+
           tile->renderer()->setOccluded(false);
-          tile->renderer()->draw(mcnk_shader, glm::vec3(center_xz.x, camera_pos.y, center_xz.y),
+          tile->renderer()->draw(mcnk_shader, glm::vec3(bake_center.x, camera_pos.y, bake_center.y),
                                  /*show_unpaintable_chunks*/ false,
                                  /*draw_paintability_overlay*/ false,
                                  /*is_selected*/ false,
-                                 /*skip_upload_alphamap*/ false);
+                                 /*skip_upload_alphamap*/ true);
         }
 
         gl.bindVertexArray(0);
@@ -1434,7 +1557,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       wmo_program.uniform("camera", glm::vec3(camera_pos.x, camera_pos.y, camera_pos.z));
 
       QSettings settings;
-      bool const wmo_terrain_blend = settings.value("wmo_terrain_blend", modern_features).toBool();
+      bool const wmo_terrain_blend = settings.value("wmo_terrain_blend", false).toBool();
       wmo_program.uniform("wmo_terrain_blend_enabled", static_cast<int>(wmo_terrain_blend && _terrain_blend_color_tex != 0));
       wmo_program.uniform("terrain_blend_origin_xz", _terrain_blend_origin_xz);
       wmo_program.uniform("terrain_blend_inv_size", _terrain_blend_inv_size);
@@ -1539,7 +1662,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   // occlusion latency has 1-2 frames delay.
 
   constexpr bool occlusion_cull = true;
-  if (occlusion_cull && _occluder_program)
+  if (occlusion_cull && _occluder_program && !render_settings.camera_moved)
   {
     OpenGL::Scoped::use_program occluder_shader{ *_occluder_program.get() };
     occluder_shader.uniform("model_view", model_view);
@@ -1986,6 +2109,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   if (render_settings.draw_water)
   {
     ZoneScopedN("World::draw() : Draw water");
+    Noggit::register_crash_render_stage("WorldRender::draw:water");
 
     // draw the water on both sides
     OpenGL::Scoped::bool_setter<GL_CULL_FACE, GL_FALSE> const cull;
@@ -2003,6 +2127,12 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       if (!tile)
         break;
 
+      if (!tile->texturesFinishedLoading())
+        continue;
+
+      if (!tile->Water.isVisible(frustum) && !tile->Water.needsUpdate())
+        continue;
+
       if (tile->renderer()->isOccluded() && !tile->Water.needsUpdate() && !tile->renderer()->isOverridingOcclusionCulling())
         continue;
 
@@ -2019,6 +2149,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
 
     gl.bindVertexArray(0);
+    Noggit::register_crash_render_stage("WorldRender::draw:water_done");
   }
 
   gl.enable(GL_BLEND);
@@ -2182,10 +2313,24 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     gl.depthFunc (GL_LEQUAL);
 
     std::optional<std::size_t> const sel = _world->selectedPointLightIndex();
+    std::vector<glm::vec3> cone_lines;
+    cone_lines.reserve(128);
 
     for (std::size_t li = 0; li < _world->_point_lights.size(); ++li)
     {
       auto const& light = _world->_point_lights[li];
+
+      float const viz_radius = std::max({ k_point_light_sphere_radius
+                                        , light.attenuation_end
+                                        , light.light_type == World::MapLightType::Spot
+                                          ? spot_effective_cone_length(light)
+                                          : 0.f
+                                        });
+      if (distance_sq(camera_pos, light.position) > (_cull_distance + viz_radius) * (_cull_distance + viz_radius))
+      {
+        continue;
+      }
+
       float const sphere_alpha = (sel && *sel == li) ? 1.f : 0.5f;
       float constexpr cone_alpha = 0.5f;
 
@@ -2225,7 +2370,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
         );
       }
 
-      std::vector<glm::vec3> cone_lines;
+      cone_lines.clear();
       if (light.light_type == World::MapLightType::Spot)
       {
         glm::vec3 const fwd = map_light_forward (light);
@@ -2247,6 +2392,50 @@ void WorldRender::draw (glm::mat4x4 const& model_view
         // One batched GL_LINES draw (append_light_cone_lines stores independent segment pairs).
         // GL_LINES = 0x0001 — avoids dozens of Line::draw calls per light (each used to recompile shaders).
         _line_render.draw (mvp, cone_lines, line_color, false, 0x0001);
+      }
+
+      if (sel && *sel == li)
+      {
+        float const atten_end = std::max(0.5f, light.attenuation_end);
+        glm::vec4 const teal { 0.2f, 0.75f, 0.75f, 0.35f };
+        glm::vec4 const white { 1.f, 1.f, 1.f, 1.f };
+
+        {
+          OpenGL::Scoped::depth_mask_setter<GL_FALSE> const no_depth_write;
+          OpenGL::Scoped::bool_setter<GL_BLEND, GL_TRUE> const enable_blend;
+          gl.blendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+          _sphere_render.draw(
+              mvp,
+              light.position,
+              teal,
+              atten_end,
+              32,
+              18,
+              teal.a,
+              false);
+
+          _sphere_render.draw(
+              mvp,
+              light.position,
+              white,
+              0.15f,
+              16,
+              12,
+              1.f,
+              false);
+        }
+
+        glm::vec3 const half { atten_end, atten_end, atten_end };
+        glm::vec3 const min_extent = light.position - half;
+        glm::vec3 const max_extent = light.position + half;
+        _wirebox_render.draw(
+            model_view,
+            projection,
+            glm::mat4x4{ 1.f },
+            white,
+            min_extent,
+            max_extent);
       }
     }
   }
@@ -3094,19 +3283,29 @@ void WorldRender::updateMVPUniformBlock(const glm::mat4x4& model_view, const glm
   gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::MVPUniformBlock), &_mvp_ubo_data);
 }
 
-void WorldRender::updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& camera_pos)
+void WorldRender::updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& camera_pos, bool camera_moved)
 {
   ZoneScoped;
 
   bool const modern = noggit_modern_features_enabled() && draw_fog;
-  _modern_fog_ubo_data = {};
-
   if (!modern || !_skies)
   {
+    _modern_fog_ubo_data = {};
     gl.bindBuffer(GL_UNIFORM_BUFFER, _modern_fog_ubo);
     gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::ModernFogUniformBlock), &_modern_fog_ubo_data);
     return;
   }
+
+  constexpr float k_vfog_rebuild_dist_sq = 96.f * 96.f;
+  glm::vec3 const fog_delta = camera_pos - _last_modern_fog_camera_pos;
+  float const fog_move_sq = fog_delta.x * fog_delta.x + fog_delta.y * fog_delta.y + fog_delta.z * fog_delta.z;
+  if (camera_moved && fog_move_sq < k_vfog_rebuild_dist_sq)
+  {
+    return;
+  }
+  _last_modern_fog_camera_pos = camera_pos;
+
+  _modern_fog_ubo_data = {};
 
   _modern_fog_ubo_data.meta.x = 1;
   float const retail_density = _skies->fog_density();
@@ -3195,57 +3394,50 @@ void WorldRender::updateLightingUniformBlock(bool draw_fog, glm::vec3 const& cam
   gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::LightingUniformBlock), &_lighting_ubo_data);
 }
 
-void WorldRender::updatePointLightsUniformBlock(bool enabled, glm::vec3 const& camera_pos)
+void WorldRender::updatePointLightsUniformBlock(bool enabled, glm::vec3 const& camera_pos, bool camera_moved)
 {
   ZoneScoped;
+
+  (void) camera_moved;
 
   _point_lights_ubo_data.meta = { 0, enabled ? 1 : 0, 0, 0 };
 
   if (enabled)
   {
-    // Hard cap at kMaxGpuPointLights; pick the closest lights to the camera so the set is stable
-    // and relevant. Do not cull by (camera ↔ light) distance: a light far from the camera can
-    // still illuminate terrain and models in front of the viewer within attenuation_end.
     int count = 0;
     float const flicker_t = _world->animtime * 0.001f;
+    std::size_t const n = _world->_point_lights.size();
 
-    std::vector<std::size_t> order;
-    {
-      std::size_t const n = _world->_point_lights.size();
-      order.resize (n);
-      for (std::size_t i = 0; i < n; ++i)
-        order[i] = i;
-      std::sort (order.begin(), order.end(),
-                 [&] (std::size_t a, std::size_t b)
-                 {
-                   return glm::distance (_world->_point_lights[a].position, camera_pos)
-                        < glm::distance (_world->_point_lights[b].position, camera_pos);
-                 });
-    }
-
-    for (std::size_t const li : order)
+    auto upload_one = [&] (std::size_t li)
     {
       if (count >= OpenGL::kMaxGpuPointLights)
-        break;
+      {
+        return;
+      }
 
       auto const& light = _world->_point_lights[li];
 
       float radius = std::max(0.0f, light.attenuation_end);
+      float atten_end = light.attenuation_end;
       if (light.light_type == World::MapLightType::Spot)
-        radius = std::max (radius, spot_effective_cone_length (light));
+      {
+        float const cone_len = spot_effective_cone_length(light);
+        radius = std::max(radius, cone_len);
+        atten_end = std::max(atten_end, cone_len);
+      }
 
-      float const flicker_mul = point_light_intensity_multiplier (light, flicker_t);
+      float const flicker_mul = point_light_intensity_multiplier(light, flicker_t);
       float const eff_intensity = light.intensity * flicker_mul;
 
       _point_lights_ubo_data.position_radius[count] = { light.position, radius };
       _point_lights_ubo_data.color_intensity[count] = { light.color, eff_intensity };
-      _point_lights_ubo_data.attenuation[count] = { light.attenuation_start, light.attenuation_end, 0.f, 0.f };
+      _point_lights_ubo_data.attenuation[count] = { light.attenuation_start, atten_end, 0.f, 0.f };
 
       if (light.light_type == World::MapLightType::Spot)
       {
-        glm::vec3 const fwd = map_light_forward (light);
-        float const ci = std::cos (light.inner_angle);
-        float const co = std::cos (light.outer_angle);
+        glm::vec3 const fwd = map_light_forward(light);
+        float const ci = std::cos(light.inner_angle);
+        float const co = std::cos(light.outer_angle);
         _point_lights_ubo_data.spot_dir_cos_inner[count] = { fwd, ci };
         _point_lights_ubo_data.spot_cos_outer_kind[count] = { co, 1.f, 0.f, 0.f };
       }
@@ -3255,7 +3447,46 @@ void WorldRender::updatePointLightsUniformBlock(bool enabled, glm::vec3 const& c
         _point_lights_ubo_data.spot_cos_outer_kind[count] = { -1.f, 0.f, 0.f, 0.f };
       }
 
-      count++;
+      ++count;
+    };
+
+    if (n <= static_cast<std::size_t>(OpenGL::kMaxGpuPointLights))
+    {
+      for (std::size_t li = 0; li < n; ++li)
+      {
+        upload_one(li);
+      }
+    }
+    else
+    {
+      constexpr float k_resort_dist_sq = 128.f * 128.f;
+      bool const need_resort = _point_light_sort_light_count != n
+                            || _point_light_sort_order.size() != n
+                            || distance_sq(camera_pos, _point_light_sort_camera_pos) > k_resort_dist_sq;
+
+      if (need_resort)
+      {
+        _point_light_sort_order.resize(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+          _point_light_sort_order[i] = i;
+        }
+
+        std::sort(_point_light_sort_order.begin(), _point_light_sort_order.end(),
+                  [&] (std::size_t a, std::size_t b)
+                  {
+                    return distance_sq(_world->_point_lights[a].position, camera_pos)
+                         < distance_sq(_world->_point_lights[b].position, camera_pos);
+                  });
+
+        _point_light_sort_camera_pos = camera_pos;
+        _point_light_sort_light_count = n;
+      }
+
+      for (std::size_t const li : _point_light_sort_order)
+      {
+        upload_one(li);
+      }
     }
 
     _point_lights_ubo_data.meta.x = count;

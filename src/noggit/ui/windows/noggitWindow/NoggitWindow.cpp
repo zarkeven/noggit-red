@@ -9,6 +9,7 @@
 #include <noggit/ui/FontAwesome.hpp>
 #include <noggit/ui/FramelessWindow.hpp>
 #include <noggit/ui/minimap_widget.hpp>
+#include <noggit/integrations/MapCheckoutManager.hpp>
 #include <noggit/ui/tools/MapCreationWizard/Ui/MapCreationWizard.hpp>
 #include <noggit/ui/tools/UiCommon/StackedWidget.hpp>
 #include <noggit/ui/UidFixWindow.hpp>
@@ -256,6 +257,10 @@ namespace Noggit::Ui::Windows
              << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
              << ")" << std::endl;
     _stack_widget->setCurrentIndex(1);
+
+    Noggit::Integrations::MapCheckoutManager::instance().setActiveMap(
+      world->getMapID(), world->basename);
+    Noggit::Integrations::MapCheckoutManager::instance().refresh();
     LogError << "enterMapAt(): after setCurrentIndex (ms="
              << std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - t0).count()
              << ")" << std::endl;
@@ -607,6 +612,13 @@ namespace Noggit::Ui::Windows
     switch (prompt.buttonRole(prompt.clickedButton()))
     {
       case QMessageBox::AcceptRole:
+      {
+        auto const push_result = Noggit::Integrations::MapCheckoutManager::instance().pushPendingChanges();
+        if (!push_result.success && !push_result.message.isEmpty())
+        {
+          QMessageBox::warning(this, QStringLiteral("Git Push"), push_result.message);
+        }
+        Noggit::Integrations::MapCheckoutManager::instance().setActiveMap(0, std::string{});
         _stack_widget->setCurrentIndex(0);
         _stack_widget->removeLast();
         delete _map_view;
@@ -615,7 +627,15 @@ namespace Noggit::Ui::Windows
 
         map_loaded = false;
         break;
+      }
       case QMessageBox::DestructiveRole:
+      {
+        auto const push_result = Noggit::Integrations::MapCheckoutManager::instance().pushPendingChanges();
+        if (!push_result.success && !push_result.message.isEmpty())
+        {
+          QMessageBox::warning(this, QStringLiteral("Git Push"), push_result.message);
+        }
+        Noggit::Integrations::MapCheckoutManager::instance().setActiveMap(0, std::string{});
         Noggit::Ui::Tools::ViewportManager::ViewportManager::unloadAll();
         setCentralWidget(_null_widget = new QWidget(this));
         if (exit_to_project_selection)
@@ -626,6 +646,7 @@ namespace Noggit::Ui::Windows
         }
         event->accept();
         break;
+      }
       default:
         event->ignore();
         break;

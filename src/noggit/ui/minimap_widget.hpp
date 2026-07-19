@@ -5,6 +5,9 @@
 #include <QWidget>
 #include <glm/vec3.hpp>
 
+#include <string>
+#include <vector>
+
 namespace math
 {
   struct vector_3d;
@@ -40,6 +43,18 @@ namespace Noggit
       const std::vector<char>* use_selection (std::vector<char>* selection_);
       const std::vector<char>* selection() const;
 
+      struct checkout_overlay_entry
+      {
+        std::size_t x = 0;
+        std::size_t z = 0;
+        std::string owner;
+      };
+
+      void set_checkout_overlays(std::vector<checkout_overlay_entry> overlays);
+      void clear_checkout_overlays();
+      bool use_orange_selection_overlay() const;
+      void set_use_orange_selection_overlay(bool state);
+
       void camera (Noggit::Camera* camera);
       void set_resizeable(bool state);;
 
@@ -70,6 +85,8 @@ namespace Noggit
 
       bool _use_selection = false;
       bool _is_selecting = false;
+      bool _orange_selection_overlay = false;
+      std::vector<checkout_overlay_entry> _checkout_overlays;
     };
   }
 }

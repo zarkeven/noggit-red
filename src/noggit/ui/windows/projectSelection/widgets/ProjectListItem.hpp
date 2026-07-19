@@ -29,8 +29,10 @@ namespace Noggit::Ui::Widget
         QLabel* _project_version_label;
         QLabel* _project_last_edited_label;
         QLabel* _project_favorite_icon;
+        QSize _preferred_size;
     public:
         ProjectListItem(const ProjectListItemData& data, QWidget* parent);
+        QSize sizeHint() const override;
         QSize minimumSizeHint() const override;
     private:
         QString toCamelCase(const QString& s);

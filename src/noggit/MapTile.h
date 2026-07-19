@@ -180,6 +180,9 @@ public:
   //! Encoded byte 0 means WoW default 104; 1..255 is the explicit cap for the whole ADT tile.
   [[nodiscard]] std::uint32_t effectiveAdtPointLightCap() const;
 
+  //! Raw NGPL chunk payload byte (0 = WoW default 104).
+  [[nodiscard]] std::uint8_t adtPointLightCapEncoded() const;
+
   //! Set the encoded cap for this ADT and mark the tile dirty (used by the editor).
   void setAdtPointLightCap(std::uint32_t cap_wow_style);
 

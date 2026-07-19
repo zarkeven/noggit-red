@@ -78,13 +78,13 @@ SkyParam::SkyParam(int paramId, Noggit::NoggitRenderContext context)
     return;
   }
 
-  if (noggit_modern_features_enabled())
+  if (noggit_use_modern_sky_lights())
   {
     ModernLightTables::instance().ensure_loaded();
     if (ModernLightTables::instance().has_usable_data())
     {
       ModernLightTables::instance().init_sky_param(paramId, *this, context);
-      if (has_modern_light_data() || skybox.has_value())
+      if (has_modern_light_data())
       {
         return;
       }
@@ -103,7 +103,7 @@ SkyParam::SkyParam(int paramId, Noggit::NoggitRenderContext context)
     _ocean_deep_alpha = light_param.getFloat(LightParamsDB::ocean_deep_alpha);
     _glow = light_param.getFloat(LightParamsDB::glow);
 
-    if (skybox_id)
+    if (skybox_id && !skybox.has_value())
     {
       try
       {
@@ -624,10 +624,55 @@ const int cnum = 7;
 const int skycolors[cnum] = { SKY_COLOR_TOP, SKY_COLOR_MIDDLE, SKY_COLOR_BAND1, SKY_COLOR_BAND2, SKY_COLOR_SMOG, SKY_FOG_COLOR, SKY_FOG_COLOR };
 const int hseg = 32;
 
+namespace
+{
+  constexpr int kDefaultSkyLightId = 1;
+
+  bool add_default_light_from_modern(std::vector<Sky>& skies, int& numSkies, Noggit::NoggitRenderContext context)
+  {
+    ModernLightRecord const* const fallback =
+      ModernLightTables::instance().find_light(kDefaultSkyLightId);
+    if (!fallback)
+      return false;
+
+    Sky s(*fallback, context);
+    s.global = true;
+    skies.push_back(s);
+    ++numSkies;
+    return true;
+  }
+
+  bool add_default_light_from_dbc(std::vector<Sky>& skies, int& numSkies, Noggit::NoggitRenderContext context)
+  {
+    for (DBCFile::Iterator i = gLightDB.begin(); i != gLightDB.end(); ++i)
+    {
+      if (kDefaultSkyLightId == static_cast<int>(i->getUInt(LightDB::ID)))
+      {
+        Sky s(i, context);
+        s.global = true;
+        skies.push_back(s);
+        ++numSkies;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool add_default_light(std::vector<Sky>& skies
+                       , int& numSkies
+                       , Noggit::NoggitRenderContext context
+                       , bool prefer_modern)
+  {
+    if (prefer_modern && add_default_light_from_modern(skies, numSkies, context))
+      return true;
+    return add_default_light_from_dbc(skies, numSkies, context);
+  }
+}
+
 
 void Skies::loadZoneLights(int map_id)
 {
-  if (noggit_modern_features_enabled() && ModernLightTables::instance().has_usable_data())
+  if (noggit_use_modern_sky_lights())
   {
     ModernLightTables::instance().fill_zone_lights(map_id, zoneLightsWotlk);
     for (auto& zl : zoneLightsWotlk)
@@ -835,11 +880,7 @@ Skies::Skies(unsigned int mapid, Noggit::NoggitRenderContext context)
   , _last_pos(glm::vec3(0.0f, 0.0f, 0.0f))
 {
   bool has_global = false;
-  bool const use_modern_lights = noggit_modern_features_enabled()
-    && [&]() {
-         ModernLightTables::instance().ensure_loaded();
-         return ModernLightTables::instance().has_usable_data();
-       }();
+  bool const use_modern_lights = noggit_use_modern_sky_lights();
 
   if (use_modern_lights)
   {
@@ -868,37 +909,28 @@ Skies::Skies(unsigned int mapid, Noggit::NoggitRenderContext context)
     }
   }
 
-  if (!has_global)
+  if (skies.empty() || !has_global)
   {
-    LogDebug << "No global light data found for the current map (id :" << mapid
-        << ") using light id 1 as a fallback" << std::endl;
-
-    if (use_modern_lights)
+    if (skies.empty())
     {
-      ModernLightRecord const* const fallback = ModernLightTables::instance().find_light(1);
-      if (fallback)
-      {
-        Sky s(*fallback, _context);
-        s.global = true;
-        skies.push_back(s);
-        ++numSkies;
-      }
+      LogDebug << "No light data found for map " << mapid << "; using default light id "
+               << kDefaultSkyLightId << std::endl;
     }
     else
     {
-      for (DBCFile::Iterator i = gLightDB.begin(); i != gLightDB.end(); ++i)
-      {
-        if (1 == i->getUInt(LightDB::ID))
-        {
-          Sky s(i, _context);
-          s.global = true;
-          skies.push_back(s);
-          numSkies++;
-          break;
-        }
-      }
+      LogDebug << "No global light for map " << mapid << "; using default light id "
+               << kDefaultSkyLightId << std::endl;
     }
-    using_fallback_global = true;
+
+    if (add_default_light(skies, numSkies, _context, use_modern_lights))
+    {
+      using_fallback_global = true;
+    }
+    else
+    {
+      LogError << "Failed to load default light id " << kDefaultSkyLightId
+               << " for map " << mapid << std::endl;
+    }
   }
 
   std::sort(skies.begin(), skies.end());
@@ -1090,15 +1122,25 @@ void Skies::blend_light_data_fog(LightDataKeyframe const& kf, float weight, floa
   }
 }
 
-void Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
+bool Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
 {
-  if (numSkies == 0 || (_last_time == time && _last_pos == pos && !_force_update))
+  if (numSkies == 0)
   {
-    return;
+    return false;
+  }
+
+  // Zone weights barely change for small camera moves; avoid sorting all skies every frame while flying.
+  constexpr float k_min_sky_recalc_dist_sq = 80.f * 80.f;
+  glm::vec3 const delta = pos - _last_pos;
+  float const dist_sq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+
+  if (_last_time == time && !_force_update && dist_sq < k_min_sky_recalc_dist_sq)
+  {
+    return false;
   }
   _force_update = false;
 
-  bool const modern = noggit_modern_features_enabled();
+  bool const modern = noggit_use_modern_sky_lights();
 
   Sky* default_sky = findSkyWeights(pos);
 
@@ -1261,7 +1303,8 @@ void Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
   _last_pos = pos;
   _last_time = time;
 
-  _need_color_buffer_update = true;  
+  _need_color_buffer_update = true;
+  return true;
 }
 
 bool Skies::draw(glm::mat4x4 const& model_view

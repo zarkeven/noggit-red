@@ -197,10 +197,11 @@ vec3 apply_lighting(vec3 material)
   vec3 currColor;
   vec3 lDiffuse = vec3(0.0, 0.0, 0.0);
   vec3 accumlatedLight = vec3(1.0, 1.0, 1.0);
+  float nDotL = 0.0;
 
   if(!bool(flags & eWMOBatch_Unlit))
   {
-    float nDotL = clamp(dot(normalize(f_normal), -normalize(vec3(-LightDir_FogRate.x, LightDir_FogRate.z, -LightDir_FogRate.y))), 0.0, 1.0);
+    nDotL = clamp(dot(normalize(f_normal), normalize(vec3(LightDir_FogRate.x, -LightDir_FogRate.z, LightDir_FogRate.y))), 0.0, 1.0);
 
     vec3 ambientColor = ambient_term + vertex_color;
 
@@ -208,7 +209,8 @@ vec3 apply_lighting(vec3 material)
     vec3 groundColor = (ambientColor * 0.699999988);
 
     currColor = mix(groundColor, skyColor, 0.5 + (0.5 * nDotL));
-    lDiffuse = diffuse_term * nDotL;
+    vec3 sun_diffuse = diffuse_term * nDotL;
+    lDiffuse = sun_diffuse;
 
     if (meta.y != 0)
     {
@@ -249,13 +251,20 @@ vec3 apply_lighting(vec3 material)
 
   vec3 albedo = material.rgb;
   vec3 ambient_lit = albedo * currColor;
-  vec3 diffuse_lit = albedo * lDiffuse;
   float shadow_mul = 1.0;
-  if (realtime_shadows_enabled != 0 && !bool(flags & eWMOBatch_Unlit))
+  if (realtime_shadows_enabled != 0)
   {
     shadow_mul = sample_gpu_sun_shadow(f_position, f_normal);
   }
-  return clamp(ambient_lit + diffuse_lit * shadow_mul, 0.0, 1.0);
+
+  if(bool(flags & eWMOBatch_Unlit))
+  {
+    return clamp(ambient_lit * shadow_mul, 0.0, 1.0);
+  }
+
+  vec3 sun_diffuse = diffuse_term * nDotL;
+  vec3 point_diffuse = lDiffuse - sun_diffuse;
+  return clamp(ambient_lit + albedo * sun_diffuse * shadow_mul + albedo * point_diffuse, 0.0, 1.0);
 }
 
 void main()
@@ -284,14 +293,18 @@ void main()
 
 
   // see: https://github.com/Deamon87/WebWowViewerCpp/blob/master/wowViewerLib/src/glsl/wmoShader.glsl
+  float sun_shadow_mul = (realtime_shadows_enabled != 0 && !bool(flags & eWMOBatch_Unlit))
+                       ? sample_gpu_sun_shadow(f_position, f_normal)
+                       : 1.0;
+
   if(wmo_batch_shader == 3) // Env
   {
-    vec3 env = tex_2.rgb * tex.rgb;
+    vec3 env = tex_2.rgb * tex.rgb * sun_shadow_mul;
     out_color = vec4(apply_lighting(tex.rgb) + env, 1.);
   }
   else if(wmo_batch_shader == 5) // EnvMetal
   {
-    vec3 env = tex_2.rgb * tex.rgb * tex.a;
+    vec3 env = tex_2.rgb * tex.rgb * tex.a * sun_shadow_mul;
     out_color = vec4(apply_lighting(tex.rgb) + env, 1.);
   }
   else if(wmo_batch_shader == 6) // TwoLayerDiffuse

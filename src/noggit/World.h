@@ -85,7 +85,7 @@ public:
     glm::vec3 position;
     glm::vec3 color;
     float attenuation_start = 0.f;
-    float attenuation_end = 0.f;
+    float attenuation_end = 10.f;
     float intensity = 1.f;
     std::uint16_t tile_x = 0;
     std::uint16_t tile_y = 0;
@@ -234,6 +234,13 @@ public:
 
   //! ADT tile indices (0..63) and MCNK indices (0..15) for a world position.
   static void worldPosToAdtMcnk(glm::vec3 const& pos, std::uint16_t& out_adt_x, std::uint16_t& out_adt_z, int& out_mcnk_x, int& out_mcnk_z);
+
+  //! MPL3/MSLT on-disk position is ADT-local; editor uses world coordinates.
+  static glm::vec3 pointLightDiskToWorld(glm::vec3 const& local, std::uint16_t tile_x, std::uint16_t tile_y);
+  static glm::vec3 pointLightWorldToDisk(glm::vec3 const& world, std::uint16_t tile_x, std::uint16_t tile_y);
+  static void syncPointLightTileFromPosition(PointLight& light);
+  //! Fill sane cone angles, reach, and downward aim when converting a point light to spot.
+  static void ensureSpotLightDefaults(PointLight& light);
 
   [[nodiscard]] std::size_t pointLightsInAdtCount(std::uint16_t adt_x, std::uint16_t adt_z, std::optional<std::size_t> exclude_index = std::nullopt) const;
   [[nodiscard]] std::uint32_t effectivePointLightCapForAdt(std::uint16_t adt_x, std::uint16_t adt_z) const;

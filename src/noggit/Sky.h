@@ -328,7 +328,7 @@ public:
   Sky* findClosestSkyByDistance(glm::vec3 pos);
 
   void setCurrentParam(int param_id);
-  void update_sky_colors(glm::vec3 pos, int time, bool global_only);
+  bool update_sky_colors(glm::vec3 pos, int time, bool global_only);
 
   bool draw ( glm::mat4x4 const& model_view
             , glm::mat4x4 const& projection

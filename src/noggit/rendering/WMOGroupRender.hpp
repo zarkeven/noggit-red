@@ -67,6 +67,7 @@ namespace Noggit::Rendering
         , const glm::vec3& camera
         , bool draw_fog
         , bool world_has_skies
+        , bool shadow_depth_pass = false
     );
 
     void initRenderBatches();
@@ -74,6 +75,7 @@ namespace Noggit::Rendering
   private:
 
     void setupVao(OpenGL::Scoped::use_program& wmo_shader);
+    void setupShadowVao(OpenGL::Scoped::use_program& wmo_shader);
 
     WMOGroup* _wmo_group;
 
@@ -81,8 +83,9 @@ namespace Noggit::Rendering
     std::vector<WMORenderBatch> _render_batches;
     std::vector<WMOCombinedDrawCall> _draw_calls;
 
-    OpenGL::Scoped::deferred_upload_vertex_arrays<1> _vertex_array;
+    OpenGL::Scoped::deferred_upload_vertex_arrays<2> _vertex_array;
     GLuint const& _vao = _vertex_array[0];
+    GLuint const& _shadow_vao = _vertex_array[1];
     OpenGL::Scoped::deferred_upload_buffers<8> _buffers;
     GLuint const& _vertices_buffer = _buffers[0];
     GLuint const& _normals_buffer = _buffers[1];
@@ -97,6 +100,7 @@ namespace Noggit::Rendering
 
     bool _uploaded = false;
     bool _vao_is_setup = false;
+    bool _shadow_vao_is_setup = false;
 
   };
 }

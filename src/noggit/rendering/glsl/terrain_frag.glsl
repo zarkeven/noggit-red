@@ -402,7 +402,7 @@ void main()
   {
     normalized_normal = vec3(0, 1, 0);
   }
-  float nDotL = clamp(dot(normalized_normal, -normalize(LightDir_FogRate.xyz)), 0.0, 1.0); // default LightDir = -0.6
+  float nDotL = clamp(dot(normalized_normal, normalize(vec3(LightDir_FogRate.x, -LightDir_FogRate.z, LightDir_FogRate.y))), 0.0, 1.0);
 
   vec3 skyColor = (AmbientColor_FogEnd.xyz * 1.10000002);
   vec3 groundColor = (AmbientColor_FogEnd.xyz * 0.699999988);
@@ -410,7 +410,7 @@ void main()
   currColor = mix(groundColor, skyColor, 0.5 + (0.5 * nDotL));
   lDiffuse = DiffuseColor_FogStart.xyz * nDotL;
 
-  vec3 reflection = normalize(normalized_normal - (-LightDir_FogRate.xyz));
+  vec3 reflection = normalize(normalized_normal - normalize(vec3(LightDir_FogRate.x, -LightDir_FogRate.z, LightDir_FogRate.y)));
   float specularFactor = max(dot(reflection, normalize(camera - vary_position)), 0.0);
 
   // blend textures
@@ -591,7 +591,7 @@ void main()
     if (instances[instanceID].AreaIDColor_Pad2_DrawSelection.g != 0)
     {
       vec3 prev_col = vec3(0.20, 1.00, 0.45);
-      out_color.rgb = mix(out_color.rgb, prev_col, 0.50);
+      out_color.rgb = mix(out_color.rgb, prev_col, 0.30);
     }
   }
 
@@ -694,6 +694,7 @@ void main()
 		  alpha = max(alpha, 1.0 - smoothstep(0.0, d, diff));
           out_color.rgb = mix(out_color.rgb, wireframe_color.rgb, wireframe_color.a *alpha);
 	  }
+  }
 
   if (preview_pass != 0)
   {
@@ -703,7 +704,6 @@ void main()
       discard;
     }
     out_color.a *= preview_alpha;
-  }
   }
 
   if (draw_impassible_climb != 0)

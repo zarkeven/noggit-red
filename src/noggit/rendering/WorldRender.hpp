@@ -170,7 +170,7 @@ namespace Noggit::Rendering
 
     void updateMVPUniformBlock(const glm::mat4x4& model_view, const glm::mat4x4& projection);
     void updateLightingUniformBlock(bool draw_fog, glm::vec3 const& camera_pos);
-    void updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& camera_pos);
+    void updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& camera_pos, bool camera_moved);
     void updateLightingUniformBlockMinimap(MinimapRenderSettings* settings);
     void drawVolumetricFogDebug(glm::mat4x4 const& model_view, glm::mat4x4 const& projection, glm::vec3 const& camera_pos, float cull_distance);
 
@@ -256,7 +256,13 @@ namespace Noggit::Rendering
 
     bool _need_terrain_params_ubo_update = false;
 
-    void updatePointLightsUniformBlock(bool enabled, glm::vec3 const& camera_pos);
+    void updatePointLightsUniformBlock(bool enabled, glm::vec3 const& camera_pos, bool camera_moved);
+
+    std::vector<std::size_t> _point_light_sort_order;
+    glm::vec3 _point_light_sort_camera_pos = glm::vec3(std::numeric_limits<float>::max());
+    std::size_t _point_light_sort_light_count = 0;
+    glm::vec3 _last_modern_fog_camera_pos = glm::vec3(std::numeric_limits<float>::max());
+    int _point_light_ubo_upload_frame = 0;
 
     void setupMccvVizBuffers();
     void setupTextureLayerBillboardResources();
@@ -330,6 +336,8 @@ namespace Noggit::Rendering
     float _terrain_blend_world_size = 533.33333f * 2.f; // 2 tiles around camera
     int _terrain_blend_tex_size = 1024;
     glm::vec2 _terrain_blend_last_center_xz{};
+    bool _terrain_blend_rebake_pending = false;
+    glm::vec2 _terrain_blend_pending_center_xz{};
 
     std::unique_ptr<OpenGL::program> _mccv_viz_program;
     std::unique_ptr<OpenGL::program> _mccv_crosshair_ndc_program;

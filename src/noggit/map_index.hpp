@@ -165,6 +165,12 @@ public:
   void setChanged(const TileIndex& tile);
   void setChanged(MapTile* tile);
 
+  //! Marks the WDT and ADTs that contain point/spot lights for the next save (_lgt.wdt + MPHD.lgtFileDataID).
+  void markPointLightsDirty();
+
+  //! Write `{map}_lights.json` and `_lgt.wdt` immediately (used by point-light auto-save).
+  bool savePointLights(World* world);
+
   void unsetChanged(const TileIndex& tile);
   void setFlag(bool to, glm::vec3 const& pos, uint32_t flag);
   bool has_unsaved_changes(const TileIndex& tile) const;

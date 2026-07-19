@@ -1107,7 +1107,7 @@
                   <string>Enable export on save</string>
                  </property>
                  <property name="toolTip">
-                  <string>After saving the map, copy the map WDT and _lgt.wdt into the patch folder and update patch.json.</string>
+                  <string>After each map save, copy WDT and _lgt.wdt into the configured Epsilon patch folder.</string>
                  </property>
                 </widget>
                </item>
@@ -1216,6 +1216,131 @@
                  </property>
                  <property name="value">
                   <number>0</number>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="groupBox_mapupconverter">
+            <property name="title">
+             <string>MapUpconverter</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignCenter</set>
+            </property>
+            <layout class="QVBoxLayout" name="verticalLayout_mapupconverter">
+             <item>
+              <layout class="QFormLayout" name="formLayout_mapupconverter">
+               <item row="0" column="0">
+                <widget class="QLabel" name="label_mapupconverter_path">
+                 <property name="text">
+                  <string>Install path</string>
+                 </property>
+                 <property name="toolTip">
+                  <string>Path to MapUpconverter.exe or its install folder. Used to load light animation presets from meta/LightInfo.json (LightAnims).</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <layout class="QHBoxLayout" name="horizontalLayout_mapupconverter_path">
+                 <item>
+                  <widget class="QLineEdit" name="_mapupconverter_path_field">
+                   <property name="placeholderText">
+                    <string>Path to MapUpconverter.exe or folder</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QPushButton" name="_mapupconverter_path_browse">
+                   <property name="text">
+                    <string>Browse</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+              </layout>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="groupBox_checkout">
+            <property name="title">
+             <string>Map checkout (GitHub)</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignCenter</set>
+            </property>
+            <layout class="QVBoxLayout" name="verticalLayout_checkout">
+             <item>
+              <layout class="QFormLayout" name="formLayout_checkout">
+               <item row="0" column="0">
+                <widget class="QLabel" name="label_checkout_enable">
+                 <property name="text">
+                  <string>Integration</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QCheckBox" name="_checkout_integration_cb">
+                 <property name="text">
+                  <string>Enable ADT checkout</string>
+                 </property>
+                 <property name="toolTip">
+                  <string>Block saving ADTs checked out by other GitHub users. Requires the project folder to be a git repository.</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QLabel" name="label_github_username">
+                 <property name="text">
+                  <string>GitHub username</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="1">
+                <widget class="QLineEdit" name="_github_username_field">
+                 <property name="toolTip">
+                  <string>Displayed as the checkout owner in the team manifest.</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="2" column="0">
+                <widget class="QLabel" name="label_github_pat">
+                 <property name="text">
+                  <string>GitHub PAT</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="2" column="1">
+                <widget class="QLineEdit" name="_github_pat_field">
+                 <property name="echoMode">
+                  <enum>QLineEdit::Password</enum>
+                 </property>
+                 <property name="toolTip">
+                  <string>Personal access token for private repos (repo scope). Stored locally in QSettings.</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="0">
+                <widget class="QLabel" name="label_checkout_offline">
+                 <property name="text">
+                  <string>Offline</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="1">
+                <widget class="QCheckBox" name="_checkout_offline_mode_cb">
+                 <property name="text">
+                  <string>Offline mode</string>
+                 </property>
+                 <property name="toolTip">
+                  <string>Do not sync remote checkouts or block saves. Checkout and check-in still use git; resolve merge conflicts before committing again.</string>
                  </property>
                 </widget>
                </item>

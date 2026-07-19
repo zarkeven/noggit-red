@@ -2,43 +2,80 @@
 
 #include <noggit/Brush.h>
 
+#include <algorithm>
+#include <cmath>
+
+namespace
+{
+  constexpr float k_radius_epsilon = 1e-5f;
+}
+
+void Brush::updateFalloffBand()
+{
+  _inner_radius = std::clamp(_inner_radius, 0.f, _outer_radius);
+}
+
 void Brush::init()
 {
-  radius = 15;
-  hardness = 0.5f;
-  iradius = hardness * radius;
-  oradius = radius - iradius;
+  _outer_radius = 15.f;
+  _inner_radius = 7.5f;
+  updateFalloffBand();
 }
 
-void Brush::setHardness(float H)
+void Brush::setInnerRadius(float inner)
 {
-  hardness = H;
-  iradius = hardness * radius;
-  oradius = radius - iradius;
+  _inner_radius = std::max(0.f, inner);
+  updateFalloffBand();
 }
 
-void Brush::setRadius(float R)
+void Brush::setRadius(float outer)
 {
-  radius = R;
-  iradius = hardness * radius;
-  oradius = radius - iradius;
+  _outer_radius = std::max(0.f, outer);
+  updateFalloffBand();
 }
 
-float Brush::getHardness() const
+void Brush::setHardness(float hardness)
 {
-  return hardness;
+  hardness = std::clamp(hardness, 0.f, 1.f);
+  _inner_radius = hardness * _outer_radius;
+  updateFalloffBand();
+}
+
+float Brush::getInnerRadius() const
+{
+  return _inner_radius;
 }
 
 float Brush::getRadius() const
 {
-  return radius;
+  return _outer_radius;
+}
+
+float Brush::getHardness() const
+{
+  if (_outer_radius <= k_radius_epsilon)
+  {
+    return 0.f;
+  }
+  return _inner_radius / _outer_radius;
 }
 
 float Brush::getValue(float dist) const
 {
-  if (dist > radius)
-    return 0.0f;
-  if (dist < iradius)
-    return 1.0f;
-  return(1.0f - (dist - iradius) / oradius);
+  if (dist > _outer_radius)
+  {
+    return 0.f;
+  }
+  if (dist <= _inner_radius)
+  {
+    return 1.f;
+  }
+
+  float const falloff_band = _outer_radius - _inner_radius;
+  if (falloff_band <= k_radius_epsilon)
+  {
+    return 1.f;
+  }
+
+  return 1.f - (dist - _inner_radius) / falloff_band;
 }

@@ -122,6 +122,7 @@ void ModelRender::unload()
 
   _uploaded = false;
   _vao_setup = false;
+  _shadow_vao_setup = false;
 }
 
 void ModelRender::draw(glm::mat4x4 const& model_view
@@ -242,7 +243,14 @@ void ModelRender::draw(glm::mat4x4 const& model_view
       upload();
     }
 
-    if (!_vao_setup)
+    if (shadow_depth_pass)
+    {
+      if (!_shadow_vao_setup)
+      {
+        setupShadowVAO(m2_shader);
+      }
+    }
+    else if (!_vao_setup)
     {
       setupVAO(m2_shader);
     }
@@ -291,7 +299,7 @@ void ModelRender::draw(glm::mat4x4 const& model_view
     }
      */
 
-    OpenGL::Scoped::vao_binder const _ (_vao);
+    OpenGL::Scoped::vao_binder const _ (shadow_depth_pass ? _shadow_vao : _vao);
 
     {
       OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> const transform_binder (_transform_buffer);
@@ -471,6 +479,30 @@ void ModelRender::setupVAO(OpenGL::Scoped::use_program& m2_shader)
   }
 
   _vao_setup = true;
+}
+
+void ModelRender::setupShadowVAO(OpenGL::Scoped::use_program& m2_shader)
+{
+  OpenGL::Scoped::vao_binder const _(_shadow_vao);
+
+  {
+    OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> const binder(_vertices_buffer);
+    m2_shader.attrib("pos", 3, GL_FLOAT, GL_FALSE, sizeof(ModelVertex), 0);
+    m2_shader.attribi("bones_weight", 4, GL_UNSIGNED_BYTE, sizeof(ModelVertex), reinterpret_cast<void*>(sizeof(::glm::vec3)));
+    m2_shader.attribi("bones_indices", 4, GL_UNSIGNED_BYTE, sizeof(ModelVertex), reinterpret_cast<void*>(sizeof(::glm::vec3) + 4));
+    // UVs and normals are required for the shared m2 vertex shader (alpha cutout + env/sphere UVs).
+    m2_shader.attrib("normal", 3, GL_FLOAT, GL_FALSE, sizeof(ModelVertex), reinterpret_cast<void*>(sizeof(::glm::vec3) + 8));
+    m2_shader.attrib("texcoord1", 2, GL_FLOAT, GL_FALSE, sizeof(ModelVertex), reinterpret_cast<void*>(sizeof(::glm::vec3) * 2 + 8));
+    m2_shader.attrib("texcoord2", 2, GL_FLOAT, GL_FALSE, sizeof(ModelVertex), reinterpret_cast<void*>(sizeof(::glm::vec3) * 2 + 8 + sizeof(glm::vec2)));
+  }
+
+  {
+    OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> const transform_binder(_transform_buffer);
+    gl.bufferData(GL_ARRAY_BUFFER, 10 * sizeof(::glm::mat4x4), nullptr, GL_DYNAMIC_DRAW);
+    m2_shader.attrib("transform", 0, 1);
+  }
+
+  _shadow_vao_setup = true;
 }
 
 void ModelRender::fixShaderIdBlendOverride()
@@ -1039,7 +1071,7 @@ bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model 
     model_render_state.backface_cull = !renderflag.flags.two_sided;
   }
 
-  if (model_render_state.z_buffered != renderflag.flags.z_buffered)
+  if (!shadow_depth_pass && model_render_state.z_buffered != renderflag.flags.z_buffered)
   {
     if (renderflag.flags.z_buffered)
     {

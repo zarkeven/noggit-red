@@ -5,6 +5,8 @@
 #include <noggit/project/CurrentProject.hpp>
 
 #include <ClientFile.hpp>
+#include <Exception.hpp>
+#include <Listfile.hpp>
 
 #include <QDir>
 
@@ -19,30 +21,43 @@ auto write(std::ostream& stream, T const& val) -> void
   stream.write(reinterpret_cast<char const*>(&val), sizeof(T));
 }
 
+namespace
+{
+  bool is_wotlk_project()
+  {
+    try
+    {
+      return Noggit::Project::CurrentProject::get()->projectVersion
+        == Noggit::Project::ProjectVersion::WOTLK;
+    }
+    catch (...)
+    {
+      return false;
+    }
+  }
+}
+
 DBCFile::DBCFile(const std::string& _filename)
   : filename(_filename)
 {
 }
 
-void DBCFile::open(std::shared_ptr<BlizzardArchive::ClientData> clientData)
+void DBCFile::loadFromBuffer(char const* buffer, std::size_t size)
 {
-  BlizzardArchive::ClientFile f(filename, clientData.get());
-
-  if (f.isEof())
+  if (size < 20)
   {
-    LogError << "The DBC file \"" << filename << "\" could not be opened. This application may crash soon as the file is most likely needed." << std::endl;
-    return;
+    throw std::logic_error("DBC error, file too small: " + filename);
   }
-  LogDebug << "Opening DBC \"" << filename << "\"" << std::endl;
 
-  char header[4];
+  if (buffer[0] != 'W' || buffer[1] != 'D' || buffer[2] != 'B' || buffer[3] != 'C')
+  {
+    throw std::logic_error("DBC error, invalid header: " + filename);
+  }
 
-  f.read(header, 4); // Number of records
-  assert(header[0] == 'W' && header[1] == 'D' && header[2] == 'B' && header[3] == 'C');
-  f.read(&recordCount, 4);
-  f.read(&fieldCount, 4);
-  f.read(&recordSize, 4);
-  f.read(&stringSize, 4);
+  std::memcpy(&recordCount, buffer + 4, 4);
+  std::memcpy(&fieldCount, buffer + 8, 4);
+  std::memcpy(&recordSize, buffer + 12, 4);
+  std::memcpy(&stringSize, buffer + 16, 4);
 
   if (!fieldCount || !recordSize)
   {
@@ -54,13 +69,103 @@ void DBCFile::open(std::shared_ptr<BlizzardArchive::ClientData> clientData)
     throw std::logic_error("non four-byte-columns not supported : " + filename);
   }
 
-  data.resize(recordSize * recordCount);
-  f.read(data.data(), data.size());
+  std::size_t const data_bytes = static_cast<std::size_t>(recordSize) * recordCount;
+  std::size_t const expected_size = 20 + data_bytes + stringSize;
+  if (expected_size > size)
+  {
+    throw std::logic_error("DBC error, truncated payload: " + filename);
+  }
+
+  data.resize(data_bytes);
+  std::memcpy(data.data(), buffer + 20, data_bytes);
 
   stringTable.resize(stringSize);
-  f.read(stringTable.data(), stringTable.size());
+  std::memcpy(stringTable.data(), buffer + 20 + data_bytes, stringSize);
+}
 
-  f.close();
+void DBCFile::open(std::shared_ptr<BlizzardArchive::ClientData> clientData)
+{
+  auto try_load_buffer = [&](char const* buffer, std::size_t size, char const* source) -> bool
+  {
+    if (!buffer || size < 20)
+      return false;
+
+    try
+    {
+      loadFromBuffer(buffer, size);
+      Log << "Opening DBC \"" << filename << "\" from " << source << std::endl;
+      return true;
+    }
+    catch (std::exception const& e)
+    {
+      LogError << "Failed to parse DBC \"" << filename << "\" from " << source
+               << ": " << e.what() << std::endl;
+      return false;
+    }
+  };
+
+  if (is_wotlk_project())
+  {
+    std::vector<char> client_buffer;
+    BlizzardArchive::Listfile::FileKey const client_key(filename);
+    if (clientData->readFile(client_key, client_buffer)
+        && try_load_buffer(client_buffer.data(), client_buffer.size(), "client"))
+    {
+      return;
+    }
+
+    std::string const disk_path = clientData->getDiskPath(client_key);
+    std::ifstream project_file(disk_path, std::ios_base::binary | std::ios_base::in);
+    if (project_file.is_open())
+    {
+      project_file.seekg(0, std::ios::end);
+      std::size_t const file_size = static_cast<std::size_t>(project_file.tellg());
+      project_file.seekg(0, std::ios::beg);
+
+      std::vector<char> project_buffer(file_size);
+      if (file_size > 0)
+      {
+        project_file.read(project_buffer.data(), static_cast<std::streamsize>(file_size));
+      }
+      project_file.close();
+
+      if (try_load_buffer(project_buffer.data(), project_buffer.size(), "project"))
+      {
+        return;
+      }
+    }
+
+    LogError << "The DBC file \"" << filename
+             << "\" could not be opened from client or project. This application may crash soon as the file is most likely needed."
+             << std::endl;
+    return;
+  }
+
+  try
+  {
+    BlizzardArchive::ClientFile f(filename, clientData.get());
+
+    if (f.isEof())
+    {
+      LogError << "The DBC file \"" << filename
+               << "\" could not be opened. This application may crash soon as the file is most likely needed."
+               << std::endl;
+      return;
+    }
+
+    if (try_load_buffer(f.getBuffer(), f.getSize(), f.isExternal() ? "project" : "client"))
+    {
+      return;
+    }
+  }
+  catch (BlizzardArchive::Exceptions::FileReadFailedError const& e)
+  {
+    LogError << e.what() << std::endl;
+  }
+  catch (std::exception const& e)
+  {
+    LogError << "Failed to open DBC \"" << filename << "\": " << e.what() << std::endl;
+  }
 }
 
 void DBCFile::save()

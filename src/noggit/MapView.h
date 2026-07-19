@@ -9,6 +9,7 @@
 #include <noggit/StringHash.hpp>
 #include <noggit/audio/SoundEmitterAudioManager.hpp>
 #include <noggit/tool_enums.hpp>
+#include <noggit/TileIndex.hpp>
 #include <noggit/ui/tools/ViewportGizmo/ViewportGizmo.hpp>
 #include <noggit/ui/tools/ViewportManager/ViewportManager.hpp>
 #include <noggit/ui/uid_fix_mode.hpp>
@@ -77,6 +78,7 @@ namespace Noggit
     class minimap_widget;
     class RampCreationTool;
     class BrushCursorTool;
+    class MapCheckoutWindow;
     class toolbar;
   }
 }
@@ -116,6 +118,9 @@ public:
   Noggit::Camera _camera;
 
 private:
+
+  bool _mmb_pan_active = false;
+  float _mmb_pan_plane_y = 0.f;
 
   float _2d_zoom = 1.f;
   float moving, strafing, updown, mousedir, turn, lookat;
@@ -167,9 +172,12 @@ public:
   Noggit::BoolToggleProperty _draw_skybox = { true };
   Noggit::BoolToggleProperty _draw_hidden_models = {false};
   Noggit::BoolToggleProperty _draw_occlusion_boxes = {false};
-  Noggit::BoolToggleProperty _draw_point_lights = { true };
-  Noggit::BoolToggleProperty _draw_point_light_spheres = { true };
+  Noggit::BoolToggleProperty _draw_point_lights = { false };
+  Noggit::BoolToggleProperty _draw_point_light_spheres = { false };
   float _point_light_sphere_opacity = 0.50f;
+  bool _draw_point_lights_for_editing = false;
+  std::optional<bool> _draw_point_lights_before_editing;
+  std::optional<bool> _draw_point_light_spheres_before_editing;
   Noggit::BoolToggleProperty _draw_sound_emitters = { false };
   Noggit::BoolToggleProperty _play_sound_emitters = { false };
   bool _draw_sound_emitters_for_editing = false;
@@ -192,6 +200,7 @@ public:
 private:
 
   void update_cursor_pos();
+  [[nodiscard]] bool shouldUpdateCursorPosition() const;
 
   display_mode _display_mode;
 
@@ -482,6 +491,15 @@ private:
   bool _destroying = false;
   bool _needs_redraw = false;
   bool _unload_tiles = true;
+  bool _do_selection_mouse_pos_valid = false;
+  QPointF _last_do_selection_mouse_pos;
+  std::optional<TileIndex> _last_enter_tile_index;
+  int _cursor_update_throttle_counter = 0;
+  QPointF _last_cursor_update_mouse_pos;
+  bool _last_cursor_update_mouse_pos_valid = false;
+  bool _paint_gl_active = false;
+  bool _defer_redraw = false;
+  float _status_bar_time_accum = 0.f;
 
   OpenGL::Scoped::deferred_upload_buffers<2> _buffers;
 
@@ -513,6 +531,7 @@ private:
   void setupHelpMenu();
   void setupHotkeys();
   void setupClientMenu();
+  void setupWorldGitMenu();
   void setupMainToolbar();
 
   QWidget* _overlay_widget;
@@ -525,6 +544,7 @@ private:
   int _ramp_pick_target = 0;
   Noggit::Ui::RampCreationTool* _ramp_tool_window = nullptr;
   Noggit::Ui::BrushCursorTool* _brush_cursor_tool_window = nullptr;
+  Noggit::Ui::MapCheckoutWindow* _map_checkout_window = nullptr;
 
   std::unique_ptr<Noggit::Tool>& activeTool();
   void activeTool(editing_mode newTool);
@@ -557,12 +577,14 @@ private:
 
   void touchPointLightPropertyUndoBatch();
   void flushPointLightPropertyUndoBatch();
+  void persistPointLightsToDisk();
   void recordPointLightListChange(std::function<void()> mut);
 
   void touchSoundEmitterPropertyUndoBatch();
   void flushSoundEmitterPropertyUndoBatch();
   void recordSoundEmitterChange(std::function<void()> mut);
   void setDrawSoundEmittersForEditing(bool editing);
+  void setDrawPointLightsForEditing(bool editing);
 
   //! Register point-light color widgets so we can hide the in-view gizmo only while their QColorDialog is open.
   void registerPointLightColorPicker(QWidget* picker);
@@ -585,6 +607,10 @@ private:
 
   [[nodiscard]]
   bool isRotatingCamera() const;
+
+  //! True when MMB may pan the camera (no selected models, point light, or sound emitter).
+  [[nodiscard]]
+  bool canMmbPanCamera() const;
 
   [[nodiscard]]
   float aspect_ratio() const;
@@ -618,4 +644,6 @@ private:
   glm::mat4x4 projection() const;
 
   void move_camera_with_auto_height(glm::vec3 const&);
+
+  void ensureMapCheckoutWindow();
 };

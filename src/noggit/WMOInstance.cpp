@@ -129,6 +129,7 @@ void WMOInstance::draw ( OpenGL::Scoped::use_program& wmo_shader
                        , bool draw_exterior
                        , bool render_selection_aabb
                        , bool render_group_bounds
+                       , bool shadow_depth_pass
                        )
 {
   if (!wmo->finishedLoading() || wmo->loading_failed())
@@ -178,6 +179,7 @@ void WMOInstance::draw ( OpenGL::Scoped::use_program& wmo_shader
               , !draw_exterior
               , render_group_bounds
               , _grouped
+              , shadow_depth_pass
               );
   }
 

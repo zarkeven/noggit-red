@@ -36,6 +36,7 @@
       <file alias="terrain_vs">../src/noggit/rendering/glsl/terrain_vert.glsl</file>
       <file alias="terrain_fs">../src/noggit/rendering/glsl/terrain_frag.glsl</file>
       <file alias="sun_shadow_depth_fs">../src/noggit/rendering/glsl/sun_shadow_depth_frag.glsl</file>
+      <file alias="sun_shadow_wmo_depth_vs">../src/noggit/rendering/glsl/sun_shadow_wmo_depth_vert.glsl</file>
       <file alias="sun_shadow_wmo_depth_fs">../src/noggit/rendering/glsl/sun_shadow_wmo_depth_frag.glsl</file>
       <file alias="wmo_vs">../src/noggit/rendering/glsl/wmo_vert.glsl</file>
       <file alias="wmo_fs">../src/noggit/rendering/glsl/wmo_frag.glsl</file>

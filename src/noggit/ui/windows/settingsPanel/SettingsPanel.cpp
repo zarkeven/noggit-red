@@ -155,6 +155,55 @@ namespace Noggit
               }
       );
 
+      connect(ui->_mapupconverter_path_field, &QLineEdit::textChanged, [&](QString value)
+              {
+                _settings->setValue("integrations/mapupconverter_path", value.trimmed());
+              }
+      );
+
+      connect(ui->_mapupconverter_path_browse, &QPushButton::clicked, [=]
+              {
+                QString const start = ui->_mapupconverter_path_field->text();
+                auto result(QFileDialog::getOpenFileName(
+                    nullptr, "MapUpconverter executable or folder", start.isEmpty() ? QDir::homePath() : start,
+                    "Executable (*.exe);;All files (*)"));
+
+                if (result.isNull())
+                {
+                  result = QFileDialog::getExistingDirectory(
+                      nullptr, "MapUpconverter install folder", start.isEmpty() ? QDir::homePath() : start);
+                }
+
+                if (!result.isNull())
+                  ui->_mapupconverter_path_field->setText(result);
+              }
+      );
+
+      connect(ui->_checkout_integration_cb, &QCheckBox::toggled, [&](bool value)
+              {
+                _settings->setValue("integrations/checkout_enabled", value);
+                ui->_checkout_offline_mode_cb->setEnabled(value);
+              }
+      );
+
+      connect(ui->_checkout_offline_mode_cb, &QCheckBox::toggled, [&](bool value)
+              {
+                _settings->setValue("integrations/checkout_offline_mode", value);
+              }
+      );
+
+      connect(ui->_github_username_field, &QLineEdit::textChanged, [&](QString value)
+              {
+                _settings->setValue("integrations/github_username", value.trimmed());
+              }
+      );
+
+      connect(ui->_github_pat_field, &QLineEdit::textChanged, [&](QString value)
+              {
+                _settings->setValue("integrations/github_pat", value);
+              }
+      );
+
 #ifdef USE_MYSQL_UID_STORAGE
       ui->MySQL_box->setEnabled(true);
       ui->MySQL_box->setCheckable(true);
@@ -309,6 +358,14 @@ namespace Noggit
       ui->_epsilon_starting_fdid_field->setValue(_settings->value("integrations/epsilon_starting_fdid", 5000000).toInt());
       ui->_epsilon_wdt_fdid_field->setValue(_settings->value("integrations/epsilon_wdt_fdid", 0).toInt());
 
+      ui->_mapupconverter_path_field->setText(_settings->value("integrations/mapupconverter_path").toString());
+
+      ui->_checkout_integration_cb->setChecked(_settings->value("integrations/checkout_enabled", false).toBool());
+      ui->_checkout_offline_mode_cb->setChecked(_settings->value("integrations/checkout_offline_mode", false).toBool());
+      ui->_checkout_offline_mode_cb->setEnabled(ui->_checkout_integration_cb->isChecked());
+      ui->_github_username_field->setText(_settings->value("integrations/github_username").toString());
+      ui->_github_pat_field->setText(_settings->value("integrations/github_pat").toString());
+
       ui->assetBrowserBgCol->setColor(_settings->value("assetBrowser/background_color",
         QVariant::fromValue(QColor(127, 127, 127))).value<QColor>());
       ui->assetBrowserDiffuseLight->setColor(_settings->value("assetBrowser/diffuse_light",
@@ -423,6 +480,11 @@ namespace Noggit
       _settings->setValue("integrations/epsilon_export_map", ui->_epsilon_export_map_combo->currentText().trimmed());
       _settings->setValue("integrations/epsilon_starting_fdid", ui->_epsilon_starting_fdid_field->value());
       _settings->setValue("integrations/epsilon_wdt_fdid", ui->_epsilon_wdt_fdid_field->value());
+
+      _settings->setValue("integrations/checkout_enabled", ui->_checkout_integration_cb->isChecked());
+      _settings->setValue("integrations/checkout_offline_mode", ui->_checkout_offline_mode_cb->isChecked());
+      _settings->setValue("integrations/github_username", ui->_github_username_field->text().trimmed());
+      _settings->setValue("integrations/github_pat", ui->_github_pat_field->text());
 
 #ifdef USE_MYSQL_UID_STORAGE
       _settings->setValue ("project/mysql/enabled", ui->MySQL_box->isChecked());

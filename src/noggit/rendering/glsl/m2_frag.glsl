@@ -308,15 +308,6 @@ void main()
   }
 
 #ifdef M2_SHADOW_DEPTH_PASS
-  // Alpha_key + opaque combiner: final color.a ignores texture alpha; cut out from texture for shadows.
-  if (blend_mode == 1 && alpha_test > 0.0)
-  {
-    vec4 texture1 = texture(tex1, vec3(uv1, tex1_index));
-    if (texture1.a * mesh_color.w < alpha_test)
-    {
-      discard;
-    }
-  }
   return;
 #endif
 
@@ -324,7 +315,7 @@ void main()
   vec3 currColor;
   vec3 lDiffuse = vec3(0.0, 0.0, 0.0);
   vec3 accumlatedLight = vec3(1.0, 1.0, 1.0);
-  float nDotL = clamp(dot(normalize(norm), -normalize(vec3(-LightDir_FogRate.x, LightDir_FogRate.z, -LightDir_FogRate.y))), 0.0, 1.0);
+  float nDotL = clamp(dot(normalize(norm), normalize(vec3(LightDir_FogRate.x, -LightDir_FogRate.z, LightDir_FogRate.y))), 0.0, 1.0);
 
   if(unlit == 0)
   {
@@ -335,7 +326,8 @@ void main()
       vec3 groundColor = (ambientColor * 0.699999988);
 
       currColor = mix(groundColor, skyColor, 0.5 + (0.5 * nDotL));
-      lDiffuse = DiffuseColor_FogStart.xyz * nDotL;
+      vec3 sun_diffuse = DiffuseColor_FogStart.xyz * nDotL;
+      lDiffuse = sun_diffuse;
 
       if (meta.y != 0)
       {
@@ -380,7 +372,15 @@ void main()
   {
     shadow_mul = sample_gpu_sun_shadow(world_pos, norm);
   }
-  color.rgb = clamp(albedo * currColor + albedo * lDiffuse * shadow_mul, 0.0, 1.0);
+
+  vec3 lit = albedo * currColor;
+  if (unlit == 0)
+  {
+    vec3 sun_diffuse = DiffuseColor_FogStart.xyz * nDotL;
+    vec3 point_diffuse = lDiffuse - sun_diffuse;
+    lit += albedo * sun_diffuse * shadow_mul + albedo * point_diffuse;
+  }
+  color.rgb = clamp(lit, 0.0, 1.0);
 
   if(FogColor_FogOn.w != 0 && unfogged == 0)
   {

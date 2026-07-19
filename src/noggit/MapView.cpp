@@ -1,5 +1,6 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 #include <algorithm>
+#include <limits>
 
 #include <noggit/DBC.h>
 #include <noggit/MapChunk.h>
@@ -45,6 +46,10 @@
 #include <noggit/project/CurrentProject.hpp>
 #include <noggit/integrations/DiscordRichPresence.hpp>
 #include <noggit/integrations/EpsilonPatchExporter.hpp>
+#include <noggit/integrations/MapLightsJsonInjector.hpp>
+#include <noggit/integrations/MapCheckoutManager.hpp>
+#include <noggit/integrations/GitCommandRunner.hpp>
+#include <noggit/ui/MapCheckoutWindow.hpp>
 #include <noggit/application/NoggitApplication.hpp>
 #include <opengl/scoped.hpp>
 #include <noggit/ui/tools/ViewToolbar/Ui/ViewToolbar.hpp>
@@ -473,6 +478,18 @@ void MapView::snap_selected_models_to_the_ground()
 bool MapView::isRotatingCamera() const
 {
     return look;
+}
+
+bool MapView::canMmbPanCamera() const
+{
+  if (!_world)
+  {
+    return false;
+  }
+
+  return _world->get_selected_model_count() == 0
+      && !_world->selectedPointLightIndex().has_value()
+      && !_world->selectedSoundEmitter().has_value();
 }
 
 
@@ -1086,9 +1103,21 @@ void MapView::flushPointLightPropertyUndoBatch()
       && NOGGIT_CUR_ACTION->getModalityControllers() == Noggit::ActionModalityControllers::eNONE)
   {
     NOGGIT_ACTION_MGR->endAction();
+    if (_world)
+      _world->mapIndex.markPointLightsDirty();
   }
 
   _point_light_property_undo_session = false;
+
+  persistPointLightsToDisk();
+}
+
+void MapView::persistPointLightsToDisk()
+{
+  if (!_world)
+    return;
+
+  _world->mapIndex.savePointLights (_world.get());
 }
 
 void MapView::recordPointLightListChange(std::function<void()> mut)
@@ -1098,6 +1127,8 @@ void MapView::recordPointLightListChange(std::function<void()> mut)
   if (NOGGIT_CUR_ACTION)
   {
     mut();
+    if (_world)
+      _world->mapIndex.markPointLightsDirty();
     return;
   }
 
@@ -1113,6 +1144,11 @@ void MapView::recordPointLightListChange(std::function<void()> mut)
   {
     mut();
   }
+
+  if (_world)
+    _world->mapIndex.markPointLightsDirty();
+
+  persistPointLightsToDisk();
 }
 
 void MapView::touchSoundEmitterPropertyUndoBatch()
@@ -1206,6 +1242,31 @@ void MapView::setDrawSoundEmittersForEditing(bool editing)
       _draw_sound_emitters.set(*_draw_sound_emitters_before_editing);
     _draw_sound_emitters_before_editing.reset();
     _draw_sound_emitters_for_editing = false;
+  }
+}
+
+void MapView::setDrawPointLightsForEditing(bool editing)
+{
+  if (editing)
+  {
+    if (!_draw_point_lights_for_editing)
+    {
+      _draw_point_lights_before_editing = _draw_point_lights.get();
+      _draw_point_light_spheres_before_editing = _draw_point_light_spheres.get();
+      _draw_point_lights.set(true);
+      _draw_point_light_spheres.set(true);
+      _draw_point_lights_for_editing = true;
+    }
+  }
+  else if (_draw_point_lights_for_editing)
+  {
+    if (_draw_point_lights_before_editing.has_value())
+      _draw_point_lights.set(*_draw_point_lights_before_editing);
+    if (_draw_point_light_spheres_before_editing.has_value())
+      _draw_point_light_spheres.set(*_draw_point_light_spheres_before_editing);
+    _draw_point_lights_before_editing.reset();
+    _draw_point_light_spheres_before_editing.reset();
+    _draw_point_lights_for_editing = false;
   }
 }
 
@@ -2623,6 +2684,163 @@ void MapView::setupClientMenu()
 
 }
 
+void MapView::setupWorldGitMenu()
+{
+  auto* world_git_menu = _main_window->_menuBar->addMenu("World && Git");
+  connect(this, &QObject::destroyed, world_git_menu, &QObject::deleteLater);
+
+  auto* map_checkout_action = world_git_menu->addAction("Map Checkout");
+  map_checkout_action->setToolTip("Open the map checkout window to select and check out ADTs.");
+
+  auto* inject_lights_action = world_git_menu->addAction("Inject lights to patch");
+  inject_lights_action->setToolTip(
+    "Read {map}_lights.json from the project and write _lgt.wdt, patch WDT lgtFileDataID, and NGPL into the configured Epsilon patch.");
+
+  auto* refresh_action = world_git_menu->addAction("Refresh Checkouts");
+  refresh_action->setToolTip("Pull latest checkout manifest from the remote repository.");
+
+  world_git_menu->addSeparator();
+
+  auto* pull_action = world_git_menu->addAction("Git Pull");
+  auto* force_pull_action = world_git_menu->addAction("Force Pull");
+  auto* push_action = world_git_menu->addAction("Git Push");
+  force_pull_action->setToolTip("Fetch from origin and reset to upstream. "
+    "Warns if unpushed local tile changes would be overwritten. Reloads affected loaded ADTs.");
+  push_action->setToolTip("Push local commits from map saves to remote.");
+
+  connect(map_checkout_action, &QAction::triggered, this, [this]() {
+    ensureMapCheckoutWindow();
+  });
+
+  connect(inject_lights_action, &QAction::triggered, this, [this]() {
+    if (!_world)
+      return;
+
+    auto const cfg = Noggit::Integrations::EpsilonPatchExporter::load_config_from_settings();
+    if (!cfg)
+    {
+      QMessageBox::warning(this, QStringLiteral("Inject lights"),
+                           QStringLiteral("Epsilon patch export is not configured in Settings."));
+      return;
+    }
+
+    auto const result = Noggit::Integrations::MapLightsJsonInjector::inject (
+      *cfg, Noggit::Project::CurrentProject::get()->ProjectPath, _world->basename);
+
+    if (result.success)
+      _main_window->statusBar()->showMessage(QString::fromStdString(result.message), 5000);
+    else
+      QMessageBox::warning(this, QStringLiteral("Inject lights"), QString::fromStdString(result.message));
+  });
+
+  connect(refresh_action, &QAction::triggered, this, [this]() {
+    auto result = Noggit::Integrations::MapCheckoutManager::instance().refresh();
+    if (!result.success)
+    {
+      QMessageBox::warning(this, "Refresh Checkouts", result.message);
+    }
+  });
+
+  connect(pull_action, &QAction::triggered, this, [this]() {
+    auto const path = std::filesystem::path(Noggit::Project::CurrentProject::get()->ProjectPath);
+    auto result = Noggit::Integrations::GitCommandRunner::pull(
+      path, false, Noggit::Integrations::MapCheckoutManager::authFromSettings());
+    if (!result.success)
+    {
+      QMessageBox::warning(this, "Git Pull", result.standard_error.trimmed());
+    }
+    else
+    {
+      Noggit::Integrations::MapCheckoutManager::instance().refresh();
+    }
+  });
+
+  connect(force_pull_action, &QAction::triggered, this, [this]() {
+    if (!_world)
+    {
+      return;
+    }
+    auto result = Noggit::Integrations::MapCheckoutManager::instance().forcePullMap(_world.get(), this);
+    if (!result.success)
+    {
+      QMessageBox::warning(this, "Force Pull", result.message);
+    }
+    else
+    {
+      _main_window->statusBar()->showMessage(result.message, 5000);
+    }
+  });
+
+  connect(push_action, &QAction::triggered, this, [this]() {
+    auto result = Noggit::Integrations::MapCheckoutManager::instance().pushPendingChanges();
+    if (!result.success)
+    {
+      QMessageBox::warning(this, "Git Push", result.message);
+    }
+    else if (result.message != QStringLiteral("Offline mode — push skipped."))
+    {
+      _main_window->statusBar()->showMessage(result.message, 3000);
+    }
+  });
+
+  connect(world_git_menu, &QMenu::aboutToShow, this, [=]() {
+    auto& mgr = Noggit::Integrations::MapCheckoutManager::instance();
+    bool const checkout_ready = mgr.isProjectReady();
+    bool const git_repo = Noggit::Integrations::GitCommandRunner::isGitRepository(
+      std::filesystem::path(Noggit::Project::CurrentProject::get()->ProjectPath));
+
+    map_checkout_action->setEnabled(checkout_ready);
+    inject_lights_action->setEnabled(_world != nullptr);
+    refresh_action->setEnabled(checkout_ready);
+    pull_action->setEnabled(git_repo);
+    force_pull_action->setEnabled(git_repo && !mgr.isOfflineMode());
+    push_action->setEnabled(git_repo && !mgr.isOfflineMode());
+
+    QString tip = mgr.readinessMessage();
+    if (auto const url = Noggit::Integrations::GitCommandRunner::originRemoteUrl(
+          std::filesystem::path(Noggit::Project::CurrentProject::get()->ProjectPath)))
+    {
+      tip += QStringLiteral("\n") + QString::fromStdString(*url);
+    }
+    world_git_menu->setToolTipsVisible(true);
+    map_checkout_action->setStatusTip(tip);
+  });
+
+  if (_world)
+  {
+    Noggit::Integrations::MapCheckoutManager::instance().setActiveMap(
+      _world->getMapID(), _world->basename);
+  }
+
+  connect(&Noggit::Integrations::MapCheckoutManager::instance()
+         , &Noggit::Integrations::MapCheckoutManager::remoteCheckoutsUpdated
+         , this
+         , [this](QStringList const& messages) {
+    if (messages.isEmpty())
+    {
+      return;
+    }
+    _main_window->statusBar()->showMessage(
+      QStringLiteral("Remote checkouts updated: %1").arg(messages.join(QStringLiteral(" · ")))
+      , 10000);
+  });
+
+  connect(&Noggit::Integrations::MapCheckoutManager::instance()
+         , &Noggit::Integrations::MapCheckoutManager::mapSaveCommitFinished
+         , this
+         , [this](bool success, QString const& message) {
+    if (success && message == QStringLiteral("Changes committed locally."))
+    {
+      _main_window->statusBar()->showMessage(QStringLiteral("Committed locally"), 2000);
+    }
+    else if (!success && !message.isEmpty())
+    {
+      _main_window->statusBar()->showMessage(
+        QStringLiteral("Git commit failed: %1").arg(message), 5000);
+    }
+  });
+}
+
 void MapView::setupHotkeys()
 {
 
@@ -2995,6 +3213,7 @@ void MapView::createGUI()
   setupAssistMenu();
   setupHelpMenu();
   setupClientMenu();
+  setupWorldGitMenu();
   setupHotkeys();
 
   setupMainToolbar();
@@ -3181,6 +3400,12 @@ MapView::MapView( math::degrees camera_yaw0
   _update_every_event_loop.start (_frametime);
   connect(&_update_every_event_loop, &QTimer::timeout,[=]
       { 
+          if (_paint_gl_active)
+          {
+              _defer_redraw = true;
+              return;
+          }
+
           _needs_redraw = true;
 
           Qt::ApplicationState app_state = QGuiApplication::applicationState();
@@ -3436,6 +3661,8 @@ void MapView::paintGL()
   else
     _needs_redraw = false;
 
+  _paint_gl_active = true;
+
   if (!_gl_initialized)
   {
     initializeGL();
@@ -3444,17 +3671,20 @@ void MapView::paintGL()
   if (_last_opengl_context != context())
   {
     _gl_initialized = false;
+    _paint_gl_active = false;
     return;
   }
 
   const qreal now(_startup_time.elapsed() / 1000.0);
+  qreal const frame_dt = now - _last_update;
 
-  _last_frame_durations.emplace_back (now - _last_update);
+  _last_frame_durations.emplace_back (frame_dt);
 
   lock = true;
   if (!activeTool()->preRender())
   {
       lock = false;
+      _paint_gl_active = false;
       return;
   }
   lock = false;
@@ -3469,11 +3699,10 @@ void MapView::paintGL()
     lock = true;
     try
     {
+      tick(frame_dt);
       Noggit::register_crash_render_stage("MapView::paintGL:draw_map");
-      LogError << "MapView::paintGL: before draw_map" << std::endl;
       draw_map();
       Noggit::register_crash_render_stage("MapView::paintGL:postRender");
-      LogError << "MapView::paintGL: after draw_map" << std::endl;
       activeTool()->postRender();
     }
     catch (std::exception const& e)
@@ -3489,7 +3718,8 @@ void MapView::paintGL()
     }
     catch (...)
     {
-      LogError << "MapView::paintGL: caught non-std exception during draw_map/postRender" << std::endl;
+      LogError << "MapView::paintGL: caught non-std exception during draw_map/postRender"
+               << " (last render stage: " << Noggit::crash_render_stage() << ")" << std::endl;
       try
       {
         std::cerr.flush();
@@ -3499,7 +3729,6 @@ void MapView::paintGL()
       }
     }
     lock = false;
-    tick (now - _last_update);
   }
 
   _last_update = now;
@@ -3717,13 +3946,17 @@ void MapView::paintGL()
         }
 
         if (changed)
+        {
           invalidate();
+          _world->mapIndex.markPointLightsDirty();
+        }
       }
       else if (_point_light_gizmo_edit_action)
       {
         if (NOGGIT_CUR_ACTION)
           NOGGIT_ACTION_MGR->endAction();
         _point_light_gizmo_edit_action = false;
+        persistPointLightsToDisk();
       }
     }
     else
@@ -3879,6 +4112,14 @@ void MapView::paintGL()
   }
 
   FrameMark
+
+  _paint_gl_active = false;
+  if (_defer_redraw)
+  {
+    _defer_redraw = false;
+    _needs_redraw = true;
+    update();
+  }
 }
 
 void MapView::resizeGL (int width, int height)
@@ -4060,11 +4301,6 @@ void MapView::tick (float dt)
     _point_light_numpad_edit_action = false;
   }
 
-  // start unloading tiles
-  _world->mapIndex.enterTile (TileIndex (_camera.position));
-  if (_unload_tiles)
-    _world->mapIndex.unloadTiles (TileIndex (_camera.position));
-
   dt = std::min(dt, 1.0f);
 
   math::degrees yaw (-_camera.yaw()._);
@@ -4162,6 +4398,17 @@ void MapView::tick (float dt)
     }
   }
 
+  {
+    TileIndex const camera_tile(_camera.position);
+    if (!_last_enter_tile_index.has_value() || camera_tile != *_last_enter_tile_index)
+    {
+      _last_enter_tile_index = camera_tile;
+      _world->mapIndex.enterTile(camera_tile);
+    }
+    if (_unload_tiles && _camera_moved_since_last_draw)
+      _world->mapIndex.unloadTiles(camera_tile);
+  }
+
   // udpate MVP after moving camera
   _model_view = model_view(_debug_cam_mode.get());
   _projection = projection();
@@ -4179,15 +4426,41 @@ void MapView::tick (float dt)
       case editing_mode::impass:
       case editing_mode::holes:
       case editing_mode::object:
-        update_cursor_pos();
+        if (shouldUpdateCursorPosition())
+        {
+          update_cursor_pos();
+          _last_cursor_update_mouse_pos = _last_mouse_pos;
+          _last_cursor_update_mouse_pos_valid = true;
+        }
         break;
       default:
         break;
       }
     }
-    else
+    else if (shouldUpdateCursorPosition())
     {
-      update_cursor_pos();
+      bool const mouse_moved = !_last_cursor_update_mouse_pos_valid
+                            || _last_mouse_pos != _last_cursor_update_mouse_pos;
+      bool const throttle = _camera_moved_since_last_draw && !mouse_moved
+                         && !leftMouse && !rightMouse && !middleMouse;
+
+      if (throttle)
+      {
+        ++_cursor_update_throttle_counter;
+        if ((_cursor_update_throttle_counter % 2) == 0)
+        {
+          update_cursor_pos();
+          _last_cursor_update_mouse_pos = _last_mouse_pos;
+          _last_cursor_update_mouse_pos_valid = true;
+        }
+      }
+      else
+      {
+        _cursor_update_throttle_counter = 0;
+        update_cursor_pos();
+        _last_cursor_update_mouse_pos = _last_mouse_pos;
+        _last_cursor_update_mouse_pos_valid = true;
+      }
     }
   }
 
@@ -4275,67 +4548,95 @@ void MapView::tick (float dt)
     lastSelected = currentSelection;
   }
 
-  QString status;
-  status += ( QString ("tile: %1 %2")
-            . arg (std::floor (_camera.position.x / TILESIZE))
-            . arg (std::floor (_camera.position.z / TILESIZE))
-            );
-  status += ( QString ("; coordinates client: (%1, %2, %3), server: (%4, %5, %6)")
-            . arg (_camera.position.x, 0, 'f', 2)
-            . arg (_camera.position.z, 0, 'f', 2)
-            . arg (_camera.position.y, 0, 'f', 2)
-            . arg (ZEROPOINT - _camera.position.z, 0, 'f', 2)
-            . arg (ZEROPOINT - _camera.position.x, 0, 'f', 2)
-            . arg (_camera.position.y, 0, 'f', 2)
-            );
-
-  _status_position->setText (status);
-
-  if (currentSelection.size() > 0) // currently disabled, change to == to enable status bar selection
+  _status_bar_time_accum += dt;
+  bool const refresh_status_bar = selection_changed || NOGGIT_CUR_ACTION || _status_bar_time_accum >= 0.25f;
+  if (refresh_status_bar)
   {
-    _status_selection->setText ("");
-  }
-  else if (currentSelection.size() == 1)
-  {
-    switch (currentSelection.begin()->index())
+    _status_bar_time_accum = 0.f;
+
+    QString status;
+    status += ( QString ("tile: %1 %2")
+              . arg (std::floor (_camera.position.x / TILESIZE))
+              . arg (std::floor (_camera.position.z / TILESIZE))
+              );
+    status += ( QString ("; coordinates client: (%1, %2, %3), server: (%4, %5, %6)")
+              . arg (_camera.position.x, 0, 'f', 2)
+              . arg (_camera.position.z, 0, 'f', 2)
+              . arg (_camera.position.y, 0, 'f', 2)
+              . arg (ZEROPOINT - _camera.position.z, 0, 'f', 2)
+              . arg (ZEROPOINT - _camera.position.x, 0, 'f', 2)
+              . arg (_camera.position.y, 0, 'f', 2)
+              );
+
+    _status_position->setText (status);
+
+    if (currentSelection.size() > 0) // currently disabled, change to == to enable status bar selection
     {
-    case eEntry_Object:
+      _status_selection->setText ("");
+    }
+    else if (currentSelection.size() == 1)
+    {
+      switch (currentSelection.begin()->index())
       {
-        auto obj = std::get<selected_object_type>(*currentSelection.begin());
-
-        if (obj->which() == eMODEL)
+      case eEntry_Object:
         {
-          auto instance(static_cast<ModelInstance*>(obj));
-          _status_selection->setText
-              ( QString ("%1: %2")
-                    . arg (instance->uid)
-                    . arg (QString::fromStdString (instance->model->file_key().stringRepr()))
-              );
-        }
-        else if (obj->which() == eWMO)
-        {
-          auto instance(static_cast<WMOInstance*>(obj));
-          _status_selection->setText
-              ( QString ("%1: %2")
-                    . arg (instance->uid)
-                    . arg (QString::fromStdString (instance->wmo->file_key().stringRepr()))
-              );
-        }
+          auto obj = std::get<selected_object_type>(*currentSelection.begin());
 
-        break;
-      }
-    case eEntry_MapChunk:
-      {
-      auto chunk(std::get<selected_chunk_type>(*currentSelection.begin()).chunk);
-        _status_selection->setText
-          (QString ("%1, %2").arg (chunk->px).arg (chunk->py));
-        break;
+          if (obj->which() == eMODEL)
+          {
+            auto instance(static_cast<ModelInstance*>(obj));
+            _status_selection->setText
+                ( QString ("%1: %2")
+                      . arg (instance->uid)
+                      . arg (QString::fromStdString (instance->model->file_key().stringRepr()))
+                );
+          }
+          else if (obj->which() == eWMO)
+          {
+            auto instance(static_cast<WMOInstance*>(obj));
+            _status_selection->setText
+                ( QString ("%1: %2")
+                      . arg (instance->uid)
+                      . arg (QString::fromStdString (instance->wmo->file_key().stringRepr()))
+                );
+          }
+
+          break;
+        }
+      case eEntry_MapChunk:
+        {
+        auto chunk(std::get<selected_chunk_type>(*currentSelection.begin()).chunk);
+          _status_selection->setText
+            (QString ("%1, %2").arg (chunk->px).arg (chunk->py));
+          break;
+        }
       }
     }
-  }
-  else
-  {
-	  _status_selection->setText(QString::number(currentSelection.size()) + " objects selected");
+    else
+    {
+      _status_selection->setText(QString::number(currentSelection.size()) + " objects selected");
+    }
+
+    _status_area->setText
+      (QString::fromStdString (gAreaDB.getAreaFullName (_world->getAreaID (_camera.position))));
+
+    {
+      int time ((static_cast<int>(_world->time) % 2880) / 2);
+      std::stringstream timestrs;
+      timestrs << "Time: " << (time / 60) << ":" << std::setfill ('0')
+               << std::setw (2) << (time % 60);
+
+
+      timestrs << ", Pres: " << _tablet_manager->pressure();
+
+      _status_time->setText (QString::fromStdString (timestrs.str()));
+    }
+
+    _status_culling->setText ( "Loaded tiles: " + QString::number(_world->getNumLoadedTiles())
+                           + ", Rendered tiles: " + QString::number(_world->getNumRenderedTiles())
+                           + "\t Loaded objects: " + QString::number(_world->getModelInstanceStorage().getTotalModelsCount())
+                           + ", Rendered objects: " + QString::number(_world->getNumRenderedObjects())
+    );
   }
 
   if (selection_changed || NOGGIT_CUR_ACTION)
@@ -4345,21 +4646,6 @@ void MapView::tick (float dt)
   {
       emit selectionUpdated(currentSelection);
       // updateDetailInfos();
-  }
-
-  _status_area->setText
-    (QString::fromStdString (gAreaDB.getAreaFullName (_world->getAreaID (_camera.position))));
-
-  {
-    int time ((static_cast<int>(_world->time) % 2880) / 2);
-    std::stringstream timestrs;
-    timestrs << "Time: " << (time / 60) << ":" << std::setfill ('0')
-             << std::setw (2) << (time % 60);
-
-
-    timestrs << ", Pres: " << _tablet_manager->pressure();
-
-    _status_time->setText (QString::fromStdString (timestrs.str()));
   }
 
   _last_fps_update += dt;
@@ -4381,12 +4667,6 @@ void MapView::tick (float dt)
     _last_frame_durations.clear();
     _last_fps_update = 0.f;
   }
-
-  _status_culling->setText ( "Loaded tiles: " + QString::number(_world->getNumLoadedTiles())
-                         + ", Rendered tiles: " + QString::number(_world->getNumRenderedTiles())
-                         + "\t Loaded objects: " + QString::number(_world->getModelInstanceStorage().getTotalModelsCount())
-                         + ", Rendered objects: " + QString::number(_world->getNumRenderedObjects())
-  );
 }
 
 glm::vec4 MapView::normalized_device_coords (int x, int y) const
@@ -4405,6 +4685,11 @@ math::ray MapView::intersect_ray() const
 
   if (_display_mode == display_mode::in_3D)
   {
+    if (width() <= 0 || height() <= 0)
+    {
+      return { _camera.position, glm::vec3(0.f, -1.f, 0.f) };
+    }
+
     // during rendering we multiply perspective * view
     // so we need the same order here and then invert.
     glm::mat4x4 const invertedViewMatrix = glm::inverse(_projection * _model_view);
@@ -4412,7 +4697,13 @@ math::ray MapView::intersect_ray() const
 
     auto pos = glm::vec3(normalisedView.x / normalisedView.w, normalisedView.y / normalisedView.w, normalisedView.z / normalisedView.w);
 
-    return { _camera.position, pos - _camera.position };
+    glm::vec3 dir = pos - _camera.position;
+    if (glm::dot(dir, dir) <= std::numeric_limits<float>::epsilon())
+    {
+      dir = glm::vec3(0.f, -1.f, 0.f);
+    }
+
+    return { _camera.position, dir };
   }
   else
   {
@@ -4460,12 +4751,23 @@ math::ray MapView::intersect_ray_from_pixel(QPointF const& mouse_px) const
 
   if (_display_mode == display_mode::in_3D)
   {
+    if (width() <= 0 || height() <= 0)
+    {
+      return { _camera.position, glm::vec3(0.f, -1.f, 0.f) };
+    }
+
     glm::mat4x4 const invertedViewMatrix = glm::inverse(_projection * _model_view);
     auto normalisedView = invertedViewMatrix * normalized_device_coords(static_cast<int>(mx), static_cast<int>(mz));
 
     auto pos = glm::vec3(normalisedView.x / normalisedView.w, normalisedView.y / normalisedView.w, normalisedView.z / normalisedView.w);
 
-    return { _camera.position, pos - _camera.position };
+    glm::vec3 dir = pos - _camera.position;
+    if (glm::dot(dir, dir) <= std::numeric_limits<float>::epsilon())
+    {
+      dir = glm::vec3(0.f, -1.f, 0.f);
+    }
+
+    return { _camera.position, dir };
   }
   else
   {
@@ -4782,6 +5084,47 @@ void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
   emit rotationChanged();
 }
 
+bool MapView::shouldUpdateCursorPosition() const
+{
+  if (leftMouse || rightMouse || middleMouse)
+  {
+    return true;
+  }
+
+  if (!_camera_moved_since_last_draw)
+  {
+    bool const mouse_moved = !_last_cursor_update_mouse_pos_valid
+                          || _last_mouse_pos != _last_cursor_update_mouse_pos;
+    return mouse_moved;
+  }
+
+  switch (terrainMode)
+  {
+  case editing_mode::ground:
+  case editing_mode::flatten_blur:
+  case editing_mode::paint:
+  case editing_mode::holes:
+  case editing_mode::areaid:
+  case editing_mode::impass:
+  case editing_mode::water:
+  case editing_mode::mccv:
+  case editing_mode::stamp:
+  case editing_mode::chunk:
+  case editing_mode::terrain_unified:
+    return true;
+
+  case editing_mode::object:
+    return const_cast<MapView*>(this)->activeTool()->brushRadius() > 0.01f;
+
+  case editing_mode::point_light:
+  case editing_mode::sound_emitter:
+    return true;
+
+  default:
+    return false;
+  }
+}
+
 void MapView::update_cursor_pos()
 {
   static bool buffer_switch = false;
@@ -4936,7 +5279,14 @@ void MapView::draw_map()
     // only active in editing_mode::point_light (see doSelection).
     bool const hover_only = _world->selectedPointLightIndex().has_value()
                          || _world->selectedSoundEmitter().has_value();
-    doSelection(true, hover_only);
+    bool const mouse_moved_for_pick = !_do_selection_mouse_pos_valid
+                                   || _last_mouse_pos != _last_do_selection_mouse_pos;
+    if (mouse_moved_for_pick || leftMouse || !hover_only)
+    {
+      _do_selection_mouse_pos_valid = true;
+      _last_do_selection_mouse_pos = _last_mouse_pos;
+      doSelection(true, hover_only);
+    }
   }
 
   if (_camera_moved_since_last_draw)
@@ -5298,6 +5648,7 @@ void MapView::focusOutEvent (QFocusEvent*)
   leftMouse = false;
   rightMouse = false;
   middleMouse = false;
+  _mmb_pan_active = false;
   look = false;
   freelook = false;
 
@@ -5323,6 +5674,52 @@ void MapView::mouseMoveEvent (QMouseEvent* event)
     _camera.add_to_yaw(math::degrees(relative_movement.dx() / XSENS));
     _camera.add_to_pitch(math::degrees(mousedir * relative_movement.dy() / YSENS));
     _camera_moved_since_last_draw = true;
+  }
+
+  // MMB grab-pan: keep the world point under the cursor fixed by sliding on a
+  // horizontal plane from camera pixel rays (view-relative), altitude unchanged.
+  if (middleMouse && _mmb_pan_active && canMmbPanCamera() && !(look || freelook))
+  {
+    float const camera_y = _camera.position.y;
+
+    if (_display_mode == display_mode::in_2D)
+    {
+      math::ray const prev_ray = intersect_ray_from_pixel(_last_mouse_pos);
+      math::ray const curr_ray = intersect_ray_from_pixel(event->pos());
+      glm::vec3 const delta = prev_ray.origin() - curr_ray.origin();
+      _camera.position.x += delta.x;
+      _camera.position.z += delta.z;
+      _camera.position.y = camera_y;
+      _camera_moved_since_last_draw = true;
+    }
+    else
+    {
+      auto const hit_on_plane = [](math::ray const& ray, float plane_y) -> std::optional<glm::vec3>
+      {
+        float const dir_y = ray.direction().y;
+        if (std::abs(dir_y) < 1e-5f)
+        {
+          return std::nullopt;
+        }
+        float const t = (plane_y - ray.origin().y) / dir_y;
+        if (t < 0.f)
+        {
+          return std::nullopt;
+        }
+        return ray.position(t);
+      };
+
+      auto const prev_hit = hit_on_plane(intersect_ray_from_pixel(_last_mouse_pos), _mmb_pan_plane_y);
+      auto const curr_hit = hit_on_plane(intersect_ray_from_pixel(event->pos()), _mmb_pan_plane_y);
+      if (prev_hit && curr_hit)
+      {
+        glm::vec3 const delta = *prev_hit - *curr_hit;
+        _camera.position.x += delta.x;
+        _camera.position.z += delta.z;
+        _camera.position.y = camera_y;
+        _camera_moved_since_last_draw = true;
+      }
+    }
   }
 
   Noggit::MouseMoveParameters params{
@@ -5441,6 +5838,17 @@ void MapView::mousePressEvent(QMouseEvent* event)
 
   case Qt::MiddleButton:
     middleMouse = true;
+    if (canMmbPanCamera())
+    {
+      // Grab the horizontal plane under the cursor so that point sticks to the mouse.
+      // Camera altitude stays locked separately during the drag.
+      _mmb_pan_plane_y = _cursor_pos.y;
+      _mmb_pan_active = true;
+    }
+    else
+    {
+      _mmb_pan_active = false;
+    }
     break;
 
   default:
@@ -5572,6 +5980,7 @@ void MapView::mouseReleaseEvent (QMouseEvent* event)
 
   case Qt::MiddleButton:
     middleMouse = false;
+    _mmb_pan_active = false;
     if (_point_light_mmb_edit_action)
     {
       if (NOGGIT_CUR_ACTION)
@@ -5656,6 +6065,8 @@ void MapView::save(save_mode mode)
     makeCurrent();
     OpenGL::context::scoped_setter const _ (::gl, context());
 
+    Noggit::Integrations::MapCheckoutManager::instance().beginSaveBatch();
+
     switch (mode)
     {
     case save_mode::current: _world->mapIndex.saveTile(TileIndex(_camera.position), _world.get()); break;
@@ -5664,6 +6075,10 @@ void MapView::save(save_mode mode)
     }
     // write wdl, we update wdl data prior in the mapIndex saving fucntions above
     _world->horizon.save_wdl(_world.get());
+
+    Noggit::Integrations::MapCheckoutManager::instance().showBlockedSaveDialog(this);
+
+    Noggit::Integrations::MapCheckoutManager::instance().commitMapSaveAsync(_world.get());
 
     if (auto const epsilon_cfg = Noggit::Integrations::EpsilonPatchExporter::load_config_from_settings())
     {
@@ -5692,7 +6107,7 @@ void MapView::save(save_mode mode)
           else
           {
             Noggit::Integrations::EpsilonPatchExporter::instance().export_map (
-              *epsilon_cfg, epsilon_cfg->export_map_basename, app->clientData(), _world.get());
+              *epsilon_cfg, Noggit::Project::CurrentProject::get()->ProjectPath, _world->basename);
           }
         }
       }
@@ -5706,7 +6121,7 @@ void MapView::save(save_mode mode)
     NOGGIT_ACTION_MGR->purge();
     AsyncLoader::instance->reset_object_fail();
 
-    _main_window->statusBar()->showMessage("Map saved", 2000);
+    _main_window->statusBar()->showMessage(QStringLiteral("Map saved"), 2000);
 
   }
   else
@@ -6265,6 +6680,7 @@ void MapView::onSettingsSave()
       Noggit::Integrations::DiscordRichPresence::instance().shutdown();
   }
 
+  Noggit::Integrations::MapCheckoutManager::instance().applySettings();
 }
 
 void MapView::setCameraDirty()
@@ -6353,4 +6769,16 @@ void MapView::onApplicationStateChanged(Qt::ApplicationState state)
     default:
         break;
     }
+}
+
+void MapView::ensureMapCheckoutWindow()
+{
+  if (!_map_checkout_window)
+  {
+    _map_checkout_window = new Noggit::Ui::MapCheckoutWindow(this, _main_window);
+  }
+
+  _map_checkout_window->show();
+  _map_checkout_window->raise();
+  _map_checkout_window->activateWindow();
 }

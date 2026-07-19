@@ -66,6 +66,7 @@ public:
             , bool draw_exterior
             , bool render_selection_aabb
             , bool render_group_bounds
+            , bool shadow_depth_pass = false
             );
 
   void intersect (math::ray const&, selection_result*, bool do_exterior = true);

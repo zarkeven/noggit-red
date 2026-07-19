@@ -37,6 +37,8 @@ void TileWater::readFromFile(BlizzardArchive::ClientFile &theFile, size_t basePo
       chunks[z][x]->fromFile(theFile, basePos);
     }
   }
+
+  tagUpdate();
 }
 
 

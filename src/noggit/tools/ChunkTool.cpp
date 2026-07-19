@@ -13,11 +13,12 @@
 #include <noggit/ui/tools/ToolPanel/ToolPanel.hpp>
 #include <noggit/World.h>
 
+#include <opengl/context.inl>
+
 #include <algorithm>
 
 #include <QtCore/QSettings>
 #include <QtCore/QString>
-#include <QtGui/QIcon>
 
 namespace Noggit
 {
@@ -36,6 +37,15 @@ namespace Noggit
     {
         auto* mv = mapView();
 
+        addHotkey("copySelection"_hash, Hotkey{
+            .onPress = [=] {
+                if (auto* clip = mv->getWorld()->chunkClipboard())
+                    clip->copySelected(mv->cursorPosition());
+                mv->invalidate();
+            },
+            .condition = [=] { return mv->get_editing_mode() == editing_mode::chunk && !NOGGIT_CUR_ACTION; },
+            });
+
         addHotkey("chunkManipulatorPaste"_hash, Hotkey{
             .onPress = [=] {
                 auto* clip = mv->getWorld()->chunkClipboard();
@@ -44,17 +54,27 @@ namespace Noggit
                 mv->makeCurrent();
                 OpenGL::context::scoped_setter const _(::gl, mv->context());
 
-                int const flags = ActionFlags::eCHUNKS_TERRAIN
-                    | ActionFlags::eCHUNKS_VERTEX_COLOR
-                    | ActionFlags::eCHUNK_SHADOWS
-                    | ActionFlags::eCHUNKS_HOLES
-                    | ActionFlags::eCHUNKS_AREAID
-                    | ActionFlags::eCHUNKS_FLAGS;
+                int flags = ActionFlags::eNO_FLAG;
+                if (clip->hasCachedCopy())
+                {
+                    flags |= ActionFlags::eCHUNKS_TERRAIN
+                        | ActionFlags::eCHUNKS_VERTEX_COLOR
+                        | ActionFlags::eCHUNK_SHADOWS
+                        | ActionFlags::eCHUNKS_HOLES
+                        | ActionFlags::eCHUNKS_AREAID
+                        | ActionFlags::eCHUNKS_FLAGS
+                        | ActionFlags::eCHUNKS_WATER
+                        | ActionFlags::eCHUNKS_TEXTURE
+                        | ActionFlags::eCHUNKS_SOUND_EMITTERS
+                        | ActionFlags::ePOINT_LIGHTS_CHANGED;
+                }
 
                 if (Action* action = NOGGIT_ACTION_MGR->beginAction(mv, flags, ActionModalityControllers::eNONE))
                 {
-                    (void)action;
-                    clip->pasteSelection(mv->cursorPosition(), static_cast<Noggit::Ui::Tools::ChunkManipulator::ChunkPasteFlags>(0), action);
+                    clip->pasteSelection(
+                      mv->cursorPosition(),
+                      static_cast<Noggit::Ui::Tools::ChunkManipulator::ChunkPasteFlags>(0),
+                      action);
 
                     QString map_key = QString::fromStdString(mv->getWorld()->basename);
                     map_key.replace(QLatin1Char('/'), QLatin1Char('_'));
@@ -87,14 +107,9 @@ namespace Noggit
         return Ui::FontNoggit::INFO;
     }
 
-    QIcon ChunkTool::toolbarIconOverride() const
-    {
-        return QIcon(QStringLiteral(":/tool-chunk-manipulator"));
-    }
-
     void ChunkTool::setupUi(Ui::Tools::ToolPanel* toolPanel)
     {
-        _chunkManipulator = new Noggit::Ui::Tools::ChunkManipulator::ChunkManipulatorPanel(mapView(), this, mapView());
+        _chunkManipulator = new Noggit::Ui::Tools::ChunkManipulator::ChunkManipulatorPanel(mapView(), mapView());
         toolPanel->registerTool(this, _chunkManipulator);
     }
 
@@ -118,40 +133,49 @@ namespace Noggit
         return _select_radius;
     }
 
-    void ChunkTool::setSelectRadius(float r)
+    void ChunkTool::finishSelectionPaint()
     {
-        _select_radius = std::max(CHUNKSIZE * 0.25f, r);
-        mapView()->invalidate();
-    }
+        if (!_selection_paint_active)
+            return;
 
-    void ChunkTool::copySelectionToClipboard()
-    {
+        _selection_paint_active = false;
+
         auto* mv = mapView();
-        if (auto* clip = mv->getWorld()->chunkClipboard())
+        auto* clip = mv->getWorld()->chunkClipboard();
+        if (!clip)
+            return;
+
+        if (!clip->selectedChunks().empty())
         {
             clip->copySelected(mv->cursorPosition());
         }
+
         mv->invalidate();
-        _painted_select_add = false;
-        _painted_select_remove = false;
     }
 
-    void ChunkTool::onSelected()
+    void ChunkTool::paintChunkSelection(TickParameters const& params)
     {
-        _painted_select_add = false;
-        _painted_select_remove = false;
-        _prev_shift_down = false;
-        _prev_ctrl_down = false;
-        Tool::onSelected();
-    }
+        auto* mv = mapView();
+        auto* clip = mv->getWorld()->chunkClipboard();
+        if (!clip)
+            return;
 
-    void ChunkTool::onDeselected()
-    {
-        _painted_select_add = false;
-        _painted_select_remove = false;
-        _prev_shift_down = false;
-        _prev_ctrl_down = false;
-        Tool::onDeselected();
+        _selection_paint_active = true;
+
+        auto const mode = (params.mod_shift_down && !params.mod_ctrl_down)
+                            ? Noggit::Ui::Tools::ChunkManipulator::ChunkSelectionMode::SELECT
+                            : Noggit::Ui::Tools::ChunkManipulator::ChunkSelectionMode::DESELECT;
+
+        int const modality = (params.mod_shift_down ? ActionModalityControllers::eSHIFT : 0)
+                           | (params.mod_ctrl_down ? ActionModalityControllers::eCTRL : 0)
+                           | ActionModalityControllers::eLMB;
+
+        if (NOGGIT_ACTION_MGR->beginAction(mv, ActionFlags::eNO_FLAG | ActionFlags::eDO_NOT_WRITE_HISTORY, modality))
+        {
+            clip->selectRange(mv->cursorPosition(), _select_radius, mode);
+        }
+
+        mv->invalidate();
     }
 
     void ChunkTool::onTick(float deltaTime, TickParameters const& params)
@@ -159,83 +183,38 @@ namespace Noggit
         (void)deltaTime;
         auto* mv = mapView();
         if (params.displayMode != display_mode::in_3D || params.underMap)
-        {
-            _prev_shift_down = params.mod_shift_down;
-            _prev_ctrl_down = params.mod_ctrl_down;
             return;
-        }
-
-        auto* clip = mv->getWorld()->chunkClipboard();
-        if (!clip)
-        {
-            _prev_shift_down = params.mod_shift_down;
-            _prev_ctrl_down = params.mod_ctrl_down;
-            return;
-        }
-
-        // Released Shift while still holding LMB after painting add-selection: copy now.
-        if (_painted_select_add && _prev_shift_down && !params.mod_shift_down && params.left_mouse)
-        {
-            copySelectionToClipboard();
-        }
-        // Released Ctrl while still holding LMB after painting deselect: copy now.
-        if (_painted_select_remove && _prev_ctrl_down && !params.mod_ctrl_down && params.left_mouse)
-        {
-            copySelectionToClipboard();
-        }
 
         if (!params.left_mouse)
-        {
-            _prev_shift_down = params.mod_shift_down;
-            _prev_ctrl_down = params.mod_ctrl_down;
             return;
-        }
 
         if (params.mod_shift_down && !params.mod_ctrl_down && !params.mod_alt_down)
         {
-            if (auto* action = NOGGIT_ACTION_MGR->beginAction(mv, ActionFlags::eNO_FLAG | ActionFlags::eDO_NOT_WRITE_HISTORY,
-                ActionModalityControllers::eSHIFT | ActionModalityControllers::eLMB))
-            {
-                clip->selectRange(mv->cursorPosition(), _select_radius, Noggit::Ui::Tools::ChunkManipulator::ChunkSelectionMode::SELECT);
-                action->setBlockCursor(true);
-                _painted_select_add = true;
-            }
-            mv->invalidate();
+            paintChunkSelection(params);
         }
         else if (params.mod_ctrl_down && !params.mod_shift_down && !params.mod_alt_down)
         {
-            if (auto* action = NOGGIT_ACTION_MGR->beginAction(mv, ActionFlags::eNO_FLAG | ActionFlags::eDO_NOT_WRITE_HISTORY,
-                ActionModalityControllers::eCTRL | ActionModalityControllers::eLMB))
-            {
-                clip->selectRange(mv->cursorPosition(), _select_radius, Noggit::Ui::Tools::ChunkManipulator::ChunkSelectionMode::DESELECT);
-                action->setBlockCursor(true);
-                _painted_select_remove = true;
-            }
-            mv->invalidate();
+            paintChunkSelection(params);
         }
-
-        _prev_shift_down = params.mod_shift_down;
-        _prev_ctrl_down = params.mod_ctrl_down;
-    }
-
-    void ChunkTool::onMouseRelease(MouseReleaseParameters const& params)
-    {
-        if (params.button == Qt::MouseButton::LeftButton && (_painted_select_add || _painted_select_remove))
-        {
-            copySelectionToClipboard();
-        }
-        Tool::onMouseRelease(params);
     }
 
     void ChunkTool::onMouseMove(MouseMoveParameters const& params)
     {
         if (!params.mod_alt_down || params.mod_shift_down || params.mod_ctrl_down)
             return;
-        if (!params.left_mouse && !params.right_mouse)
+        if (!params.right_mouse)
             return;
 
-        float const delta = static_cast<float>(params.relative_movement.dx()) / 3.f;
-        _select_radius = std::max(CHUNKSIZE * 0.25f, _select_radius + delta);
+        _select_radius = std::max(CHUNKSIZE * 0.25f, _select_radius + static_cast<float>(params.relative_movement.dx()) / 3.f);
         mapView()->invalidate();
+    }
+
+    void ChunkTool::onMouseRelease(MouseReleaseParameters const& params)
+    {
+        if (params.button == Qt::MouseButton::LeftButton)
+        {
+            finishSelectionPaint();
+        }
+        Tool::onMouseRelease(params);
     }
 }

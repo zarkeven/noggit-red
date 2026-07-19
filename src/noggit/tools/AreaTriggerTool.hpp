@@ -44,6 +44,8 @@ namespace Noggit
 
     void onDeselected() override;
 
+    void onMousePress(MousePressParameters const& params) override;
+
     void onMouseRelease(MouseReleaseParameters const& params) override;
 
     void postRender() override;
@@ -58,6 +60,8 @@ namespace Noggit
     Noggit::Rendering::Primitives::Sphere _sphereRenderer;
 
     uint32_t _selected_area_trigger = std::numeric_limits<uint32_t>::max();
+    QPoint _mmb_press_pos;
+    bool _mmb_pressed = false;
 
     void jump_to_area_trigger(const Noggit::MouseReleaseParameters& params);
 
