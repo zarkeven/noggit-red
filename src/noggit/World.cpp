@@ -1285,9 +1285,11 @@ bool World::isInIndoorWmoGroup(std::array<glm::vec3, 2> obj_bounds, glm::mat4x4 
                     if (group.is_indoor())
                     {
                         // must call getGroupExtent() to initialize wmo_instance.group_extents
-                        // clear group extents to free memory ?
-                        auto& group_extents = wmo_instance.getGroupExtents().at(i);
-
+                        auto const& extents_map = wmo_instance.getGroupExtents();
+                        auto const ge_it = extents_map.find(i);
+                        if (ge_it == extents_map.end())
+                          continue;
+                        auto const& group_extents = ge_it->second;
 
                         bool aabb_test = obj_bounds[1].x >= group_extents.first.x
                             && obj_bounds[1].y >= group_extents.first.y

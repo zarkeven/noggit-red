@@ -851,17 +851,21 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
   gl.disable(GL_DEPTH_TEST);
 
+  Noggit::register_crash_render_stage("WorldRender::draw:lighting");
   if (!render_settings.minimap_render)
   {
     int daytime = static_cast<int>(_world->time) % 2880;
-    // always render local lights in sky/lightning editing mode.
-    bool render_local_lightning = render_settings.editing_mode == editing_mode::light ? true : local_lightning;
-    bool const sky_updated = _skies->update_sky_colors(camera_pos, daytime, !render_local_lightning);
-    if (sky_updated)
-    {
-      updateLightingUniformBlock(render_settings.draw_fog, camera_pos);
-    }
-    updateModernFogUniformBlock(render_settings.draw_fog, camera_pos, render_settings.camera_moved);
+    // Always blend local light zones when drawing distance fog so start/end/color
+    // match the fog settings at the camera (not only the map's global light).
+    bool render_local_lightning = render_settings.editing_mode == editing_mode::light
+      || local_lightning
+      || render_settings.draw_fog;
+    _skies->update_sky_colors(camera_pos, daytime, !render_local_lightning);
+    // Refresh every frame so the fog toggle and camera-zone fog params apply immediately
+    // (sky recalc can early-out for small camera moves).
+    updateLightingUniformBlock(render_settings.draw_fog, camera_pos);
+    updateModernFogUniformBlock(render_settings.draw_fog, render_settings.draw_volumetric_fog
+                              , camera_pos, render_settings.camera_moved);
     updatePointLightsUniformBlock(render_settings.draw_point_lights, camera_pos, render_settings.camera_moved);
   }
   else
@@ -869,6 +873,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     updateLightingUniformBlockMinimap(minimap_render_settings);
   }
 
+  Noggit::register_crash_render_stage("WorldRender::draw:params");
   // setup render settings for minimap
   if (render_settings.minimap_render)
   {
@@ -987,6 +992,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   }
 
   // Frustum culling
+  Noggit::register_crash_render_stage("WorldRender::draw:frustum");
   _world->_n_loaded_tiles = 0;
   unsigned tile_counter = 0;
 
@@ -1065,6 +1071,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
             });
 
   // only draw the sky in 3D (requires m2 shader program)
+  Noggit::register_crash_render_stage("WorldRender::draw:sky");
   if(!render_settings.minimap_render && render_settings.display_mode == display_mode::in_3D && render_settings.draw_sky
      && _m2_program)
   {
@@ -1143,7 +1150,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       render_settings.display_mode);
   }
 
-  if (modern_features && render_settings.draw_fog && !render_settings.minimap_render
+  if (modern_features && render_settings.draw_volumetric_fog && !render_settings.minimap_render
       && (render_settings.editing_mode == editing_mode::light
           || render_settings.editing_mode == editing_mode::point_light))
   {
@@ -1632,25 +1639,40 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
         /*if (draw_hidden_models || !is_hidden)*/ // now checking when adding instances
         {
-          instance->draw(wmo_program
-              , model_view
-              , projection
-              , frustum
-              , _cull_distance
-              , camera_pos
-              , is_hidden
-              , render_settings.draw_wmo_doodads
-              , render_settings.draw_fog
-              , is_selected
-              , _world->animtime
-              , _skies->hasSkies()
-              , render_settings.display_mode
-              , disable_cull
-              , render_settings.draw_wmo_exterior
-              , render_settings.render_select_wmo_aabb
-              , render_settings.render_select_wmo_groups_bounds
+          try
+          {
+            instance->draw(wmo_program
+                , model_view
+                , projection
+                , frustum
+                , _cull_distance
+                , camera_pos
+                , is_hidden
+                , render_settings.draw_wmo_doodads
+                , render_settings.draw_fog
+                , is_selected
+                , _world->animtime
+                , _skies->hasSkies()
+                , render_settings.display_mode
+                , disable_cull
+                , render_settings.draw_wmo_exterior
+                , render_settings.render_select_wmo_aabb
+                , render_settings.render_select_wmo_groups_bounds
 
-          );
+            );
+          }
+          catch (std::exception const& e)
+          {
+            // One corrupt/oversized WMO must not abort the frame (blank map).
+            LogError << "WMO draw failed for uid " << instance->uid << ": " << e.what() << std::endl;
+            try
+            {
+              instance->wmo->error_on_loading();
+            }
+            catch (...)
+            {
+            }
+          }
         }
       }
     }
@@ -2133,9 +2155,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       if (!tile->Water.isVisible(frustum) && !tile->Water.needsUpdate())
         continue;
 
-      if (tile->renderer()->isOccluded() && !tile->Water.needsUpdate() && !tile->renderer()->isOverridingOcclusionCulling())
-        continue;
-
+      // Match terrain: do not skip liquid on occlusion — it was cutting water off mid-view
+      // and is unrelated to whether the tile's terrain mesh is hidden.
       tile->Water.renderer()->draw(
           frustum
           , camera_pos
@@ -3025,8 +3046,16 @@ mccv_gather_done:
     OpenGL::Scoped::use_program viz{ *_mccv_viz_program.get() };
     viz.uniform("model_view", model_view);
     viz.uniform("projection", projection);
-    viz.uniform("camera_pos", camera_pos);
-    viz.uniform("point_radius", point_radius);
+
+    GLint viewport[4]{};
+    gl.getIntegerv(GL_VIEWPORT, viewport);
+    float const aspect = static_cast<float>(std::max(viewport[2], 1))
+                       / static_cast<float>(std::max(viewport[3], 1));
+    // Stable on-screen disk size (shader offsets in NDC after perspective divide).
+    float const point_size_ndc =
+      glm::clamp(0.010f + 0.010f * (point_radius / 1.6f), 0.006f, 0.028f);
+    viz.uniform("point_size_ndc", point_size_ndc);
+    viz.uniform("aspect", aspect);
 
     OpenGL::Scoped::vao_binder const vao_bind(_mccv_viz_vao);
     gl.drawArraysInstanced(GL_TRIANGLES, 0, 6, static_cast<GLsizei>(instances.size()));
@@ -3283,12 +3312,15 @@ void WorldRender::updateMVPUniformBlock(const glm::mat4x4& model_view, const glm
   gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::MVPUniformBlock), &_mvp_ubo_data);
 }
 
-void WorldRender::updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& camera_pos, bool camera_moved)
+void WorldRender::updateModernFogUniformBlock(bool draw_fog, bool draw_volumetric_fog
+                                            , glm::vec3 const& camera_pos, bool camera_moved)
 {
   ZoneScoped;
 
-  bool const modern = noggit_modern_features_enabled() && draw_fog;
-  if (!modern || !_skies)
+  bool const modern_features = noggit_modern_features_enabled();
+  bool const want_atmos = modern_features && draw_fog && _skies;
+  bool const want_vfog = modern_features && draw_volumetric_fog;
+  if ((!want_atmos && !want_vfog) || !_skies)
   {
     _modern_fog_ubo_data = {};
     gl.bindBuffer(GL_UNIFORM_BUFFER, _modern_fog_ubo);
@@ -3299,63 +3331,118 @@ void WorldRender::updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& ca
   constexpr float k_vfog_rebuild_dist_sq = 96.f * 96.f;
   glm::vec3 const fog_delta = camera_pos - _last_modern_fog_camera_pos;
   float const fog_move_sq = fog_delta.x * fog_delta.x + fog_delta.y * fog_delta.y + fog_delta.z * fog_delta.z;
-  if (camera_moved && fog_move_sq < k_vfog_rebuild_dist_sq)
+  bool const rebuild_vfog = !camera_moved || fog_move_sq >= k_vfog_rebuild_dist_sq
+    || (_last_modern_fog_camera_pos.x == std::numeric_limits<float>::max())
+    || _last_draw_volumetric_fog != draw_volumetric_fog;
+  _last_draw_volumetric_fog = draw_volumetric_fog;
+
+  // meta.x: modern atmospheric fog coeffs active; meta.y: VFOG count (filled below).
+  _modern_fog_ubo_data.meta.x = want_atmos ? 1 : 0;
+  if (want_atmos)
   {
-    return;
-  }
-  _last_modern_fog_camera_pos = camera_pos;
+    // FogDensity is retail height/atmospheric density — not the classic distance-fog
+    // power exponent. Leave .x at 0 so shaders keep using LightDir_FogRate.w (fogRate).
+    _modern_fog_ubo_data.fog_density_end_height.x = 0.f;
+    _modern_fog_ubo_data.fog_density_end_height.y = _skies->end_fog_color_distance();
+    _modern_fog_ubo_data.fog_density_end_height.z = _skies->fog_height();
+    _modern_fog_ubo_data.fog_density_end_height.w = _skies->fog_height_scaler();
 
-  _modern_fog_ubo_data = {};
+    glm::vec3 const end_col = _skies->end_fog_color();
+    _modern_fog_ubo_data.end_fog_color = { end_col.x, end_col.y, end_col.z, 0.f };
 
-  _modern_fog_ubo_data.meta.x = 1;
-  float const retail_density = _skies->fog_density();
-  // Retail FogDensity is much larger than legacy LightDir_FogRate.w; scale for sane editor preview.
-  _modern_fog_ubo_data.fog_density_end_height.x = retail_density > 0.f
-    ? std::clamp(retail_density * 0.35f, 0.f, 3.f)
-    : 0.f;
-  _modern_fog_ubo_data.fog_density_end_height.y = _skies->end_fog_color_distance();
-  _modern_fog_ubo_data.fog_density_end_height.z = _skies->fog_height();
-  _modern_fog_ubo_data.fog_density_end_height.w = _skies->fog_height_scaler();
-
-  glm::vec3 const end_col = _skies->end_fog_color();
-  _modern_fog_ubo_data.end_fog_color = { end_col.x, end_col.y, end_col.z, 0.f };
-
-  glm::vec3 const fh_col = _skies->fog_height_color();
-  _modern_fog_ubo_data.fog_height_color_density = {
-    fh_col.x, fh_col.y, fh_col.z, _skies->fog_height_density()
-  };
-
-  auto const hc = _skies->fog_height_coeff();
-  _modern_fog_ubo_data.height_coeff_01 = { hc[0], hc[1], hc[2], hc[3] };
-
-  auto const vfogs = _world->volumetricFogs();
-  int vfog_count = 0;
-  std::vector<std::pair<float, std::size_t>> vfog_order;
-  vfog_order.reserve(vfogs.size());
-  for (std::size_t i = 0; i < vfogs.size(); ++i)
-  {
-    float const d = glm::distance(camera_pos, vfogs[i].position);
-    vfog_order.emplace_back(d, i);
-  }
-  std::sort(vfog_order.begin(), vfog_order.end());
-
-  for (auto const& [dist, idx] : vfog_order)
-  {
-    (void)dist;
-    if (vfog_count >= OpenGL::kMaxGpuVolumetricFogs)
-      break;
-    auto const& v = vfogs[idx];
-    float const max_r = std::max({ v.radius[0], v.radius[1], v.radius[2] });
-    if (glm::distance(camera_pos, v.position) > max_r * 4.f + _cull_distance)
-      continue;
-
-    _modern_fog_ubo_data.vfog_pos_radius[vfog_count] = { v.position.x, v.position.y, v.position.z, max_r };
-    _modern_fog_ubo_data.vfog_color_intensity[vfog_count] = {
-      v.color.x, v.color.y, v.color.z, v.intensity[0]
+    glm::vec3 const fh_col = _skies->fog_height_color();
+    _modern_fog_ubo_data.fog_height_color_density = {
+      fh_col.x, fh_col.y, fh_col.z, _skies->fog_height_density()
     };
-    ++vfog_count;
+
+    auto const hc = _skies->fog_height_coeff();
+    _modern_fog_ubo_data.height_coeff_01 = { hc[0], hc[1], hc[2], hc[3] };
+    auto const mc = _skies->main_fog_coeff();
+    _modern_fog_ubo_data.height_coeff_23 = { mc[0], mc[1], mc[2], mc[3] };
   }
-  _modern_fog_ubo_data.meta.y = vfog_count;
+  else
+  {
+    _modern_fog_ubo_data.fog_density_end_height = {};
+    _modern_fog_ubo_data.end_fog_color = {};
+    _modern_fog_ubo_data.fog_height_color_density = {};
+    _modern_fog_ubo_data.height_coeff_01 = {};
+    _modern_fog_ubo_data.height_coeff_23 = {};
+  }
+
+  if (rebuild_vfog)
+  {
+    _last_modern_fog_camera_pos = camera_pos;
+
+    for (int i = 0; i < OpenGL::kMaxGpuVolumetricFogs; ++i)
+    {
+      _modern_fog_ubo_data.vfog_pos_radius[i] = {};
+      _modern_fog_ubo_data.vfog_color_intensity[i] = {};
+      _modern_fog_ubo_data.vfog_radius_xyz[i] = {};
+    }
+
+    int vfog_count = 0;
+    if (want_vfog)
+    {
+      auto const& vfogs = _world->volumetricFogs();
+      std::vector<std::pair<float, std::size_t>> vfog_order;
+      vfog_order.reserve(vfogs.size());
+      for (std::size_t i = 0; i < vfogs.size(); ++i)
+      {
+        // Skip ultra-high fog levels that the client often hides in the editor view.
+        if (vfogs[i].fog_level > 2u)
+          continue;
+        float const d = glm::distance(camera_pos, vfogs[i].position);
+        vfog_order.emplace_back(d, i);
+      }
+      std::sort(vfog_order.begin(), vfog_order.end());
+
+      // Prefer a generous cull so nearby volumes aren't dropped when distance fog is off
+      // (cull_distance then equals view distance, but volumes can still be just outside).
+      float const vfog_cull = std::max(_cull_distance, _view_distance);
+
+      for (auto const& [dist, idx] : vfog_order)
+      {
+        (void)dist;
+        if (vfog_count >= OpenGL::kMaxGpuVolumetricFogs)
+          break;
+        auto const& v = vfogs[idx];
+        float const max_r = std::max({ v.radius[0], v.radius[1], v.radius[2], 1.f });
+        if (glm::distance(camera_pos, v.position) > max_r * 4.f + vfog_cull)
+          continue;
+
+        float const intensity = volumetric_fog_shader_intensity(
+          v.intensity[0], v.intensity[1], v.intensity[2]);
+        _modern_fog_ubo_data.vfog_pos_radius[vfog_count] = { v.position.x, v.position.y, v.position.z, max_r };
+        _modern_fog_ubo_data.vfog_color_intensity[vfog_count] = {
+          v.color.x, v.color.y, v.color.z, intensity
+        };
+        // On-disk radius[2] is a thin vertical slab (~0.3–22). Keep XZ accurate but
+        // give a small minimum thickness so ground fog is visible on terrain.
+        constexpr float k_min_xz = 1.f;
+        constexpr float k_min_y = 12.f;
+        _modern_fog_ubo_data.vfog_radius_xyz[vfog_count] = {
+          std::max(v.radius[0], k_min_xz)
+        , std::max(v.radius[1], k_min_y)
+        , std::max(v.radius[2], k_min_xz)
+        , 0.f
+        };
+        ++vfog_count;
+      }
+
+      if (vfogs.empty() && want_vfog)
+      {
+        // One-shot hint when the toggle is on but nothing loaded for this map.
+        static bool logged_empty = false;
+        if (!logged_empty)
+        {
+          LogDebug << "Volumetric fog toggle is on but no VFOG entries are loaded for this map."
+                   << std::endl;
+          logged_empty = true;
+        }
+      }
+    }
+    _modern_fog_ubo_data.meta.y = vfog_count;
+  }
 
   gl.bindBuffer(GL_UNIFORM_BUFFER, _modern_fog_ubo);
   gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::ModernFogUniformBlock), &_modern_fog_ubo_data);
@@ -3510,7 +3597,8 @@ void WorldRender::drawVolumetricFogDebug(glm::mat4x4 const& model_view
       continue;
 
     glm::vec4 const col(vfog.color, 0.35f);
-    _sphere_render.draw(model_view * projection, vfog.position, col, max_r, 24, 16, 1.f);
+    _sphere_render.draw(model_view * projection, vfog.position, col, max_r, 24, 16, 1.f
+                        , false, false, true);
   }
 }
 
@@ -3880,6 +3968,7 @@ void WorldRender::drawMinimap ( MapTile *tile
   renderParams.draw_sky = false;
   renderParams.draw_skybox = false;
   renderParams.draw_fog = false;
+  renderParams.draw_volumetric_fog = false;
   renderParams.ground_editing_brush = eTerrainType::eTerrainType_Linear;
   renderParams.water_layer = 0;
   renderParams.display_mode = display_mode::in_3D;

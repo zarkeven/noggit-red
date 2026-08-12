@@ -1082,8 +1082,19 @@ void Skies::setCurrentParam(int param_id)
 
 void Skies::apply_light_data_fog(LightDataKeyframe const& kf)
 {
-  _fog_distance = kf.fog_end == 0.f ? 6500.f : kf.fog_end;
-  _fog_multiplier = kf.fog_scaler == 0.f ? 0.1f : kf.fog_scaler;
+  // Modern LightData often leaves FogEnd at 0 and drives atmosphere via height/density.
+  // Inventing FogEnd=6500 and then applying a tiny FogScaler (e.g. 0.005 on Exile's Reach)
+  // made FogStart ~32 yd and the world vanish into distance fog inside local light zones.
+  if (kf.fog_end == 0.f)
+  {
+    _fog_distance = 6500.f;
+    _fog_multiplier = 0.92f;
+  }
+  else
+  {
+    _fog_distance = kf.fog_end;
+    _fog_multiplier = kf.fog_scaler == 0.f ? 0.1f : kf.fog_scaler;
+  }
   _fog_density = kf.fog_density;
   _cloud_density = kf.cloud_density;
   _end_fog_color = kf.end_fog_color;
@@ -1101,10 +1112,14 @@ void Skies::apply_light_data_fog(LightDataKeyframe const& kf)
 
 void Skies::blend_light_data_fog(LightDataKeyframe const& kf, float weight, float weight_remain)
 {
+  // Only blend classic distance fog when this keyframe actually defines FogEnd.
+  // FogScaler alone (with FogEnd==0) must not pull FogStart down to a few dozen yards.
   if (kf.fog_end != 0.f)
+  {
     _fog_distance = _fog_distance * weight_remain + kf.fog_end * weight;
-  if (kf.fog_scaler != 0.f)
-    _fog_multiplier = _fog_multiplier * weight_remain + kf.fog_scaler * weight;
+    float const scaler = kf.fog_scaler == 0.f ? 0.1f : kf.fog_scaler;
+    _fog_multiplier = _fog_multiplier * weight_remain + scaler * weight;
+  }
   if (kf.fog_density != 0.f)
     _fog_density = _fog_density * weight_remain + kf.fog_density * weight;
   _cloud_density = _cloud_density * weight_remain + kf.cloud_density * weight;
@@ -1152,18 +1167,24 @@ bool Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
       color_set[i] = default_sky->colorFor(i, time);
     }
 
-    // float values
-    float fog_distance = default_sky->floatParamFor(SKY_FOG_DISTANCE, time);
-    _fog_distance = fog_distance == 0.0f ? 6500.0f : fog_distance;
-
-    float fog_multiplier = default_sky->floatParamFor(SKY_FOG_MULTIPLIER, time);
-    _fog_multiplier = fog_multiplier == 0.0f ? 0.1f : fog_multiplier;
-
     if (modern)
     {
       LightDataKeyframe kf;
       if (default_sky->lightDataFor(time, kf))
         apply_light_data_fog(kf);
+      else
+      {
+        _fog_distance = 6500.0f;
+        _fog_multiplier = 0.92f;
+      }
+    }
+    else
+    {
+      float fog_distance = default_sky->floatParamFor(SKY_FOG_DISTANCE, time);
+      _fog_distance = fog_distance == 0.0f ? 6500.0f : fog_distance;
+
+      float fog_multiplier = default_sky->floatParamFor(SKY_FOG_MULTIPLIER, time);
+      _fog_multiplier = fog_multiplier == 0.0f ? 0.1f : fog_multiplier;
     }
 
     _celestial_glow = default_sky->floatParamFor(SKY_CELESTIAL_GLOW, time);
@@ -1248,19 +1269,21 @@ bool Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
 
           float sky_weight_remain = (1.0f - sky.weight);
 
-          float fog_distance = sky.floatParamFor(SKY_FOG_DISTANCE, time);
-          if (fog_distance != 0.0f)
-            _fog_distance = (_fog_distance * sky_weight_remain) + (fog_distance * sky.weight);
-
-          float fog_multiplier = sky.floatParamFor(SKY_FOG_MULTIPLIER, time);
-          if (fog_multiplier != 0.0f)
-            _fog_multiplier = (_fog_multiplier * sky_weight_remain) + (fog_multiplier * sky.weight);
-
           if (modern)
           {
             LightDataKeyframe kf;
             if (sky.lightDataFor(time, kf))
               blend_light_data_fog(kf, sky.weight, sky_weight_remain);
+          }
+          else
+          {
+            float fog_distance = sky.floatParamFor(SKY_FOG_DISTANCE, time);
+            if (fog_distance != 0.0f)
+              _fog_distance = (_fog_distance * sky_weight_remain) + (fog_distance * sky.weight);
+
+            float fog_multiplier = sky.floatParamFor(SKY_FOG_MULTIPLIER, time);
+            if (fog_multiplier != 0.0f)
+              _fog_multiplier = (_fog_multiplier * sky_weight_remain) + (fog_multiplier * sky.weight);
           }
 
           _celestial_glow = (_celestial_glow * sky_weight_remain) + (sky.floatParamFor(SKY_CELESTIAL_GLOW, time) * sky.weight);
@@ -1285,8 +1308,9 @@ bool Skies::update_sky_colors(glm::vec3 pos, int time, bool global_only)
     }
   }
 
-  const float fogEnd = _fog_distance / 36.f;
-  const float fogStart = _fog_multiplier * fogEnd;
+  // fog_distance_end()/start() already convert classic ×36 storage; reuse for fogRate.
+  const float fogEnd = fog_distance_end();
+  const float fogStart = fog_distance_start();
   const float fogRange = fogEnd - fogStart;
 
   constexpr float fogFarClip = 1583.333374f;
@@ -1358,64 +1382,73 @@ bool Skies::draw(glm::mat4x4 const& model_view
     bool combine_flag = false;
     bool has_skybox = false;
 
-    // only draw one skybox model ?
+    // Prefer the highest-weight sky that actually has a skybox model.
+    Sky* best_sky = nullptr;
+    float best_weight = 0.f;
     for (Sky& sky : skies)
     {
       auto param_opt = sky.getCurrentParam();
-      if (sky.weight > 0.f && param_opt.has_value() && param_opt.value()->skybox)
+      if (sky.weight > best_weight && param_opt.has_value() && param_opt.value()->skybox)
       {
-        has_skybox = true;
-
-        SkyParam* curr_param = param_opt.value();
-
-        if ((curr_param->skyboxFlags & LIGHT_SKYBOX_COMBINE))
-            combine_flag = true; // flag 0x2 = still render stars, sun and moons and clouds
-    
-        auto& model = curr_param->skybox.value();
-        model.model->trans = sky.weight;
-        model.pos = camera_pos;
-        model.scale = 0.1f;
-        model.recalcExtents();
-    
-        OpenGL::M2RenderState model_render_state;
-        model_render_state.tex_arrays = {0, 0};
-        model_render_state.tex_indices = {0, 0};
-        model_render_state.tex_unit_lookups = {-1, -1};
-        gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        gl.disable(GL_BLEND);
-        gl.depthMask(GL_TRUE);
-        m2_shader.uniform("blend_mode", 0);
-        m2_shader.uniform("unfogged", static_cast<int>(model_render_state.unfogged));
-        m2_shader.uniform("unlit",  static_cast<int>(model_render_state.unlit));
-        m2_shader.uniform("tex_unit_lookup_1", 0);
-        m2_shader.uniform("tex_unit_lookup_2", 0);
-        m2_shader.uniform("terrain_uv_mask", 0);
-        m2_shader.uniform("pixel_shader", 0);
-
-        int skyboxtime = animtime;
-        if ((curr_param->skyboxFlags & LIGHT_SKYBOX_FULL_DAY))
-        {
-          unsigned int anim_lenght = model.model->get_anim_lenght(0);
-
-          // Calculate the normalized time within the day (0.0 to 1.0)
-          float day_fraction = static_cast<float>(time % DAY_DURATION) / DAY_DURATION;
-
-          // animation time from day time %
-          skyboxtime = static_cast<int>(day_fraction * anim_lenght);
-        }
-    
-        model.model->renderer()->draw(model_view
-                                     , model
-                                     , m2_shader
-                                     , model_render_state
-                                     , frustum
-                                     , 1000000
-                                     , camera_pos
-                                     , skyboxtime
-                                     , display_mode::in_3D
-                                     , true
-                                     , true);
+        best_weight = sky.weight;
+        best_sky = &sky;
       }
+    }
+
+    auto const draw_sky_model = [&](ModelInstance& model, SkyParam* curr_param, float weight, bool full_day)
+    {
+      model.model->trans = weight;
+      model.pos = camera_pos;
+      model.scale = 0.1f;
+      model.recalcExtents();
+
+      OpenGL::M2RenderState model_render_state;
+      model_render_state.tex_arrays = {0, 0};
+      model_render_state.tex_indices = {0, 0};
+      model_render_state.tex_unit_lookups = {-1, -1};
+      gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      gl.disable(GL_BLEND);
+      gl.depthMask(GL_TRUE);
+      m2_shader.uniform("blend_mode", 0);
+      m2_shader.uniform("unfogged", static_cast<int>(model_render_state.unfogged));
+      m2_shader.uniform("unlit",  static_cast<int>(model_render_state.unlit));
+      m2_shader.uniform("tex_unit_lookup_1", 0);
+      m2_shader.uniform("tex_unit_lookup_2", 0);
+      m2_shader.uniform("terrain_uv_mask", 0);
+      m2_shader.uniform("pixel_shader", 0);
+
+      int skyboxtime = animtime;
+      if (full_day && curr_param && (curr_param->skyboxFlags & LIGHT_SKYBOX_FULL_DAY))
+      {
+        unsigned int anim_lenght = model.model->get_anim_lenght(0);
+        float day_fraction = static_cast<float>(time % DAY_DURATION) / DAY_DURATION;
+        skyboxtime = static_cast<int>(day_fraction * anim_lenght);
+      }
+
+      model.model->renderer()->draw(model_view
+                                   , model
+                                   , m2_shader
+                                   , model_render_state
+                                   , frustum
+                                   , 1000000
+                                   , camera_pos
+                                   , skyboxtime
+                                   , display_mode::in_3D
+                                   , true
+                                   , true);
+    };
+
+    if (best_sky)
+    {
+      has_skybox = true;
+      SkyParam* curr_param = best_sky->getCurrentParam().value();
+      if ((curr_param->skyboxFlags & LIGHT_SKYBOX_COMBINE))
+        combine_flag = true;
+
+      draw_sky_model(curr_param->skybox.value(), curr_param, best_sky->weight, true);
+
+      if (curr_param->celestial_skybox.has_value())
+        draw_sky_model(curr_param->celestial_skybox.value(), curr_param, best_sky->weight, true);
     }
     // if it's night, draw the stars
     if (light_stats.nightIntensity > 0 && (combine_flag || !has_skybox))
@@ -1532,12 +1565,15 @@ float Skies::ocean_deep_alpha() const
 
 float Skies::fog_distance_end() const
 {
+  // Classic Light.dbc FogEnd is stored ×36; modern LightData FogEnd is already yards.
+  if (noggit_use_modern_sky_lights())
+    return _fog_distance;
   return _fog_distance / 36.f;
 }
 
 float Skies::fog_distance_start() const
 {
-  return (_fog_distance / 36.f) * _fog_multiplier;
+  return fog_distance_end() * _fog_multiplier;
 }
 
 float Skies::fog_distance_multiplier() const

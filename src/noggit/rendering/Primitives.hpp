@@ -84,6 +84,7 @@ namespace Noggit::Rendering::Primitives
           , float alpha = 1.f
           , bool wireframe = false
           , bool both = false
+          , bool upper_hemisphere = false
              );
     void unload();
 

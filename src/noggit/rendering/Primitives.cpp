@@ -218,7 +218,8 @@ void WireBox::setup_buffers()
 
 
   void Sphere::draw(glm::mat4x4 const& mvp, glm::vec3 const& pos, glm::vec4  const& color
-      , float radius, int longitude, int latitude, float alpha, bool wireframe, bool drawBoth)
+      , float radius, int longitude, int latitude, float alpha, bool wireframe, bool drawBoth
+      , bool upper_hemisphere)
 {
   if (!_buffers_are_setup)
   {
@@ -231,6 +232,7 @@ void WireBox::setup_buffers()
   sphere_shader.uniform("origin", glm::vec3(pos.x,pos.y,pos.z));
   sphere_shader.uniform("radius", radius);
   sphere_shader.uniform("color", glm::vec4(color.r, color.g, color.b, alpha));
+  sphere_shader.uniform("upper_hemisphere", upper_hemisphere ? 1 : 0);
 
   OpenGL::Scoped::vao_binder const _(_vao[0]);
   if (drawBoth)

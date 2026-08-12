@@ -7,6 +7,7 @@
 #include <external/tsl/robin_map.h>
 
 #include <filesystem>
+#include <cstdint>
 #include <vector>
 #include <glm/vec3.hpp>
 
@@ -46,6 +47,9 @@ namespace Noggit::Project
     static ProjectVersion mapToEnumVersion(std::string const& projectVersion);
 
     static std::string MapToStringVersion(ProjectVersion const& projectVersion);
+
+    //! Client data pin used for DBDs / window chrome, e.g. "9.2.7.45745".
+    static std::string MapToClientDataVersion(ProjectVersion const& projectVersion);
   };
 
   struct NoggitProjectBookmarkMap
@@ -77,6 +81,18 @@ namespace Noggit::Project
       void SetTextureHeightDataForADT(int mapID, const TileIndex& ti, const std::string& texture, texture_heightmapping_data data, World* worldToUpdate = nullptr);
 
       const texture_heightmapping_data GetTextureHeightDataForADT(int mapID, const TileIndex& ti, const std::string& texture) const;
+
+      //! Record an ADT MTXP sample. When global.cfg has no entry for this texture yet,
+      //! keep the most common sample and eventually write it under project/extraData.
+      void ObserveAdtHeightMapping(std::string const& texture, texture_heightmapping_data const& data);
+      void PersistGlobalHeightMappingIfNeeded(std::filesystem::path const& project_path);
+      void MarkGlobalHeightLoadedFromFile(std::string const& texture);
+
+  private:
+      //! texture -> (quantized key -> count). Key packs uvScale + quantized scale/offset.
+      tsl::robin_map<std::string, tsl::robin_map<std::uint64_t, std::pair<int, texture_heightmapping_data>>> _adt_height_votes;
+      tsl::robin_map<std::string, bool> _global_height_from_file;
+      bool _global_height_cfg_dirty = false;
   };
   
   struct NoggitProjectObjectPalette

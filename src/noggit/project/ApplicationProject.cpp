@@ -4,6 +4,7 @@
 #include "WowExportListfileDownload.hpp"
 
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
+#include <noggit/map_light_target.hpp>
 #include <noggit/World.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapTile.h>
@@ -13,12 +14,17 @@
 #include <string>
 #include <blizzard-archive-library/include/Exception.hpp>
 #include <blizzard-archive-library/include/ClientFile.hpp>
+#include <noggit/Log.h>
 
 #include <QFile>
 #include <QString>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QTextStream>
+
+#include <cmath>
+#include <cstdint>
 
 namespace Noggit::Project
 {
@@ -70,7 +76,7 @@ namespace Noggit::Project
     if (project->projectVersion == ProjectVersion::SL)
     {
       client_archive_version = BlizzardArchive::ClientVersion::SL;
-      client_build = BlizzardDatabaseLib::Structures::Build("9.1.0.39584");
+      client_build = BlizzardDatabaseLib::Structures::Build(Noggit::MapLightTarget::client_build_string);
       client_archive_locale = BlizzardArchive::Locale::enUS;
     }
 
@@ -214,6 +220,7 @@ namespace Noggit::Project
                             newData.heightOffset = root[entry].toObject()["HeightOffset"].toDouble();
                             newData.heightScale = root[entry].toObject()["HeightScale"].toDouble();
                             project.ExtraMapData.SetTextureHeightData_Global(entry.toStdString(), newData);
+                            project.ExtraMapData.MarkGlobalHeightLoadedFromFile(entry.toStdString());
                         }
                     }
                 }
@@ -272,6 +279,85 @@ namespace Noggit::Project
         return defaultValue;
     }
 
+    namespace
+    {
+      std::uint64_t height_mapping_vote_key(texture_heightmapping_data const& data)
+      {
+        auto quant = [](float v) -> std::int32_t {
+          return static_cast<std::int32_t>(std::lround(v * 1000.f));
+        };
+        std::uint64_t key = data.uvScale & 0xFFFFu;
+        key |= (static_cast<std::uint64_t>(static_cast<std::uint32_t>(quant(data.heightScale))) << 16);
+        key |= (static_cast<std::uint64_t>(static_cast<std::uint32_t>(quant(data.heightOffset))) << 40);
+        return key;
+      }
+    }
+
+    void NoggitExtraMapData::ObserveAdtHeightMapping(std::string const& texture, texture_heightmapping_data const& data)
+    {
+      // Never override an entry that came from extraData/global.cfg.
+      if (_global_height_from_file.contains(texture))
+        return;
+
+      auto& votes = _adt_height_votes[texture];
+      auto const key = height_mapping_vote_key(data);
+      auto& slot = votes[key];
+      if (slot.first == 0)
+        slot.second = data;
+      ++slot.first;
+
+      texture_heightmapping_data best = data;
+      int best_count = 0;
+      for (auto const& [_, vote] : votes)
+      {
+        if (vote.first > best_count)
+        {
+          best_count = vote.first;
+          best = vote.second;
+        }
+      }
+
+      TextureHeightData_Global[texture] = best;
+      _global_height_cfg_dirty = true;
+    }
+
+    void NoggitExtraMapData::MarkGlobalHeightLoadedFromFile(std::string const& texture)
+    {
+      _global_height_from_file[texture] = true;
+    }
+
+    void NoggitExtraMapData::PersistGlobalHeightMappingIfNeeded(std::filesystem::path const& project_path)
+    {
+      if (!_global_height_cfg_dirty || TextureHeightData_Global.empty())
+        return;
+
+      std::filesystem::path extra = project_path / "extraData";
+      std::error_code ec;
+      std::filesystem::create_directories(extra, ec);
+
+      QJsonObject root;
+      for (auto const& [tex, data] : TextureHeightData_Global)
+      {
+        QJsonObject entry;
+        entry.insert(QStringLiteral("Scale"), static_cast<int>(data.uvScale));
+        entry.insert(QStringLiteral("HeightScale"), data.heightScale);
+        entry.insert(QStringLiteral("HeightOffset"), data.heightOffset);
+        root.insert(QString::fromStdString(tex), entry);
+      }
+
+      QFile out(QString::fromStdString((extra / "global.cfg").generic_string()));
+      if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+      {
+        LogError << "Failed to write " << (extra / "global.cfg") << std::endl;
+        return;
+      }
+
+      out.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+      out.close();
+      _global_height_cfg_dirty = false;
+      Log << "Wrote height-blend defaults to " << (extra / "global.cfg") << std::endl;
+    }
+
     ProjectVersion ClientVersionFactory::mapToEnumVersion(std::string const& projectVersion)
     {
       if (projectVersion == "Wrath Of The Lich King")
@@ -290,6 +376,18 @@ namespace Noggit::Project
         return std::string("Shadowlands");
 
       assert(false);
+      return {};
+    }
+
+    std::string ClientVersionFactory::MapToClientDataVersion(ProjectVersion const& projectVersion)
+    {
+      if (projectVersion == ProjectVersion::WOTLK)
+        return std::string("3.3.5.12340");
+      if (projectVersion == ProjectVersion::SL)
+        return std::string(Noggit::MapLightTarget::client_build_string);
+
+      assert(false);
+      return {};
     }
 
     NoggitProject::NoggitProject()

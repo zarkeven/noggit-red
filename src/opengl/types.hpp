@@ -32,10 +32,16 @@ namespace OpenGL
     glm::vec4 fog_density_end_height = {};
     glm::vec4 end_fog_color = {};
     glm::vec4 fog_height_color_density = {};
+    //! LightData FogHeightCoefficients[4]
     glm::vec4 height_coeff_01 = {};
+    //! LightData MainFogCoefficients[4]
     glm::vec4 height_coeff_23 = {};
+    //! .xyz world position, .w max radius (culling / fallback)
     glm::vec4 vfog_pos_radius[kMaxGpuVolumetricFogs] = {};
+    //! .xyz color, .w intensity
     glm::vec4 vfog_color_intensity[kMaxGpuVolumetricFogs] = {};
+    //! .xyz ellipsoid radii (client Y-up), .w unused
+    glm::vec4 vfog_radius_xyz[kMaxGpuVolumetricFogs] = {};
   };
 
   struct MVPUniformBlock

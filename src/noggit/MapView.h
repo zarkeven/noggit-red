@@ -36,7 +36,7 @@ struct ImGuiContext;
 class QSettings;
 class QDockWidget;
 class QLabel;
-class QListWidget;
+class QTableWidget;
 class QWidget;
 class QWidgetAction;
 class QOpenGLContext;
@@ -168,6 +168,7 @@ public:
   Noggit::BoolToggleProperty _draw_hole_lines = {false};
   Noggit::BoolToggleProperty _draw_models_with_box = {false};
   Noggit::BoolToggleProperty _draw_fog = {false};
+  Noggit::BoolToggleProperty _draw_volumetric_fog = {true};
   Noggit::BoolToggleProperty _draw_sky = { true };
   Noggit::BoolToggleProperty _draw_skybox = { true };
   Noggit::BoolToggleProperty _draw_hidden_models = {false};
@@ -589,9 +590,9 @@ private:
   //! Register point-light color widgets so we can hide the in-view gizmo only while their QColorDialog is open.
   void registerPointLightColorPicker(QWidget* picker);
 
-  //! Which light the panel edits: list current row, else world selection, else last explicit row (survives focus glitches).
+  //! Which light the panel edits: table selection (UserRole = world index), else world selection, else last explicit row.
   [[nodiscard]]
-  std::optional<std::size_t> resolvePointLightPropertyEditIndex(QListWidget* panel_point_list) const;
+  std::optional<std::size_t> resolvePointLightPropertyEditIndex(QTableWidget* panel_point_list) const;
   void setPointLightPropertyEditFallback(std::optional<std::size_t> row_index);
   void clearPointLightPropertyEditFallback();
 

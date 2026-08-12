@@ -44,6 +44,7 @@
 #include <noggit/ui/texture_palette_small.hpp>
 #include <noggit/ui/MinimapCreator.hpp>
 #include <noggit/project/CurrentProject.hpp>
+#include <noggit/Branding.hpp>
 #include <noggit/integrations/DiscordRichPresence.hpp>
 #include <noggit/integrations/EpsilonPatchExporter.hpp>
 #include <noggit/integrations/MapLightsJsonInjector.hpp>
@@ -77,7 +78,7 @@
 #include <QDoubleSpinBox>
 #include <QGroupBox>
 #include <QLabel>
-#include <QListWidget>
+#include <QTableWidget>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QVBoxLayout>
@@ -1014,7 +1015,7 @@ void MapView::invalidate()
     _needs_redraw = true;
 }
 
-std::optional<std::size_t> MapView::resolvePointLightPropertyEditIndex(QListWidget* panel_point_list) const
+std::optional<std::size_t> MapView::resolvePointLightPropertyEditIndex(QTableWidget* panel_point_list) const
 {
   if (!_world)
     return std::nullopt;
@@ -1022,8 +1023,16 @@ std::optional<std::size_t> MapView::resolvePointLightPropertyEditIndex(QListWidg
   if (panel_point_list)
   {
     int const r = panel_point_list->currentRow();
-    if (r >= 0 && r < static_cast<int>(lights.size()))
-      return static_cast<std::size_t>(r);
+    if (r >= 0)
+    {
+      if (QTableWidgetItem* item = panel_point_list->item(r, 0))
+      {
+        bool ok = false;
+        auto const idx = static_cast<std::size_t>(item->data(Qt::UserRole).toULongLong(&ok));
+        if (ok && idx < lights.size())
+          return idx;
+      }
+    }
   }
   if (auto const w = _world->selectedPointLightIndex();
       w.has_value() && *w < lights.size())
@@ -2367,12 +2376,6 @@ void MapView::setupViewMenu()
                    [=]
                    {
                      _world->renderer()->getTerrainParamsUniformBlock()->draw_sea_level_plane = _draw_sea_level_plane.get() ? 1 : 0;
-                     if (_draw_sea_level_plane.get())
-                     {
-                       // Same idea as texture layer count: shoreline reads clearer with ADT grid (F7).
-                       _draw_lines.set(true);
-                       _world->renderer()->getTerrainParamsUniformBlock()->draw_lines = true;
-                     }
                      _world->renderer()->markTerrainParamsUniformBlockDirty();
                    });
 
@@ -2399,6 +2402,7 @@ void MapView::setupViewMenu()
 
   ADD_TOGGLE (view_menu, "Toggle Animation", Qt::Key_F11, _draw_model_animations);
   ADD_TOGGLE (view_menu, "Draw fog", Qt::Key_F12, _draw_fog);
+  ADD_TOGGLE_NS (view_menu, "Draw volumetric fog", _draw_volumetric_fog);
 
   ADD_TOGGLE_POST (view_menu, "Hole lines", Qt::SHIFT | Qt::Key_F1, _draw_hole_lines,
                    [=]
@@ -2636,7 +2640,7 @@ void MapView::setupHelpMenu()
                   }
                 );
   ADD_ACTION_NS ( help_menu
-                , "Noggit Red Repository"
+                , "Noggit Yellow Repository"
                 , []
                   {
                     ShellExecute ( nullptr
@@ -2650,7 +2654,7 @@ void MapView::setupHelpMenu()
                 );
 
   ADD_ACTION_NS ( help_menu
-                , "Noggit Red Discord"
+                , "Noggit Yellow Discord"
                 , []
                   {
                     ShellExecute ( nullptr
@@ -3296,7 +3300,11 @@ MapView::MapView( math::degrees camera_yaw0
     setFormat(fmt);
   }
 
-  setWindowTitle ("Noggit Studio Red - " STRPRODUCTVER);
+  setWindowTitle (QString("%1 - Data %2")
+                    .arg(QString::fromUtf8(Noggit::Branding::product_name))
+                    .arg(QString::fromStdString(
+                      Noggit::Project::ClientVersionFactory::MapToClientDataVersion(
+                        _project->projectVersion))));
   setFocusPolicy (Qt::StrongFocus);
   setMouseTracking (true);
   setMinimumHeight(200);
@@ -3384,7 +3392,7 @@ MapView::MapView( math::degrees camera_yaw0
   _discord_rich_presence_enabled = _settings->value("integrations/discord_rich_presence", false).toBool();
   _discord_rich_presence_app_id = _settings->value("integrations/discord_app_id", "959654402141085748").toString().toStdString();
   _discord_rich_presence_large_image_key = _settings->value("integrations/discord_large_image_key", "").toString().toStdString();
-  _discord_rich_presence_large_image_text = _settings->value("integrations/discord_large_image_text", "Noggit Red").toString().toStdString();
+  _discord_rich_presence_large_image_text = _settings->value("integrations/discord_large_image_text", "Noggit Yellow").toString().toStdString();
   _discord_rich_presence_start_ts = std::nullopt;
   _discord_last_map.clear();
   _discord_last_tool.clear();
@@ -3511,16 +3519,20 @@ void MapView::move_camera_with_auto_height (glm::vec3 const& pos)
   makeCurrent();
   OpenGL::context::scoped_setter const _ (::gl, context());
 
-  TileIndex tile_index = TileIndex(pos);
-  if (_world->mapIndex.hasTile(tile_index))
-  {
-    _world->mapIndex.loadTile(pos)->wait_until_loaded();
-  }
-
   _camera.position = pos;
   _camera.position.y = 0.0f;
 
-  _world->GetVertex (pos.x, pos.z, &_camera.position);
+  TileIndex tile_index = TileIndex(pos);
+  if (_world->mapIndex.hasTile(tile_index))
+  {
+    MapTile* tile = _world->mapIndex.loadTile(pos);
+    if (tile)
+    {
+      tile->wait_until_loaded();
+      if (!tile->loading_failed())
+        _world->GetVertex (pos.x, pos.z, &_camera.position);
+    }
+  }
 
   // min elevation according to https://wowdev.wiki/AreaTable.dbc
   //! \ todo use the current area's MinElevation
@@ -3707,7 +3719,8 @@ void MapView::paintGL()
     }
     catch (std::exception const& e)
     {
-      LogError << "MapView::paintGL: caught std::exception during draw_map/postRender: " << e.what() << std::endl;
+      LogError << "MapView::paintGL: caught std::exception during draw_map/postRender: " << e.what()
+               << " (last render stage: " << Noggit::crash_render_stage() << ")" << std::endl;
       try
       {
         std::cerr.flush();
@@ -5339,6 +5352,7 @@ void MapView::draw_map()
   renderParams.draw_sky = _draw_sky.get();
   renderParams.draw_skybox = _draw_skybox.get();
   renderParams.draw_fog = _draw_fog.get();
+  renderParams.draw_volumetric_fog = _draw_volumetric_fog.get();
   renderParams.ground_editing_brush = terrainType;
   renderParams.water_layer = displayed_water_layer;
   renderParams.display_mode = _display_mode;
@@ -6654,7 +6668,7 @@ void MapView::onSettingsSave()
   bool const new_discord_enabled = _settings->value("integrations/discord_rich_presence", false).toBool();
   std::string const new_discord_app_id = _settings->value("integrations/discord_app_id", "959654402141085748").toString().toStdString();
   std::string const new_discord_large_key = _settings->value("integrations/discord_large_image_key", "").toString().toStdString();
-  std::string const new_discord_large_text = _settings->value("integrations/discord_large_image_text", "Noggit Red").toString().toStdString();
+  std::string const new_discord_large_text = _settings->value("integrations/discord_large_image_text", "Noggit Yellow").toString().toStdString();
 
   if (new_discord_enabled != _discord_rich_presence_enabled
    || new_discord_app_id != _discord_rich_presence_app_id

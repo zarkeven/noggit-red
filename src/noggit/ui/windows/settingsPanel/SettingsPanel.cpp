@@ -349,7 +349,7 @@ namespace Noggit
       ui->_discord_rich_presence_cb->setChecked(_settings->value("integrations/discord_rich_presence", false).toBool());
       ui->_discord_app_id_field->setText(_settings->value("integrations/discord_app_id", "959654402141085748").toString());
       ui->_discord_large_image_key_field->setText(_settings->value("integrations/discord_large_image_key", "").toString());
-      ui->_discord_large_image_text_field->setText(_settings->value("integrations/discord_large_image_text", "Noggit Red").toString());
+      ui->_discord_large_image_text_field->setText(_settings->value("integrations/discord_large_image_text", "Noggit Yellow").toString());
 
       ui->_epsilon_integration_cb->setChecked(_settings->value("integrations/epsilon_enabled", false).toBool());
       ui->_epsilon_patches_path_field->setText(_settings->value("integrations/epsilon_patches_path").toString());

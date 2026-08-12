@@ -1071,7 +1071,7 @@
                <item row="3" column="1">
                 <widget class="QLineEdit" name="_discord_large_image_text_field">
                  <property name="placeholderText">
-                  <string>Noggit Red</string>
+                  <string>Noggit Yellow</string>
                  </property>
                 </widget>
                </item>

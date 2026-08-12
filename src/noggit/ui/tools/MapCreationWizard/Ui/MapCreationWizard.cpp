@@ -83,28 +83,35 @@ MapCreationWizard::MapCreationWizard(std::shared_ptr<Project::NoggitProject> pro
   // Fill selector combo
 
   const auto& table = std::string("Map");
-  auto mapTable = _project->ClientDatabase->LoadTable(table, readFileAsIMemStream);
-
-  int count = 0;
-  auto iterator = mapTable.Records();
-  while (iterator.HasRecords())
+  try
   {
-      auto record = iterator.Next();
+    auto mapTable = _project->ClientDatabase->LoadTable(table, readFileAsIMemStream);
 
-      int map_id =  record.RecordId;
-      std::string name = record.Columns["MapName_lang"].Value;
-      int area_type = std::stoi(record.Columns["InstanceType"].Value);
+    int count = 0;
+    auto iterator = mapTable.Records();
+    while (iterator.HasRecords())
+    {
+        auto record = iterator.Next();
 
-      if (area_type < 0 || area_type > 4 || !World::IsEditableWorld(record))
-          continue;
+        int map_id =  record.RecordId;
+        std::string name = record.Columns["MapName_lang"].Value;
+        int area_type = std::stoi(record.Columns["InstanceType"].Value);
 
-      _corpse_map_id->addItem(QString::number(map_id) + " - " + QString::fromUtf8(name.c_str()));
-      _corpse_map_id->setItemData(count + 1, QVariant(map_id));
+        if (area_type < 0 || area_type > 4 || !World::IsEditableWorld(record))
+            continue;
 
-      count++;
+        _corpse_map_id->addItem(QString::number(map_id) + " - " + QString::fromUtf8(name.c_str()));
+        _corpse_map_id->setItemData(count + 1, QVariant(map_id));
+
+        count++;
+    }
+
+    _project->ClientDatabase->UnloadTable("Map");
   }
-
-  _project->ClientDatabase->UnloadTable("Map");
+  catch (std::exception const& e)
+  {
+    LogError << "MapCreationWizard: failed to load Map table: " << e.what() << std::endl;
+  }
 
   auto add_btn = new QPushButton("New",this);
   add_btn->setIcon(Noggit::Ui::FontAwesomeIcon(Noggit::Ui::FontAwesome::plus));

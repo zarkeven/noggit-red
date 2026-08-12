@@ -148,6 +148,75 @@ namespace
     static QIcon const cached(new SeaLevelPlaneIconEngine());
     return cached;
   }
+
+  /// Fog cloud glyph + "V" badge (volumetric fog toggle).
+  class VolumetricFogIconEngine final : public QIconEngine
+  {
+  public:
+    QIconEngine* clone() const override
+    {
+      return new VolumetricFogIconEngine();
+    }
+
+    void paint(QPainter* painter, QRect const& rect, QIcon::Mode mode, QIcon::State state) override
+    {
+      painter->save();
+      painter->setRenderHint(QPainter::Antialiasing, true);
+      painter->setRenderHint(QPainter::TextAntialiasing, true);
+
+      auto* temp_btn = new FontNoggitButtonStyle();
+      temp_btn->ensurePolished();
+      QColor const label_color =
+        (mode == QIcon::Disabled)
+          ? temp_btn->palette().color(QPalette::Disabled, QPalette::WindowText)
+          : (state == QIcon::On)
+              ? temp_btn->palette().color(QPalette::WindowText)
+              : temp_btn->palette().color(QPalette::Disabled, QPalette::WindowText);
+      delete temp_btn;
+
+      QRectF const R(rect);
+      qreal const m = qMax(1.0, qreal(qMin(rect.width(), rect.height())) / 14.0);
+
+      // Same cloud as "Fog"; leave room for the V badge at bottom-right.
+      QRect const fog_rect(
+        static_cast<int>(R.left() + m * 0.4),
+        static_cast<int>(R.top() + m * 0.2),
+        static_cast<int>(R.width() * 0.78),
+        static_cast<int>(R.height() * 0.78));
+      static FontNoggitIcon const fog_icon(FontNoggit::VISIBILITY_FOG);
+      fog_icon.paint(painter, fog_rect, Qt::AlignCenter, mode, state);
+
+      QRectF const v_rect(
+        R.left() + R.width() * 0.52,
+        R.top() + R.height() * 0.52,
+        R.width() * 0.48,
+        R.height() * 0.48);
+      QFont f = painter->font();
+      f.setPixelSize(qMax(6, int(qMin(v_rect.width(), v_rect.height()) * 0.85)));
+      f.setBold(true);
+      f.setStyleStrategy(QFont::PreferAntialias);
+      painter->setFont(f);
+      painter->setPen(label_color);
+      painter->drawText(v_rect, Qt::AlignBottom | Qt::AlignRight, QStringLiteral("V"));
+
+      painter->restore();
+    }
+
+    QPixmap pixmap(QSize const& size, QIcon::Mode mode, QIcon::State state) override
+    {
+      QPixmap pm(size);
+      pm.fill(Qt::transparent);
+      QPainter p(&pm);
+      paint(&p, QRect(QPoint(0, 0), size), mode, state);
+      return pm;
+    }
+  };
+
+  QIcon volumetric_fog_tool_icon()
+  {
+    static QIcon const cached(new VolumetricFogIconEngine());
+    return cached;
+  }
 }
 
 class SliderAction : public QWidgetAction
@@ -300,6 +369,7 @@ ViewToolbar::ViewToolbar(MapView *mapView, ViewToolbar *tb)
 
     add_tool_icon(mapView, &mapView->_draw_model_animations, tr("Animations"), FontNoggit::VISIBILITY_ANIMATION, tb);
     add_tool_icon(mapView, &mapView->_draw_fog, tr("Fog"), FontNoggit::VISIBILITY_FOG, tb);
+    add_tool_icon(mapView, &mapView->_draw_volumetric_fog, tr("Volumetric fog"), volumetric_fog_tool_icon(), tb);
     add_tool_icon(mapView, &mapView->_draw_mfbo, tr("Flight bounds\nCurrently doesn't work !"), FontNoggit::VISIBILITY_FLIGHT_BOUNDS, tb);
     // add_tool_icon(mapView, &mapView->_draw_lights_zones, tr("Light zones"), FontNoggit::VISIBILITY_LIGHT, tb);
     add_tool_icon(mapView, &mapView->_draw_point_lights, tr("Point/Spot Lights"), FontNoggit::VISIBILITY_LIGHT, tb);

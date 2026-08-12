@@ -378,6 +378,11 @@
              <string>Wrath Of The Lich King</string>
             </property>
            </item>
+           <item>
+            <property name="text">
+             <string>Shadowlands</string>
+            </property>
+           </item>
           </widget>
          </item>
          <item>

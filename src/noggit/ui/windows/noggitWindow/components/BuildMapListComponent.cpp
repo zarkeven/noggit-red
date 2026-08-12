@@ -1,6 +1,7 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/application/Utils.hpp>
+#include <noggit/Log.h>
 #include <noggit/project/ApplicationProject.h>
 #include <noggit/ui/FontAwesome.hpp>
 #include <noggit/ui/windows/noggitWindow/components/BuildMapListComponent.hpp>
@@ -25,6 +26,8 @@ void BuildMapListComponent::buildMapList(Noggit::Ui::Windows::NoggitWindow* pare
   }
 
   const auto& table = std::string("Map");
+  try
+  {
   auto map_table = parent->_project->ClientDatabase->LoadTable(table, readFileAsIMemStream);
 
   auto iterator = map_table.Records();
@@ -44,6 +47,10 @@ void BuildMapListComponent::buildMapList(Noggit::Ui::Windows::NoggitWindow* pare
       map_list_data.map_name = QString::fromUtf8(value.c_str());
       break;
     }
+
+    // Fall back to singular Value when Values was not populated (scalar locstring).
+    if (map_list_data.map_name.isEmpty() && record.Columns.contains("MapName_lang"))
+      map_list_data.map_name = QString::fromUtf8(record.Columns["MapName_lang"].Value.c_str());
 
     map_list_data.map_id = record.RecordId;
     map_list_data.map_type_id = std::stoi(record.Columns["InstanceType"].Value);
@@ -78,6 +85,7 @@ void BuildMapListComponent::buildMapList(Noggit::Ui::Windows::NoggitWindow* pare
   for (auto const& map: pinned_maps)
   {
     auto map_list_item = new Widget::MapListItem(map, parent->_continents_table);
+
     auto item = new QListWidgetItem(parent->_continents_table);
 
     if (map.pinned)
@@ -128,4 +136,9 @@ void BuildMapListComponent::buildMapList(Noggit::Ui::Windows::NoggitWindow* pare
   }
 
   parent->_project->ClientDatabase->UnloadTable(table);
+  }
+  catch (std::exception const& e)
+  {
+    LogError << "BuildMapListComponent: failed to load Map table: " << e.what() << std::endl;
+  }
 }

@@ -155,6 +155,7 @@ class SkyParam
 {
 public:
     std::optional<ModelInstance> skybox;
+    std::optional<ModelInstance> celestial_skybox;
     int skyboxFlags = 0;
 
     int Id;

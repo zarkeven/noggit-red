@@ -57,6 +57,7 @@
 #include "revision.h"
 
 #include "ui_TitleBar.h"
+#include <noggit/Branding.hpp>
 #include <noggit/ui/tools/ViewportManager/ViewportManager.hpp>
 
 namespace Noggit::Ui::Windows
@@ -70,7 +71,8 @@ namespace Noggit::Ui::Windows
   {
 
     std::stringstream title;
-    title << "Noggit - " << STRPRODUCTVER;
+    title << Noggit::Branding::product_name << " - Data "
+          << Noggit::Project::ClientVersionFactory::MapToClientDataVersion(project->projectVersion);
     setWindowTitle(QString::fromStdString(title.str()));
     setWindowIcon(QIcon(":/icon"));
 
@@ -82,7 +84,12 @@ namespace Noggit::Ui::Windows
     }
     else
     {
-        LogError << "NoggitWindow() : Unsupported project version, skipping loading DBCs." << std::endl;
+        // Retail / Shadowlands use DB2 via ClientDatabase + WoWDBDefs, not classic OpenDBs().
+        Log << "Skipping classic DBC OpenDBs() for project version "
+            << Noggit::Project::ClientVersionFactory::MapToStringVersion(project->projectVersion)
+            << " (client data "
+            << Noggit::Project::ClientVersionFactory::MapToClientDataVersion(project->projectVersion)
+            << ")." << std::endl;
     }
 
     setCentralWidget(_null_widget);

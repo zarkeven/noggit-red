@@ -76,6 +76,7 @@ struct WorldRenderParams
   bool draw_sky;
   bool draw_skybox;
   bool draw_fog;
+  bool draw_volumetric_fog = true;
   eTerrainType ground_editing_brush;
   int water_layer;
   display_mode display_mode;
@@ -170,7 +171,8 @@ namespace Noggit::Rendering
 
     void updateMVPUniformBlock(const glm::mat4x4& model_view, const glm::mat4x4& projection);
     void updateLightingUniformBlock(bool draw_fog, glm::vec3 const& camera_pos);
-    void updateModernFogUniformBlock(bool draw_fog, glm::vec3 const& camera_pos, bool camera_moved);
+    void updateModernFogUniformBlock(bool draw_fog, bool draw_volumetric_fog
+                                   , glm::vec3 const& camera_pos, bool camera_moved);
     void updateLightingUniformBlockMinimap(MinimapRenderSettings* settings);
     void drawVolumetricFogDebug(glm::mat4x4 const& model_view, glm::mat4x4 const& projection, glm::vec3 const& camera_pos, float cull_distance);
 
@@ -262,6 +264,7 @@ namespace Noggit::Rendering
     glm::vec3 _point_light_sort_camera_pos = glm::vec3(std::numeric_limits<float>::max());
     std::size_t _point_light_sort_light_count = 0;
     glm::vec3 _last_modern_fog_camera_pos = glm::vec3(std::numeric_limits<float>::max());
+    bool _last_draw_volumetric_fog = true;
     int _point_light_ubo_upload_frame = 0;
 
     void setupMccvVizBuffers();
