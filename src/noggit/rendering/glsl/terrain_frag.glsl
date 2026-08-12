@@ -30,8 +30,10 @@ layout (std140) uniform modern_fog
   vec4 end_fog_color;
   vec4 fog_height_color_density;
   vec4 height_coeff_01;
+  vec4 height_coeff_23;
   vec4 vfog_pos_radius[8];
   vec4 vfog_color_intensity[8];
+  vec4 vfog_radius_xyz[8];
 };
 
 layout (std140) uniform overlay_params
@@ -656,17 +658,38 @@ void main()
     {
       float h = max(vary_position.y - fog_density_end_height.z, 0.0) * max(fog_density_end_height.w, 0.001);
       float hf = 1.0 - exp(-h * max(fog_height_color_density.w, 0.001));
+      // Optional LightData height polynomial when coeffs are populated.
+      float hy = vary_position.y;
+      float poly = height_coeff_01.x
+                 + height_coeff_01.y * hy
+                 + height_coeff_01.z * hy * hy
+                 + height_coeff_01.w * hy * hy * hy;
+      if (abs(height_coeff_01.x) + abs(height_coeff_01.y) + abs(height_coeff_01.z) + abs(height_coeff_01.w) > 1e-5)
+        hf = clamp(mix(hf, clamp(poly, 0.0, 1.0), 0.5), 0.0, 1.0);
       fogged = mix(fogged, fog_height_color_density.rgb, hf * fogFactor);
     }
 
+    out_color.rgb = fogged;
+  }
+
+  // Local volumetric fog volumes (independent of distance fog / fogFactor).
+  if (mf_meta.y > 0)
+  {
+    vec3 fogged = out_color.rgb;
     for (int i = 0; i < mf_meta.y; ++i)
     {
-      float d = distance(vfog_pos_radius[i].xyz, vary_position);
-      float r = max(vfog_pos_radius[i].w, 1.0);
-      float vf = clamp(1.0 - d / r, 0.0, 1.0) * vfog_color_intensity[i].w;
-      fogged = mix(fogged, vfog_color_intensity[i].rgb, vf * fogFactor);
+      vec3 center = vfog_pos_radius[i].xyz;
+      // Half-ellipsoid above the fog origin (y >= center.y).
+      if (vary_position.y < center.y)
+        continue;
+      vec3 radii = max(vfog_radius_xyz[i].xyz, vec3(0.05));
+      vec3 dn = (vary_position - center) / radii;
+      float t = length(dn);
+      float vf = clamp(1.0 - t, 0.0, 1.0);
+      vf = vf * vf * (3.0 - 2.0 * vf); // smoothstep falloff
+      vf = min(vf * vfog_color_intensity[i].w, 1.0);
+      fogged = mix(fogged, vfog_color_intensity[i].rgb, vf);
     }
-
     out_color.rgb = fogged;
   }
 

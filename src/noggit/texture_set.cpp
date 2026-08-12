@@ -1,6 +1,7 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/Brush.h>
+#include <noggit/Log.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapHeaders.h>
 #include <noggit/MapTile.h>
@@ -27,15 +28,34 @@ TextureSet::TextureSet (MapChunk* chunk, BlizzardArchive::ClientFile* f, size_t 
   std::copy(header.doodadMapping, header.doodadMapping + 8, _doodadMapping.begin());
   std::copy(header.doodadStencil, header.doodadStencil + 8, _doodadStencil.begin());
 
+  if (chunk->mt->mTextureFilenames.empty())
+  {
+    nTextures = 0;
+  }
+  else if (nTextures > 4)
+  {
+    nTextures = 4;
+  }
+
   if (nTextures)
   {
     f->seek(base + header.ofsLayer + 8);
 
     ENTRY_MCLY tmp_entry_mcly[4];
 
-    for (size_t i = 0; i<nTextures; ++i)
+    size_t valid_layers = 0;
+    for (size_t i = 0; i < nTextures; ++i)
     {
-      f->read (&tmp_entry_mcly[i], sizeof(ENTRY_MCLY)); // f->read (&_layers_info[i], sizeof(ENTRY_MCLY));
+      f->read (&tmp_entry_mcly[i], sizeof(ENTRY_MCLY));
+
+      if (tmp_entry_mcly[i].textureID >= chunk->mt->mTextureFilenames.size())
+      {
+        LogError << "MCLY textureID " << tmp_entry_mcly[i].textureID
+                 << " out of range (" << chunk->mt->mTextureFilenames.size()
+                 << " textures) on chunk [" << chunk->px << ", " << chunk->py << "]"
+                 << std::endl;
+        break;
+      }
 
       std::string const& texturefilename = chunk->mt->mTextureFilenames[tmp_entry_mcly[i].textureID];
       textures.emplace_back (texturefilename, _context);
@@ -48,17 +68,20 @@ TextureSet::TextureSet (MapChunk* chunk, BlizzardArchive::ClientFile* f, size_t 
 
       _layers_info[i].effectID = tmp_entry_mcly[i].effectID;
       _layers_info[i].flags = tmp_entry_mcly[i].flags;
+      ++valid_layers;
     }
+    nTextures = valid_layers;
 
     size_t alpha_base = base + header.ofsAlpha + 8;
 
     for (unsigned int layer = 0; layer < nTextures; ++layer)
     {
-      if (_layers_info[layer].flags & FLAG_USE_ALPHA)
-      {
-        f->seek (alpha_base + tmp_entry_mcly[layer].ofsAlpha);
-        alphamaps[layer - 1] = std::make_unique<Alphamap>(f, _layers_info[layer].flags, use_big_alphamaps, do_not_fix_alpha_map);
-      }
+      // Layer 0 is the opaque base; it has no alphamap slot (alphamaps[layer-1]).
+      if (layer == 0 || !(_layers_info[layer].flags & FLAG_USE_ALPHA))
+        continue;
+
+      f->seek (alpha_base + tmp_entry_mcly[layer].ofsAlpha);
+      alphamaps[layer - 1] = std::make_unique<Alphamap>(f, _layers_info[layer].flags, use_big_alphamaps, do_not_fix_alpha_map);
     }
 
     // always use big alpha for editing / rendering

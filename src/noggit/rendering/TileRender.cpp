@@ -3,6 +3,7 @@
 #include <noggit/rendering/TileRender.hpp>
 #include <noggit/MapTile.h>
 #include <noggit/MapChunk.h>
+#include <noggit/adt/AdtCommon.hpp>
 #include <noggit/texture_set.hpp>
 #include <noggit/ui/TexturingGUI.h>
 #include <noggit/application/NoggitApplication.hpp>
@@ -12,7 +13,23 @@
 
 #include <external/tracy/Tracy.hpp>
 
+#include <cstdint>
+
 using namespace Noggit::Rendering;
+
+namespace
+{
+  void upload_chunk_holes(OpenGL::ChunkInstanceDataUniformBlock& dst, MapChunk const* chunk)
+  {
+    std::uint64_t const mask = Noggit::Adt::render_holes_mask(
+      chunk->header_flags
+    , chunk->_holes_high_res
+    , static_cast<std::uint32_t>(chunk->holes));
+    // .r = low 32 bits of 8×8 mask; AreaID.b stores high 32 (pad slot).
+    dst.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[0] = static_cast<int>(mask & 0xffffffffu);
+    dst.AreaIDColor_Pad2_DrawSelection[2] = static_cast<int>((mask >> 32) & 0xffffffffu);
+  }
+}
 
 
 TileRender::TileRender(MapTile* map_tile)
@@ -233,7 +250,7 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
 
       if (flags & ChunkUpdateFlags::HOLES)
       {
-        _chunk_instance_data[i].ChunkHoles_DrawImpass_TexLayerCount_CantPaint[0] = chunk->holes;
+        upload_chunk_holes(_chunk_instance_data[i], chunk.get());
       }
 
       if (flags & ChunkUpdateFlags::FLAGS)
@@ -696,14 +713,13 @@ void TileRender::initChunkData(MapChunk* chunk)
 {
   auto& chunk_render_instance = _chunk_instance_data[chunk->px * 16 + chunk->py];
 
-  chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[0] = chunk->holes;
   chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[1] = chunk->header_flags.flags.impass;
   chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[2] = static_cast<int>(chunk->texture_set->num());
   chunk_render_instance.ChunkHoles_DrawImpass_TexLayerCount_CantPaint[3] = 0;
   chunk_render_instance.AreaIDColor_Pad2_DrawSelection[0] = chunk->areaID;
   chunk_render_instance.AreaIDColor_Pad2_DrawSelection[1] = 0;
-  chunk_render_instance.AreaIDColor_Pad2_DrawSelection[2] = 0;
   chunk_render_instance.AreaIDColor_Pad2_DrawSelection[3] = 0;
+  upload_chunk_holes(chunk_render_instance, chunk);
 
   chunk_render_instance.ChunkGroundEffectColor[0] = 0.0f;
   chunk_render_instance.ChunkGroundEffectColor[1] = 0.0f;

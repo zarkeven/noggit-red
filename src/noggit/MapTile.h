@@ -9,6 +9,7 @@
 #include <noggit/rendering/FlightBoundsRender.hpp>
 #include <noggit/rendering/TileRender.hpp>
 #include <noggit/Selection.h>
+#include <noggit/TextureManager.h>
 #include <noggit/TileIndex.hpp>
 #include <noggit/TileWater.hpp>
 
@@ -28,7 +29,6 @@ namespace math
 }
 
 class MapChunk;
-struct texture_heightmapping_data;
 class World;
 
 
@@ -169,7 +169,7 @@ public:
   Noggit::Rendering::TileRender* renderer();;
   Noggit::Rendering::FlightBoundsRender* flightBoundsRenderer();;
 
-  const texture_heightmapping_data& GetTextureHeightMappingData(const std::string& name) const;
+  const texture_heightmapping_data GetTextureHeightMappingData(const std::string& name) const;
 
   void forceAlphaUpdate();
   bool childrenFinishedLoading();
@@ -221,6 +221,8 @@ private:
   // std::vector<std::string> mModelFilenames;
   // std::vector<std::string> mWMOFilenames;
   std::map<std::string, mtxf_entry> _mtxf_entries;
+  //! Per-texture height-blend params from MTXP (MoP+), keyed by MTEX path.
+  std::map<std::string, texture_heightmapping_data> _mtxp_height_data;
   
   std::vector<uint32_t> uids;
   tsl::robin_map<AsyncObject*, std::vector<SceneObject*>> object_instances; // only includes M2 and WMO. perhaps a medium common ancestor then?

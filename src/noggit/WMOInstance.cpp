@@ -360,9 +360,12 @@ void WMOInstance::recalcExtents()
                                   , adjustedGroupPoints.end()));
 
       group_extents[i] = {group_aabb.min, group_aabb.max};
-      _update_group_extents = false;
     }
   }
+
+  // Clear after the full group pass so every group gets extents when requested
+  // (previously cleared after the first group and left later entries missing).
+  _update_group_extents = false;
 
   math::aabb const wmo_aabb(points);
 

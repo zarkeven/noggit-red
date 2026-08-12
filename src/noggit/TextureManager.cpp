@@ -488,7 +488,7 @@ blp_texture::blp_texture(BlizzardArchive::Listfile::FileKey const& file_key, Nog
 
 void blp_texture::finishLoading()
 {
-  bool exists = Noggit::Application::NoggitApplication::instance()->clientData()->exists( _file_key.filepath());
+  bool exists = Noggit::Application::NoggitApplication::instance()->clientData()->exists(_file_key);
   if (!exists)
   {
     LogError << "file not found: '" <<  _file_key.stringRepr() << "'" << std::endl;
@@ -497,20 +497,45 @@ void blp_texture::finishLoading()
   std::string spec_filename = "", height_filename = "";
   bool has_specular = false, has_height = false;
   bool use_specular_file = false;
+  std::string open_key_path = _file_key.hasFilepath() ? _file_key.filepath() : std::string{};
 
-  if (_file_key.filepath().starts_with("tileset/") )
+  if (_file_key.hasFilepath() && _file_key.filepath().starts_with("tileset/") )
   {
     _is_tileset = true;
 
-    spec_filename = _file_key.filepath().substr(0, _file_key.filepath().find_last_of(".")) + "_s.blp";
-    has_specular = Noggit::Application::NoggitApplication::instance()->clientData()->exists(spec_filename);
+    std::string const& path = _file_key.filepath();
+    bool const already_specular = path.size() > 6
+      && (path.ends_with("_s.blp") || path.ends_with("_S.blp"));
 
-    // Open the *_s.blp only for live terrain rendering. Thumbnails / asset UI request the
-    // diffuse path and should decode that file, not the specular map.
-    if (has_specular && _context == Noggit::NoggitRenderContext::MAP_VIEW)
+    if (already_specular)
     {
+      // MDID/listfile sometimes hands us *_s.blp directly.
       _is_specular = true;
-      use_specular_file = true;
+      spec_filename = path;
+      has_specular = true;
+      if (_context == Noggit::NoggitRenderContext::MAP_VIEW)
+      {
+        use_specular_file = true;
+      }
+      else
+      {
+        // Picker / UI: prefer the diffuse sibling so thumbnails aren't black specular maps.
+        open_key_path = path.substr(0, path.size() - 6) + ".blp";
+        exists = Noggit::Application::NoggitApplication::instance()->clientData()->exists(open_key_path);
+      }
+    }
+    else
+    {
+      spec_filename = path.substr(0, path.find_last_of(".")) + "_s.blp";
+      has_specular = Noggit::Application::NoggitApplication::instance()->clientData()->exists(spec_filename);
+
+      // Open the *_s.blp only for live terrain rendering. Thumbnails / asset UI request the
+      // diffuse path and should decode that file, not the specular map.
+      if (has_specular && _context == Noggit::NoggitRenderContext::MAP_VIEW)
+      {
+        _is_specular = true;
+        use_specular_file = true;
+      }
     }
 
     bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
@@ -518,7 +543,10 @@ void blp_texture::finishLoading()
     // Only load _h in map view when modern features are enabled
     if(_context == Noggit::NoggitRenderContext::MAP_VIEW && modern_features)
     {
-        height_filename = _file_key.filepath().substr(0, _file_key.filepath().find_last_of(".")) + "_h.blp";
+        std::string base = already_specular
+          ? path.substr(0, path.size() - 6) // strip _s.blp
+          : path.substr(0, path.find_last_of("."));
+        height_filename = base + "_h.blp";
         has_height = Noggit::Application::NoggitApplication::instance()->clientData()->exists(height_filename);
         if (has_height)
         {
@@ -529,11 +557,23 @@ void blp_texture::finishLoading()
     }
   }
 
-  std::string const open_path =
-      exists ? (use_specular_file ? spec_filename : _file_key.filepath()) : "textures/shanecube.blp";
+  BlizzardArchive::Listfile::FileKey open_key = _file_key;
+  if (!exists)
+  {
+    open_key = BlizzardArchive::Listfile::FileKey("textures/shanecube.blp");
+  }
+  else if (use_specular_file)
+  {
+    open_key = BlizzardArchive::Listfile::FileKey(spec_filename);
+  }
+  else if (!open_key_path.empty()
+           && (!_file_key.hasFilepath() || open_key_path != _file_key.filepath()))
+  {
+    open_key = BlizzardArchive::Listfile::FileKey(open_key_path);
+  }
 
   BlizzardArchive::ClientFile f(
-      open_path
+      open_key
       , Noggit::Application::NoggitApplication::instance()->clientData());
   if (f.isEof())
   {

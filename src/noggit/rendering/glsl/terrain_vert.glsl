@@ -54,86 +54,83 @@ out vec3 vary_normal;
 flat out int instanceID;
 flat out vec3 triangle_normal;
 
-bool isHoleVertex(uint vertexId, uint hole)
+// MoP+ stores an 8×8 unit hole mask. Classic 4×4 is expanded to 8×8 on upload.
+// hole_lo / hole_hi are the low/high 32 bits (bytes: one bit per unit, row-major).
+bool holeBitSet(uint hole_lo, uint hole_hi, uint ux, uint uy)
 {
-  if (hole == 0)
+  uint bit = uy * 8u + ux;
+  if (bit < 32u)
+    return ((hole_lo >> bit) & 1u) != 0u;
+  return ((hole_hi >> (bit - 32u)) & 1u) != 0u;
+}
+
+uint downsampleHole4x4(uint hole_lo, uint hole_hi)
+{
+  // OR each 2×2 of the 8×8 mask into a classic 4×4 bitfield (for LOD1).
+  uint mask = 0u;
+  for (uint y = 0u; y < 4u; ++y)
+  {
+    for (uint x = 0u; x < 4u; ++x)
+    {
+      bool any = holeBitSet(hole_lo, hole_hi, x * 2u, y * 2u)
+              || holeBitSet(hole_lo, hole_hi, x * 2u + 1u, y * 2u)
+              || holeBitSet(hole_lo, hole_hi, x * 2u, y * 2u + 1u)
+              || holeBitSet(hole_lo, hole_hi, x * 2u + 1u, y * 2u + 1u);
+      if (any)
+        mask |= 1u << (y * 4u + x);
+    }
+  }
+  return mask;
+}
+
+bool isHoleVertex(uint vertexId, uint hole_lo, uint hole_hi)
+{
+  if (hole_lo == 0u && hole_hi == 0u)
   {
     return false;
   }
-
-  uint blockRow = vertexId / 34;
-  uint blockVertexId = vertexId % 34;
-  uint shiftedHole = hole >> (blockRow * 4);
 
   switch(lod_level)
   {
     case 0:
     {
-      if ((shiftedHole & 0x1u) != 0)
-      {
-        if (blockVertexId == 9 || blockVertexId == 10 || blockVertexId == 26 || blockVertexId == 27)
-        {
-          return true;
-        }
-      }
-
-      if ((shiftedHole & 0x2u) != 0)
-      {
-        if (blockVertexId == 11 || blockVertexId == 12 || blockVertexId == 28 || blockVertexId == 29)
-        {
-          return true;
-        }
-      }
-
-      if ((shiftedHole & 0x4u) != 0)
-      {
-        if (blockVertexId == 13 || blockVertexId == 14 || blockVertexId == 30 || blockVertexId == 31)
-        {
-          return true;
-        }
-      }
-
-      if ((shiftedHole & 0x8u) != 0)
-      {
-        if (blockVertexId == 15 || blockVertexId == 16 || blockVertexId == 32 || blockVertexId == 33)
-        {
-          return true;
-        }
-      }
-      break;
+      // Full-detail mesh: odd height rows hold the 8 unit-center verts.
+      // vertex = uy * 17 + 9 + ux  (uy,ux in 0..7).
+      uint rem = vertexId % 17u;
+      if (rem < 9u)
+        return false;
+      uint ux = rem - 9u;
+      uint uy = vertexId / 17u;
+      if (ux >= 8u || uy >= 8u)
+        return false;
+      return holeBitSet(hole_lo, hole_hi, ux, uy);
     }
     case 1:
     {
-      if ((shiftedHole & 0x1u) != 0)
-      {
-        if (vertexId == 18 || vertexId == 52 || vertexId == 86 || vertexId == 120)
-        {
-          return true;
-        }
-      }
+      // Coarse LOD still uses the classic 4×4 vertex punches.
+      uint hole = downsampleHole4x4(hole_lo, hole_hi);
+      uint blockRow = vertexId / 34u;
+      uint shiftedHole = hole >> (blockRow * 4u);
 
-      if ((shiftedHole & 0x2u) != 0)
+      if ((shiftedHole & 0x1u) != 0u)
       {
-        if (vertexId == 20 || vertexId == 54 || vertexId == 88 || vertexId == 122)
-        {
+        if (vertexId == 18u || vertexId == 52u || vertexId == 86u || vertexId == 120u)
           return true;
-        }
       }
-
-      if ((shiftedHole & 0x4u) != 0)
+      if ((shiftedHole & 0x2u) != 0u)
       {
-        if (vertexId == 22 || vertexId == 56 || vertexId == 90 || vertexId == 124)
-        {
+        if (vertexId == 20u || vertexId == 54u || vertexId == 88u || vertexId == 122u)
           return true;
-        }
       }
-
-      if ((shiftedHole & 0x8u) != 0)
+      if ((shiftedHole & 0x4u) != 0u)
       {
-        if (vertexId == 24 || vertexId == 58 || vertexId == 92 || vertexId == 126)
-        {
+        if (vertexId == 22u || vertexId == 56u || vertexId == 90u || vertexId == 124u)
           return true;
-        }
+      }
+      if ((shiftedHole & 0x8u) != 0u)
+      {
+        if (vertexId == 24u || vertexId == 58u || vertexId == 92u || vertexId == 126u)
+          return true;
       }
       break;
     }
@@ -176,7 +173,9 @@ void main()
                       + position.y
                     );
 
-  bool is_hole = isHoleVertex(gl_VertexID, instances[instanceID].ChunkHoles_DrawImpass_TexLayerCount_CantPaint.r);
+  bool is_hole = isHoleVertex(uint(gl_VertexID)
+                            , uint(instances[instanceID].ChunkHoles_DrawImpass_TexLayerCount_CantPaint.r)
+                            , uint(instances[instanceID].AreaIDColor_Pad2_DrawSelection.b));
 
   float NaN = makeNaN(1);
 

@@ -38,8 +38,10 @@ layout (std140) uniform modern_fog
   vec4 end_fog_color;
   vec4 fog_height_color_density;
   vec4 height_coeff_01;
+  vec4 height_coeff_23;
   vec4 vfog_pos_radius[8];
   vec4 vfog_color_intensity[8];
+  vec4 vfog_radius_xyz[8];
 };
 
 uniform vec4 mesh_color;
@@ -362,7 +364,9 @@ void main()
   }
   else
   {
-      currColor = AmbientColor_FogEnd.xyz;
+      // Unlit (M2Material flag 0x1): skip world lighting. Multiplying by ambient
+      // made emissive/celestial doodads pure black in dark Light zones (Ardenweald).
+      currColor = vec3(1.0);
       accumlatedLight = vec3(0.0f, 0.0f, 0.0f);
   }
 
@@ -406,12 +410,24 @@ void main()
       float endT = clamp(camera_dist / fog_density_end_height.y, 0.0, 1.0);
       fogged = mix(fogged, end_fog_color.rgb, endT * fogFactor);
     }
+    color.rgb = fogged;
+  }
+
+  if (mf_meta.y > 0 && unfogged == 0)
+  {
+    vec3 fogged = color.rgb;
     for (int i = 0; i < mf_meta.y; ++i)
     {
-      float d = distance(vfog_pos_radius[i].xyz, world_pos);
-      float r = max(vfog_pos_radius[i].w, 1.0);
-      float vf = clamp(1.0 - d / r, 0.0, 1.0) * vfog_color_intensity[i].w;
-      fogged = mix(fogged, vfog_color_intensity[i].rgb, vf * fogFactor);
+      vec3 center = vfog_pos_radius[i].xyz;
+      if (world_pos.y < center.y)
+        continue;
+      vec3 radii = max(vfog_radius_xyz[i].xyz, vec3(0.05));
+      vec3 dn = (world_pos - center) / radii;
+      float t = length(dn);
+      float vf = clamp(1.0 - t, 0.0, 1.0);
+      vf = vf * vf * (3.0 - 2.0 * vf);
+      vf = min(vf * vfog_color_intensity[i].w, 1.0);
+      fogged = mix(fogged, vfog_color_intensity[i].rgb, vf);
     }
     color.rgb = fogged;
   }

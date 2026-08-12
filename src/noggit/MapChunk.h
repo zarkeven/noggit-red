@@ -98,6 +98,8 @@ public:
   std::unique_ptr<TextureSet> texture_set;
 
   int holes;
+  // MoP+: when high_res_holes is set, ofsHeight/ofsNormal store this mask (not offsets).
+  std::uint64_t _holes_high_res = 0;
   bool currently_paintable = true;
 
   unsigned int areaID;

@@ -63,7 +63,7 @@ void ModelRender::upload()
       misc::transform_model_box_coords(_model->bounding_box_min)
       , misc::transform_model_box_coords(_model->bounding_box_max));
 
-  for (std::string const& texture : _model->_textureFilenames)
+  for (auto const& texture : _model->_textureFilenames)
     _model->_textures.emplace_back(texture, _model->_context);
 
   _buffers.upload();
@@ -440,21 +440,7 @@ std::vector<ModelRenderPass> const& Noggit::Rendering::ModelRender::renderPasses
 
 bool ModelRender::hasTerrainGroundProjectionPasses() const
 {
-  for (ModelRenderPass const& p : _render_passes)
-  {
-    if (p.skin_projected)
-    {
-      return true;
-    }
-    if (p.tu_lookups[0] == texture_unit_lookup::ground)
-    {
-      return true;
-    }
-    if (p.texture_count > 1 && p.tu_lookups[1] == texture_unit_lookup::ground)
-    {
-      return true;
-    }
-  }
+  // Projected decals use the model's own textures/UVs; no terrain-layer bind.
   return false;
 }
 
@@ -517,20 +503,34 @@ void ModelRender::fixShaderIdBlendOverride()
     int shader = 0;
     bool blend_mode_override = (_model->Flags & m2_flag_use_texture_combiner_combos);
 
-    // fuckporting check
-    if (pass.texture_coord_combo_index + pass.texture_count - 1 >= _model->_texture_unit_lookup.size())
+    // Cataclysm+ leaves textureCoordCombos unused (often empty). Missing lookup is not a
+    // "fuckport" — default to T1 (0) and still resolve combiners from blend mode.
+    // Forcing shader_id=0 here made every Alpha/Alpha_Key batch Combiners_Opaque (no tex alpha).
+    auto texture_unit_at = [&](std::size_t index) -> std::uint16_t
     {
-      LogDebug << "wrong texture coord combo index on fuckported model: " << _model->_file_key.stringRepr() << std::endl;
-      // use default stuff
-      pass.shader_id = 0;
-      pass.texture_count = 1;
+      if (index < _model->_texture_unit_lookup.size())
+        return _model->_texture_unit_lookup[index];
+      return 0;
+    };
 
+    if (!_model->_texture_unit_lookup.empty()
+        && pass.texture_coord_combo_index + pass.texture_count - 1 >= _model->_texture_unit_lookup.size())
+    {
+      LogDebug << "wrong texture coord combo index on fuckported model: "
+               << _model->_file_key.stringRepr() << std::endl;
+    }
+
+    // Without m2_flag_use_texture_combiner_combos, modern skins already store the
+    // combiner encoding in shader_id (e.g. 0x4013). Only synthesize when unset —
+    // overwriting destroyed Mod_Add glow batches on Ardenweald celestial trees.
+    if (!blend_mode_override && pass.shader_id != 0)
+    {
       continue;
     }
 
     if (!blend_mode_override)
     {
-      uint16_t texture_unit_lookup = _model->_texture_unit_lookup[pass.texture_coord_combo_index];
+      uint16_t texture_unit_lookup = texture_unit_at(pass.texture_coord_combo_index);
 
       if (_model->_render_flags[pass.renderflag_index].blend)
       {
@@ -556,7 +556,7 @@ void ModelRender::fixShaderIdBlendOverride()
       for (int i = 0; i < pass.texture_count; ++i)
       {
         uint16_t override_blend = _model->blend_override[pass.shader_id + i];
-        uint16_t texture_unit_lookup = _model->_texture_unit_lookup[pass.texture_coord_combo_index + i];
+        uint16_t texture_unit_lookup = texture_unit_at(pass.texture_coord_combo_index + i);
 
         if (i == 0 && _model->_render_flags[pass.renderflag_index].blend == 0)
         {
@@ -1153,31 +1153,9 @@ bool ModelRenderPass::prepareDraw(OpenGL::Scoped::use_program& m2_shader, Model 
 
   m2_shader.uniform("mesh_color", mesh_color);
 
-  int terrain_uv_mask = 0;
-  if (terrain_ground && terrain_ground->valid)
-  {
-    if (tu_lookups[0] == texture_unit_lookup::ground)
-    {
-      terrain_uv_mask |= 1;
-    }
-    if (texture_count > 1 && tu_lookups[1] == texture_unit_lookup::ground)
-    {
-      terrain_uv_mask |= 2;
-    }
-    // Single-texture projected decals often still use T1 mapping in the M2; force chunk UV + terrain bind on slot 0.
-    if (skin_projected && texture_count == 1
-        && tu_lookups[0] != texture_unit_lookup::ground
-        && tu_lookups[0] != texture_unit_lookup::environment)
-    {
-      terrain_uv_mask |= 1;
-    }
-  }
-
-  m2_shader.uniform("terrain_uv_mask", terrain_uv_mask);
-  if (terrain_uv_mask != 0)
-  {
-    m2_shader.uniform("terrain_chunk_corner_xz", terrain_ground->chunk_corner_xz);
-  }
+  // Projected/ground batches keep the model's own BLP. terrain_uv_mask used to force
+  // chunk UVs + terrain layer 0, which replaced decal art with ground textures.
+  m2_shader.uniform("terrain_uv_mask", 0);
 
   return true;
 }
@@ -1189,20 +1167,7 @@ void ModelRenderPass::afterDraw()
 
 void ModelRenderPass::bindTexture(size_t index, Model* m, OpenGL::M2RenderState& model_render_state, OpenGL::Scoped::use_program& m2_shader, M2TerrainGroundBind const* terrain_ground)
 {
-  bool const bind_chunk_tex = terrain_ground && terrain_ground->valid
-    && (tu_lookups[index] == texture_unit_lookup::ground
-        || (skin_projected && texture_count == 1 && index == 0
-            && tu_lookups[0] != texture_unit_lookup::ground
-            && tu_lookups[0] != texture_unit_lookup::environment));
-
-  if (bind_chunk_tex)
-  {
-    gl.activeTexture(static_cast<GLenum>(GL_TEXTURE0 + index + 1));
-    gl.bindTexture(GL_TEXTURE_2D_ARRAY, terrain_ground->texture_array);
-    m2_shader.uniform(index ? "tex2_index" : "tex1_index", terrain_ground->array_index);
-    model_render_state.tex_indices[index] = terrain_ground->array_index;
-    return;
-  }
+  (void)terrain_ground;
 
   uint16_t tex = m->_texture_lookup[textures[index]];
 
@@ -1282,7 +1247,9 @@ void ModelRenderPass::initUVTypes(Model* m)
   tu_lookups[0] = texture_unit_lookup::none;
   tu_lookups[1] = texture_unit_lookup::none;
 
-  // wowdev M2/.skin texture units: flags &0x4 / &0x20 projected; geosetIndex (flags2) &0x2 projected
+  // wowdev M2/.skin: flags &0x4 / &0x20 / geosetIndex &0x2 = projected batch.
+  // Decal M2s are flat meshes with their own UVs + BLP; do not remap to world/chunk UVs
+  // or swap in the terrain layer (that hid the decal art).
   bool const batch_projected = ((flags & 0x4u) != 0)
                             || ((flags & 0x20u) != 0)
                             || ((geoset_index & 0x2u) != 0);
@@ -1296,14 +1263,12 @@ void ModelRenderPass::initUVTypes(Model* m)
     {
       switch (i)
       {
-        case 0: tu_lookups[i] = batch_projected ? texture_unit_lookup::ground : texture_unit_lookup::t1; break;
-        case 1: tu_lookups[i] = batch_projected ? texture_unit_lookup::ground : texture_unit_lookup::t2; break;
+        case 0: tu_lookups[i] = texture_unit_lookup::t1; break;
+        case 1: tu_lookups[i] = texture_unit_lookup::t2; break;
       }
     }
 
     return;
-
-    //throw std::out_of_range("model: texture_coord_combo_index out of range " + m->filename);
   }
 
   for (int i = 0; i < texture_count; ++i)
@@ -1313,11 +1278,6 @@ void ModelRenderPass::initUVTypes(Model* m)
     if (lid == (int16_t)(-1))
     {
       tu_lookups[i] = texture_unit_lookup::environment;
-    }
-    // Projected batches: world-space UVs for any mesh texture lookup (0, 1, 2, …), not only T1/T2.
-    else if (batch_projected && lid >= 0)
-    {
-      tu_lookups[i] = texture_unit_lookup::ground;
     }
     else
     {

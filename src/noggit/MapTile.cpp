@@ -2,6 +2,7 @@
 
 #include <noggit/Alphamap.hpp>
 #include <noggit/application/NoggitApplication.hpp>
+#include <noggit/adt/AdtTileReader.hpp>
 #include <noggit/Log.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapTile.h>
@@ -19,7 +20,9 @@
 
 #include <math/ray.hpp>
 
+#include <ClientData.hpp>
 #include <ClientFile.hpp>
+#include <Listfile.hpp>
 
 #include <util/sExtendableArray.hpp>
 
@@ -27,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cassert>
 #include <cstring>
 #include <limits>
@@ -47,7 +51,8 @@ namespace
     return max_effective == 104u ? 0 : static_cast<std::uint8_t>(std::min<std::uint32_t>(max_effective, 255u));
   }
 
-  //! Noggit ADT extension `NGPL`: per-ADT point light cap (4-byte) or legacy per-MCNK (256-byte).
+  //! Noggit-only ADT extension `NGPL` (not in wowlib / client formats): per-ADT point light cap
+  //! (4-byte) or legacy per-MCNK (256-byte). Preserved on round-trip; never emitted by retail clients.
   void loadNgplChunkFromAdt(BlizzardArchive::ClientFile& file, std::uint8_t& out_enc)
   {
     out_enc = 0;
@@ -178,7 +183,53 @@ void MapTile::finishLoading()
   if (finished)
     return;
 
-  BlizzardArchive::ClientFile theFile(_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
+  auto recover_missing_chunks = [this]()
+  {
+    for (int nextChunk = 0; nextChunk < 256; ++nextChunk)
+    {
+      unsigned const x = nextChunk / 16;
+      unsigned const z = nextChunk % 16;
+      if (!mChunks[x][z])
+      {
+        mChunks[x][z] = std::make_unique<MapChunk>(
+          this, nullptr, mBigAlpha, _mode, _context, true, nextChunk, _load_textures);
+        _renderer.initChunkData(mChunks[x][z].get());
+      }
+    }
+  };
+
+  try
+  {
+
+  auto* client_data = Noggit::Application::NoggitApplication::instance()->clientData();
+  BlizzardArchive::ClientFile theFile(_file_key, client_data);
+
+  // Shadowlands (and other split-ADT clients): combine root + _tex0 + _obj0 into one buffer
+  // so legacy MHDR-offset parsing sees textures, alphamaps, MTXP, and object instances.
+  if (client_data && client_data->version() != BlizzardArchive::ClientVersion::WOTLK
+      && _file_key.hasFilepath())
+  {
+    std::string const root_path = _file_key.filepath();
+    if (root_path.size() > 4 && root_path.ends_with(".adt")
+        && root_path.find("_tex") == std::string::npos
+        && root_path.find("_obj") == std::string::npos)
+    {
+      std::string const stem = root_path.substr(0, root_path.size() - 4);
+      std::vector<char> root_buf(theFile.getBuffer(), theFile.getBuffer() + theFile.getSize());
+      std::vector<char> tex0_buf;
+      std::vector<char> obj0_buf;
+      noggit::adt::read_archive_file(client_data, BlizzardArchive::Listfile::FileKey(stem + "_tex0.adt"), tex0_buf);
+      noggit::adt::read_archive_file(client_data, BlizzardArchive::Listfile::FileKey(stem + "_obj0.adt"), obj0_buf);
+      if (!tex0_buf.empty() || !obj0_buf.empty())
+      {
+        auto merged = noggit::adt::merge_split_adt_tile(std::move(root_buf), tex0_buf, obj0_buf);
+        theFile.setBuffer(merged);
+        theFile.seek(0);
+        LogDebug << "Merged split ADT for " << root_path << " (tex0=" << tex0_buf.size()
+                 << " obj0=" << obj0_buf.size() << " merged=" << merged.size() << ")." << std::endl;
+      }
+    }
+  }
 
   if (LoadTraceEnabled())
   {
@@ -238,95 +289,166 @@ void MapTile::finishLoading()
     theFile.seekRelative(0xC);
   }
 
-  // - MTEX ----------------------------------------------
+  // - MTEX / MDID ---------------------------------------
 
   if (_load_textures)
   {
-    theFile.seek(Header.mtex + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
+    mTextureFilenames.clear();
 
-    assert(fourcc == 'MTEX');
-
+    if (Header.mtex != 0)
     {
-      char const* lCurPos = reinterpret_cast<char const*>(theFile.getPointer());
-      char const* lEnd = lCurPos + size;
+      theFile.seek(Header.mtex + 0x14);
+      theFile.read(&fourcc, 4);
+      theFile.read(&size, 4);
 
-      while (lCurPos < lEnd)
+      if (fourcc == 'MTEX' && size > 0)
       {
-        mTextureFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(std::string(lCurPos)));
-        lCurPos += strlen(lCurPos) + 1;
+        char const* lCurPos = reinterpret_cast<char const*>(theFile.getPointer());
+        char const* lEnd = lCurPos + size;
+
+        while (lCurPos < lEnd)
+        {
+          mTextureFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(std::string(lCurPos)));
+          lCurPos += strlen(lCurPos) + 1;
+        }
+      }
+    }
+
+    // Retail ≥8.1: _tex0 stores FileDataIDs in MDID instead of MTEX paths.
+    if (mTextureFilenames.empty())
+    {
+      std::size_t const saved_pos = theFile.getPos();
+      theFile.seek(0);
+      while (theFile.getPos() + 8 <= theFile.getSize())
+      {
+        theFile.read(&fourcc, 4);
+        theFile.read(&size, 4);
+        if (fourcc == 'MDID' && size >= 4 && (size % 4) == 0)
+        {
+          auto* listfile = client_data ? client_data->listfile() : nullptr;
+          std::uint32_t const count = size / 4;
+          for (std::uint32_t i = 0; i < count; ++i)
+          {
+            std::uint32_t fdid = 0;
+            theFile.read(&fdid, 4);
+            std::string path;
+            if (listfile)
+            {
+              path = listfile->getPath(fdid);
+            }
+            if (path.empty())
+            {
+              LogError << "MDID FileDataID " << fdid << " not in listfile for tile "
+                       << index.x << "," << index.z << std::endl;
+              path = "filedataid_" + std::to_string(fdid) + ".blp";
+            }
+            // MDID FDIDs often resolve to *_s.blp (wowlib). Store the diffuse
+            // path so the picker/UI show the color map; MAP_VIEW still swaps to _s.
+            {
+              std::string lower = path;
+              for (auto& c : lower)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+              if (lower.size() > 6 && lower.ends_with("_s.blp"))
+                path = path.substr(0, path.size() - 6) + ".blp";
+            }
+            mTextureFilenames.push_back(
+              BlizzardArchive::ClientData::normalizeFilenameInternal(std::move(path)));
+          }
+          break;
+        }
+        if (theFile.getPos() + size > theFile.getSize())
+        {
+          break;
+        }
+        theFile.seekRelative(size);
+      }
+      theFile.seek(saved_pos);
+
+      if (!mTextureFilenames.empty())
+      {
+        LogDebug << "Loaded " << mTextureFilenames.size()
+                 << " textures from MDID for tile " << index.x << "," << index.z << std::endl;
       }
     }
   }
   if (_load_models)
   {
-    // - MMDX ----------------------------------------------
-
-    theFile.seek(Header.mmdx + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MMDX');
-
+    auto read_string_block = [&](std::uint32_t mh_ofs, std::uint32_t expect_fourcc
+                                 , char const* label, std::vector<std::string>& out)
     {
+      if (mh_ofs == 0)
+        return;
+      theFile.seek(mh_ofs + 0x14);
+      theFile.read(&fourcc, 4);
+      theFile.read(&size, 4);
+      if (fourcc != expect_fourcc)
+      {
+        LogError << label << " offset does not point at expected chunk on tile "
+                 << index.x << "," << index.z << " (got " << fourcc << ")" << std::endl;
+        return;
+      }
+      if (size == 0 || theFile.getPos() + size > theFile.getSize())
+        return;
+
       char const* lCurPos = reinterpret_cast<char const*>(theFile.getPointer());
       char const* lEnd = lCurPos + size;
+      char const* buf_end = theFile.getBuffer() + theFile.getSize();
+      if (lEnd > buf_end)
+        lEnd = buf_end;
 
-      while (lCurPos < lEnd)
+      while (lCurPos < lEnd && *lCurPos)
       {
-        mModelFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(std::string(lCurPos)));
-        lCurPos += strlen(lCurPos) + 1;
+        char const* next = lCurPos;
+        while (next < lEnd && *next)
+          ++next;
+        out.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(
+          std::string(lCurPos, next)));
+        lCurPos = (next < lEnd) ? next + 1 : lEnd;
       }
-    }
+    };
+
+    // - MMDX ----------------------------------------------
+    read_string_block(Header.mmdx, 'MMDX', "MMDX", mModelFilenames);
 
     // - MWMO ----------------------------------------------
-
-    theFile.seek(Header.mwmo + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MWMO');
-
-    {
-      char const* lCurPos = reinterpret_cast<char const*>(theFile.getPointer());
-      char const* lEnd = lCurPos + size;
-
-      while (lCurPos < lEnd)
-      {
-        mWMOFilenames.push_back(BlizzardArchive::ClientData::normalizeFilenameInternal(std::string(lCurPos)));
-        lCurPos += strlen(lCurPos) + 1;
-      }
-    }
+    read_string_block(Header.mwmo, 'MWMO', "MWMO", mWMOFilenames);
 
     // - MDDF ----------------------------------------------
-
-    theFile.seek(Header.mddf + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MDDF');
-
-    ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(theFile.getPointer());
-    for (unsigned int i = 0; i < size / sizeof(ENTRY_MDDF); ++i)
+    if (Header.mddf != 0)
     {
-      lModelInstances.push_back(mddf_ptr[i]);
+      theFile.seek(Header.mddf + 0x14);
+      theFile.read(&fourcc, 4);
+      theFile.read(&size, 4);
+
+      if (fourcc == 'MDDF' && size >= sizeof(ENTRY_MDDF)
+          && theFile.getPos() + size <= theFile.getSize())
+      {
+        ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(theFile.getPointer());
+        unsigned int const count = size / sizeof(ENTRY_MDDF);
+        for (unsigned int i = 0; i < count; ++i)
+          lModelInstances.push_back(mddf_ptr[i]);
+      }
     }
 
     // - MODF ----------------------------------------------
-
-    theFile.seek(Header.modf + 0x14);
-    theFile.read(&fourcc, 4);
-    theFile.read(&size, 4);
-
-    assert(fourcc == 'MODF');
-
-    ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(theFile.getPointer());
-    for (unsigned int i = 0; i < size / sizeof(ENTRY_MODF); ++i)
+    if (Header.modf != 0)
     {
-      lWMOInstances.push_back(modf_ptr[i]);
-      if(lWMOInstances[i].scale == 0.0f)
-        lWMOInstances[i].scale = 1024.0f;
+      theFile.seek(Header.modf + 0x14);
+      theFile.read(&fourcc, 4);
+      theFile.read(&size, 4);
+
+      if (fourcc == 'MODF' && size >= sizeof(ENTRY_MODF)
+          && theFile.getPos() + size <= theFile.getSize())
+      {
+        ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(theFile.getPointer());
+        unsigned int const count = size / sizeof(ENTRY_MODF);
+        for (unsigned int i = 0; i < count; ++i)
+        {
+          lWMOInstances.push_back(modf_ptr[i]);
+          if (lWMOInstances.back().scale == 0.0f)
+            lWMOInstances.back().scale = 1024.0f;
+        }
+      }
     }
   }
 
@@ -341,42 +463,64 @@ void MapTile::finishLoading()
     theFile.read(&size, 4);
 
     int ofsW = Header.mh2o + 0x14 + 0x8;
-    assert(fourcc == 'MH2O');
-
-    Water.readFromFile(theFile, ofsW);
-
-    // Water.update_underground_vertices_depth();
+    if (fourcc == 'MH2O')
+    {
+      try
+      {
+        Water.readFromFile(theFile, ofsW, static_cast<size_t>(size));
+      }
+      catch (std::exception const& e)
+      {
+        LogError << "MH2O parse failed for tile " << index.x << "," << index.z
+                 << ": " << e.what() << " (continuing without liquid)" << std::endl;
+      }
+    }
+    else
+    {
+      LogError << "MH2O offset does not point at MH2O chunk (got fourcc "
+               << fourcc << ") on tile " << index.x << "," << index.z << std::endl;
+    }
   }
 
   // - MFBO ----------------------------------------------
 
-  if (mFlags & 1)
+  if ((mFlags & 1) && Header.mfbo != 0)
   {
     theFile.seek(Header.mfbo + 0x14);
     theFile.read(&fourcc, 4);
     theFile.read(&size, 4);
 
-    assert(fourcc == 'MFBO');
-
     int16_t mMaximum[9], mMinimum[9];
-    theFile.read(mMaximum, sizeof(mMaximum));
-    theFile.read(mMinimum, sizeof(mMinimum));
-
-    const float xPositions[] = { this->xbase, this->xbase + 266.0f, this->xbase + 533.0f };
-    const float yPositions[] = { this->zbase, this->zbase + 266.0f, this->zbase + 533.0f };
-
-    for (int y = 0; y < 3; y++)
+    if (fourcc == 'MFBO' && size >= sizeof(mMaximum) + sizeof(mMinimum))
     {
-      for (int x = 0; x < 3; x++)
-      {
-        int pos = x + y * 3;
-        // fix bug with old noggit version inverting values
-        auto&& z{ std::minmax (mMinimum[pos], mMaximum[pos]) };
+      theFile.read(mMaximum, sizeof(mMaximum));
+      theFile.read(mMinimum, sizeof(mMinimum));
 
-        mMinimumValues[pos] = { xPositions[x], static_cast<float>(z.first), yPositions[y] };
-        mMaximumValues[pos] = { xPositions[x], static_cast<float>(z.second), yPositions[y] };
+      const float xPositions[] = { this->xbase, this->xbase + 266.0f, this->xbase + 533.0f };
+      const float yPositions[] = { this->zbase, this->zbase + 266.0f, this->zbase + 533.0f };
+
+      for (int y = 0; y < 3; y++)
+      {
+        for (int x = 0; x < 3; x++)
+        {
+          int pos = x + y * 3;
+          // fix bug with old noggit version inverting values
+          auto&& z{ std::minmax (mMinimum[pos], mMaximum[pos]) };
+
+          mMinimumValues[pos] = { xPositions[x], static_cast<float>(z.first), yPositions[y] };
+          mMaximumValues[pos] = { xPositions[x], static_cast<float>(z.second), yPositions[y] };
+        }
       }
     }
+    else
+    {
+      LogError << "MFBO missing/invalid on tile " << index.x << "," << index.z << std::endl;
+      mFlags &= ~1u;
+    }
+  }
+  else if (mFlags & 1)
+  {
+    mFlags &= ~1u;
   }
 
   // - MTXF ----------------------------------------------
@@ -404,6 +548,46 @@ void MapTile::finishLoading()
       }
   }
 
+  // - MTXP (MoP+ height-blend params; not referenced from MHDR — scan after textures) ---
+  {
+    char const* buf = theFile.getBuffer();
+    std::size_t const buflen = theFile.getSize();
+    for (std::size_t pos = 0; pos + 8 <= buflen; )
+    {
+      std::uint32_t cc = 0;
+      std::uint32_t sz = 0;
+      std::memcpy(&cc, buf + pos, 4);
+      std::memcpy(&sz, buf + pos + 4, 4);
+      std::size_t const next = pos + 8u + static_cast<std::size_t>(sz);
+      if (next > buflen)
+        break;
+      if (cc == 'MTXP' && sz >= sizeof(mtxp_entry) && !mTextureFilenames.empty())
+      {
+        std::size_t const count = sz / sizeof(mtxp_entry);
+        std::size_t const n = std::min(count, mTextureFilenames.size());
+        for (std::size_t i = 0; i < n; ++i)
+        {
+          mtxp_entry entry{};
+          std::memcpy(&entry, buf + pos + 8 + i * sizeof(mtxp_entry), sizeof(mtxp_entry));
+          texture_heightmapping_data hdata;
+          hdata.uvScale = (entry.flags >> 4) & 0xFu;
+          hdata.heightScale = entry.height_scale;
+          hdata.heightOffset = entry.height_offset;
+          _mtxp_height_data[mTextureFilenames[i]] = hdata;
+        }
+
+        if (auto* proj = Noggit::Project::CurrentProject::get())
+        {
+          for (auto const& [tex, data] : _mtxp_height_data)
+            proj->ExtraMapData.ObserveAdtHeightMapping(tex, data);
+          proj->ExtraMapData.PersistGlobalHeightMappingIfNeeded(proj->ProjectPath);
+        }
+        break;
+      }
+      pos = next;
+    }
+  }
+
   // - Done. ---------------------------------------------
 
   // - Load textures -------------------------------------
@@ -412,20 +596,82 @@ void MapTile::finishLoading()
 
   if (_load_models)
   {
+    // Legion+: MDDF flag 0x40 / MODF flag 0x8 mean nameID is a FileDataID (no MMDX/MWMO).
+    constexpr std::uint16_t k_mddf_entry_is_fdid = 0x40;
+    constexpr std::uint16_t k_modf_entry_is_fdid = 0x8;
+
+    auto* listfile = client_data ? client_data->listfile() : nullptr;
+
+    auto resolve_fdid_path = [&](std::uint32_t fdid) -> std::string
+    {
+      if (!listfile || fdid == 0)
+        return {};
+      std::string path = listfile->getPath(fdid);
+      if (path.empty())
+        return {};
+      return BlizzardArchive::ClientData::normalizeFilenameInternal(std::move(path));
+    };
+
     // - Load WMOs -----------------------------------------
 
     for (auto const& object : lWMOInstances)
     {
-      add_model(_world->add_wmo_instance(WMOInstance(mWMOFilenames[object.nameID],
-                                                     &object, _context), _tile_is_being_reloaded, false));
+      std::string path;
+      bool const as_fdid = (object.flags & k_modf_entry_is_fdid) != 0
+                        || object.nameID >= mWMOFilenames.size();
+      if (as_fdid)
+        path = resolve_fdid_path(object.nameID);
+      else
+        path = mWMOFilenames[object.nameID];
+
+      if (path.empty())
+      {
+        LogError << "MODF could not resolve nameID " << object.nameID << " on tile "
+                 << index.x << "," << index.z << std::endl;
+        continue;
+      }
+
+      try
+      {
+        add_model(_world->add_wmo_instance(WMOInstance(path, &object, _context),
+                                           _tile_is_being_reloaded, false));
+      }
+      catch (std::exception const& e)
+      {
+        LogError << "WMO instance " << path << " failed on tile " << index.x << "," << index.z
+                 << ": " << e.what() << std::endl;
+      }
     }
 
     // - Load M2s ------------------------------------------
 
     for (auto const& model : lModelInstances)
     {
-      add_model(_world->add_model_instance(ModelInstance(mModelFilenames[model.nameID],
-                                                         &model, _context), _tile_is_being_reloaded, false));
+      std::string path;
+      bool const as_fdid = (model.flags & k_mddf_entry_is_fdid) != 0
+                        || model.nameID >= mModelFilenames.size();
+      if (as_fdid)
+        path = resolve_fdid_path(model.nameID);
+      else
+        path = mModelFilenames[model.nameID];
+
+      if (path.empty())
+      {
+        LogError << "MDDF could not resolve nameID " << model.nameID << " on tile "
+                 << index.x << "," << index.z << std::endl;
+        continue;
+      }
+
+      try
+      {
+        add_model(_world->add_model_instance(ModelInstance(path, &model, _context),
+                                             _tile_is_being_reloaded, false));
+      }
+      catch (std::exception const& e)
+      {
+        LogError << "M2 instance " << path << " failed on tile " << index.x << "," << index.z
+                 << ": " << e.what() << std::endl;
+      }
     }
 
     _world->need_model_updates = true;
@@ -435,15 +681,32 @@ void MapTile::finishLoading()
 
   for (int nextChunk = 0; nextChunk < 256; ++nextChunk)
   {
-    theFile.seek(lMCNKOffsets[nextChunk]);
-
     unsigned x = nextChunk / 16;
     unsigned z = nextChunk % 16;
 
-    mChunks[x][z] = std::make_unique<MapChunk> (this, &theFile, mBigAlpha, _mode, _context, false, 0, _load_textures);
+    std::uint32_t const mcnk_ofs = lMCNKOffsets[nextChunk];
+    if (mcnk_ofs == 0 || mcnk_ofs + 8 > theFile.getSize())
+    {
+      LogError << "Invalid MCNK offset " << mcnk_ofs << " for chunk " << nextChunk
+               << " on tile " << index.x << "," << index.z << " — using empty chunk" << std::endl;
+      mChunks[x][z] = std::make_unique<MapChunk> (this, nullptr, mBigAlpha, _mode, _context, true, nextChunk, _load_textures);
+      _renderer.initChunkData(mChunks[x][z].get());
+      continue;
+    }
 
-    auto& chunk = mChunks[x][z];
-    _renderer.initChunkData(chunk.get());
+    try
+    {
+      theFile.seek(mcnk_ofs);
+      mChunks[x][z] = std::make_unique<MapChunk> (this, &theFile, mBigAlpha, _mode, _context, false, 0, _load_textures);
+      _renderer.initChunkData(mChunks[x][z].get());
+    }
+    catch (std::exception const& e)
+    {
+      LogError << "MapChunk " << nextChunk << " failed on tile " << index.x << "," << index.z
+               << ": " << e.what() << " — using empty chunk" << std::endl;
+      mChunks[x][z] = std::make_unique<MapChunk> (this, nullptr, mBigAlpha, _mode, _context, true, nextChunk, _load_textures);
+      _renderer.initChunkData(mChunks[x][z].get());
+    }
   }
   // can be cleared after texture sets are loaded in chunks.
   mTextureFilenames.clear();
@@ -459,6 +722,27 @@ void MapTile::finishLoading()
   finished = true;
   _tile_is_being_reloaded = false;
   _state_changed.notify_all();
+
+  }
+  catch (std::exception const& e)
+  {
+    LogError << "Tile " << index.x << "," << index.z << " load failed: " << e.what()
+             << " — recovering so the tile still renders" << std::endl;
+    recover_missing_chunks();
+    finished = true;
+    _tile_is_being_reloaded = false;
+    _state_changed.notify_all();
+  }
+  catch (...)
+  {
+    LogError << "Tile " << index.x << "," << index.z
+             << " load failed with unknown error — recovering so the tile still renders"
+             << std::endl;
+    recover_missing_chunks();
+    finished = true;
+    _tile_is_being_reloaded = false;
+    _state_changed.notify_all();
+  }
 }
 
 bool MapTile::isTile(int pX, int pZ)
@@ -599,10 +883,20 @@ std::vector<MapChunk*> MapTile::chunks_in_rect (glm::vec3 const& pos, float radi
 
 bool MapTile::GetVertex(float x, float z, glm::vec3 *V)
 {
+  if (loading_failed() || !finished.load() || !V)
+    return false;
+
   int xcol = (int)((x - xbase) / CHUNKSIZE);
   int ycol = (int)((z - zbase) / CHUNKSIZE);
 
-  return xcol >= 0 && xcol <= 15 && ycol >= 0 && ycol <= 15 && mChunks[ycol][xcol]->GetVertex(x, z, V);
+  if (xcol < 0 || xcol > 15 || ycol < 0 || ycol > 15)
+    return false;
+
+  MapChunk* chunk = mChunks[ycol][xcol].get();
+  if (!chunk)
+    return false;
+
+  return chunk->GetVertex(x, z, V);
 }
 
 void MapTile::getVertexInternal(float x, float z, glm::vec3* v)
@@ -1019,7 +1313,8 @@ void MapTile::save(World* world, bool save_using_mclq_liquids)
     lCurrentPosition += static_cast<int>(8 + chunkSize);
   }
 
-  // NGPL (Noggit): per-ADT point light cap (4-byte). Omitted when using the WoW default (104).
+  // NGPL (Noggit-only, not a wowlib/client chunk): per-ADT point light cap (4-byte).
+  // Omitted when using the WoW default (104). Must not be stripped on ADT save.
   if (_adt_point_light_cap_enc != 0)
   {
     std::uint32_t const u = static_cast<std::uint32_t>(_adt_point_light_cap_enc);
@@ -1957,9 +2252,18 @@ Noggit::Rendering::FlightBoundsRender* MapTile::flightBoundsRenderer()
   return &_fl_bounds_render;
 }
 
-const texture_heightmapping_data& MapTile::GetTextureHeightMappingData(const std::string& name) const
+const texture_heightmapping_data MapTile::GetTextureHeightMappingData(const std::string& name) const
 {
-    return Noggit::Project::CurrentProject::get()->ExtraMapData.GetTextureHeightDataForADT(_world->mapIndex._map_id, index,name);
+    auto from_project = Noggit::Project::CurrentProject::get()->ExtraMapData.GetTextureHeightDataForADT(_world->mapIndex._map_id, index,name);
+    // Non-default project/extraData settings win. Otherwise use MTXP embedded in the ADT.
+    if (from_project.heightScale != 0.0f || from_project.heightOffset != 1.0f || from_project.uvScale != 0)
+      return from_project;
+
+    auto found = _mtxp_height_data.find(name);
+    if (found != _mtxp_height_data.end())
+      return found->second;
+
+    return from_project;
 }
 
 void MapTile::forceAlphaUpdate()

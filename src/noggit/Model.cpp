@@ -4,6 +4,7 @@
 #include <math/ray.hpp>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/Log.h>
+#include <noggit/m2/M2Loader.hpp>
 #include <noggit/Model.h>
 #include <noggit/Particle.h>
 #include <noggit/project/CurrentProject.hpp>
@@ -17,6 +18,7 @@
 #include <glm/gtx/quaternion.hpp>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -192,56 +194,43 @@ namespace
   }
 }
 
-Model::Model(const std::string& filename, Noggit::NoggitRenderContext context)
-  : AsyncObject(filename)
+Model::Model(BlizzardArchive::Listfile::FileKey const& file_key, Noggit::NoggitRenderContext context)
+  : AsyncObject(file_key)
   , _context(context)
   , _renderer(this)
 {
-  // memset(&header, 0, sizeof(ModelHeader));
 }
 
 void Model::finishLoading()
 {
-  BlizzardArchive::ClientFile f(_file_key.filepath(), Noggit::Application::NoggitApplication::instance()->clientData());
+  BlizzardArchive::ClientFile f(_file_key, Noggit::Application::NoggitApplication::instance()->clientData());
 
-  if (f.isEof() || f.getSize() < sizeof(ModelHeader))
+  if (f.isEof() || f.getSize() < 4)
   {
-    // LogError << "Error loading file \"" << _file_key.stringRepr() << "\". Aborting to load model." << std::endl;
-    // finished = true;
     throw std::runtime_error("Error loading file \"" + _file_key.stringRepr() + "\". Aborting to load model.");
   }
 
-  ModelHeader header;
-
-  memcpy(&header, f.getBuffer(), sizeof(ModelHeader));
-
-
+  Noggit::M2::LoadedData loaded = Noggit::M2::load(f, _file_key);
+  ModelHeader header = loaded.header;
 
   uint32_t packed_version = 0;
   std::memcpy(&packed_version, header.version, sizeof(packed_version));
 
-  bool valid_version = false;
-
-  // Noggit::Application::NoggitApplication::instance()->clientData()->version()// either should work
-  switch (Noggit::Project::CurrentProject::get()->projectVersion )
-  {
-  case Noggit::Project::ProjectVersion::WOTLK:
-    if (packed_version == m2_version_wrath)
-      valid_version = true;
-    break;
-  case Noggit::Project::ProjectVersion::SL:
-    if (packed_version == m2_version_legion_bfa_sl)
-      valid_version = true;
-    break;
-  default:
-    assert(false);
-  }
-
-  if (!valid_version)
+  if (!Noggit::M2::is_valid_m2_version(packed_version, Noggit::Project::CurrentProject::get()->projectVersion))
   [[unlikely]]
   {
     LogError << "Error loading file \"" << _file_key.stringRepr() << "\". Wrong M2 version " << std::to_string(packed_version) << std::endl;
     throw std::runtime_error("Error loading file \"" + _file_key.stringRepr() + "\". Wrong M2 version " + std::to_string(packed_version));
+  }
+
+  // MD21 stores the MD20 header mid-file; remap the ClientFile so offsets are relative to it.
+  if (loaded.is_md21 && loaded.data_base && loaded.data_size > 0)
+  {
+    std::vector<char> md20_buf(
+      reinterpret_cast<char const*>(loaded.data_base)
+    , reinterpret_cast<char const*>(loaded.data_base) + loaded.data_size);
+    f.setBuffer(md20_buf);
+    f.seek(0);
   }
 
   // blend mode override
@@ -277,7 +266,7 @@ void Model::finishLoading()
   }
 
   //! \todo  This takes a biiiiiit long. Have a look at this.
-  initCommon(f, header);
+  initCommon(f, header, &loaded.texture_file_data_ids);
 
   if (animated)
   {
@@ -470,7 +459,8 @@ namespace
 }
 
 
-void Model::initCommon(const BlizzardArchive::ClientFile& f, ModelHeader& header)
+void Model::initCommon(const BlizzardArchive::ClientFile& f, ModelHeader& header
+                     , std::vector<std::uint32_t> const* texture_file_data_ids)
 {
   // vertices, normals, texcoords
   _vertices = M2Array<ModelVertex>(f, header.ofsVertices, header.nVertices);
@@ -512,23 +502,40 @@ void Model::initCommon(const BlizzardArchive::ClientFile& f, ModelHeader& header
   {
     if (texdef[i].type == 0)
     {
-      if (texdef[i].nameLen == 0)
+      // BFA+/Shadowlands: filenames are zeroed; TXID supplies FileDataIDs.
+      BlizzardArchive::Listfile::FileKey tex_key;
+      if (texture_file_data_ids && i < texture_file_data_ids->size() && (*texture_file_data_ids)[i] != 0)
       {
-        LogDebug << "Texture " << i << " has a lenght of 0 for '" << _file_key.stringRepr() << std::endl;
+        tex_key = BlizzardArchive::Listfile::FileKey((*texture_file_data_ids)[i]);
+        auto* client = Noggit::Application::NoggitApplication::instance()->clientData();
+        tex_key.deduceOtherComponent(client->listfile());
+      }
+
+      if (!tex_key.hasFileDataID() && !tex_key.hasFilepath() && texdef[i].nameLen > 0)
+      {
+        const char* blp_ptr = f.getBuffer() + texdef[i].nameOfs;
+        // some tools export the size without accounting for the \0
+        bool invalid_size = *(blp_ptr + texdef[i].nameLen - 1) != '\0';
+        std::string path(blp_ptr, texdef[i].nameLen - (invalid_size ? 0 : 1));
+        tex_key = BlizzardArchive::Listfile::FileKey(path);
+      }
+
+      if (!tex_key.hasFileDataID() && !tex_key.hasFilepath())
+      {
+        LogDebug << "Texture " << i << " has no path/TXID for '" << _file_key.stringRepr() << "'" << std::endl;
+        _specialTextures[i] = -1;
+        _textureFilenames[i] = BlizzardArchive::Listfile::FileKey("tileset/generic/black.blp");
         continue;
       }
 
       _specialTextures[i] = -1;
-      const char* blp_ptr = f.getBuffer() + texdef[i].nameOfs;
-      // some tools export the size without accounting for the \0
-      bool invalid_size = *(blp_ptr + texdef[i].nameLen-1) != '\0';
-      _textureFilenames[i] = std::string(blp_ptr, texdef[i].nameLen - (invalid_size ? 0 : 1));
+      _textureFilenames[i] = std::move(tex_key);
     }
     else
     {
 #ifndef NO_REPLACIBLE_TEXTURES_HACK
       _specialTextures[i] = -1;
-      _textureFilenames[i] = "tileset/generic/black.blp";
+      _textureFilenames[i] = BlizzardArchive::Listfile::FileKey("tileset/generic/black.blp");
 #else
       //! \note special texture - only on characters and such... Noggit should not even render these.
       //! \todo Check if this is actually correct. Or just remove it.
@@ -537,9 +544,9 @@ void Model::initCommon(const BlizzardArchive::ClientFile& f, ModelHeader& header
 
       if (texdef[i].type == 3)
       {
-        _textureFilenames[i] = "Item\\ObjectComponents\\Weapon\\ArmorReflect4.BLP";
+        _textureFilenames[i] = BlizzardArchive::Listfile::FileKey("Item\\ObjectComponents\\Weapon\\ArmorReflect4.BLP");
         // a fix for weapons with type-3 textures.
-        _replaceTextures.emplace (texdef[i].type, _textureFilenames[i]);
+        _replaceTextures.emplace (texdef[i].type, scoped_blp_texture_reference(_textureFilenames[i].filepath(), _context));
       }
 #endif
     }

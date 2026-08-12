@@ -244,7 +244,8 @@ private:
   std::vector<glm::vec2> _texcoords;
   std::vector<glm::vec2> _texcoords_2;
   std::vector<glm::vec4> _vertex_colors;
-  std::vector<uint16_t> _indices;
+  //! MOVI (u16) or MOVX (u32, SL 9.0+); always stored as u32 for drawing.
+  std::vector<uint32_t> _indices;
 
   std::optional<std::vector<wmo_bsp_node>> _bsp_tree_nodes;
   std::optional<std::vector<uint16_t>> _bsp_indices;

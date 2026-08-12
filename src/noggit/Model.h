@@ -12,12 +12,15 @@
 #include <opengl/types.hpp>
 
 #include <ClientFile.hpp>
+#include <Listfile.hpp>
 
 #include <glm/mat4x4.hpp>
 
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
+#include <cstdint>
 
 class Bone;
 class Model;
@@ -161,7 +164,7 @@ public:
     return std::vector<T>(start, start + count);
   }
 
-  Model(const std::string& name, Noggit::NoggitRenderContext context );
+  Model(BlizzardArchive::Listfile::FileKey const& file_key, Noggit::NoggitRenderContext context);
 
   std::vector<std::pair<float, std::tuple<int, int, int>>> intersect (glm::mat4x4 const& model_view, math::ray const&, int animtime, bool calc_anims);
 
@@ -215,7 +218,7 @@ public:
   // Texture data
   // ===============================
   std::vector<scoped_blp_texture_reference> _textures;
-  std::vector<std::string> _textureFilenames;
+  std::vector<BlizzardArchive::Listfile::FileKey> _textureFilenames;
   std::map<std::size_t, scoped_blp_texture_reference> _replaceTextures;
   std::vector<int> _specialTextures;
   std::vector<bool> _useReplaceTextures;
@@ -277,7 +280,8 @@ private:
 
   Noggit::NoggitRenderContext _context;
 
-  void initCommon(const BlizzardArchive::ClientFile& f, ModelHeader& header);
+  void initCommon(const BlizzardArchive::ClientFile& f, ModelHeader& header
+                , std::vector<std::uint32_t> const* texture_file_data_ids = nullptr);
   bool isAnimated(const BlizzardArchive::ClientFile& f, ModelHeader& header);
   void initAnimated(const BlizzardArchive::ClientFile& f, ModelHeader& header);
 

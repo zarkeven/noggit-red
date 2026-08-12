@@ -3,8 +3,9 @@
 #pragma once
 
 #include <glm/vec3.hpp>
-#include <cstdint>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 
 union mcnk_flags
 {
@@ -341,18 +342,23 @@ struct mclq
 
 struct MPHD
 {
-  uint32_t flags;
-  //! WotLK: second MPHD dword. Retail (≥8.1): @ref lgtFileDataID is the *second* dword on disk (no `something`).
-  uint32_t something;
-  //! `_lgt.wdt` FileDataID (retail ≥8.1). On disk immediately after `flags` for modern WDTs.
-  uint32_t lgtFileDataID;
-  uint32_t occFileDataID;
-  uint32_t fogsFileDataID;
-  uint32_t mpvFileDataID;
-  uint32_t texFileDataID;
-  uint32_t wdlFileDataID;
+  uint32_t flags = 0;
+  //! WotLK: second MPHD dword. Zeroed when loading retail ≥8.1 WDTs (wowlib SMMapHeader).
+  uint32_t something = 0;
+  //! Retail ≥8.1 FileDataIDs (on disk immediately after `flags`: lgt, occ, fogs, mpv, tex, wdl, pd4).
+  uint32_t lgtFileDataID = 0;
+  uint32_t occFileDataID = 0;
+  uint32_t fogsFileDataID = 0;
+  uint32_t mpvFileDataID = 0;
+  uint32_t texFileDataID = 0;
+  uint32_t wdlFileDataID = 0;
+  //! Retail 8th MPHD dword. Not part of the WotLK on-disk layout; omitted from WotLK writes.
+  uint32_t pd4FileDataID = 0;
 };
-static_assert(sizeof(MPHD) == 32, "MPHD must remain 32 bytes for WDT I/O");
+//! Both WotLK and retail MPHD chunks are 32 bytes on disk (wowlib `SMMapHeader`).
+inline constexpr std::uint32_t MPHD_ON_DISK_SIZE = 32;
+static_assert(offsetof(MPHD, pd4FileDataID) == MPHD_ON_DISK_SIZE,
+              "pd4FileDataID must sit after the 32-byte on-disk MPHD prefix");
 
 struct mtxf_entry
 {
@@ -365,3 +371,13 @@ struct mtxf_entry
     */
     uint32_t unused : 31;
 };
+
+//! MoP+ MTXP: one record per MTEX entry (wowlib SMTextureParams).
+struct mtxp_entry
+{
+  uint32_t flags = 0;
+  float height_scale = 0.f;
+  float height_offset = 1.f;
+  uint32_t padding = 0;
+};
+static_assert(sizeof(mtxp_entry) == 0x10);

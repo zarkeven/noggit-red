@@ -61,7 +61,7 @@ namespace Noggit
                      {
                        return &_elements.emplace ( std::piecewise_construct
                                                  , std::forward_as_tuple (pair)
-                                                 , std::forward_as_tuple (file_key.filepath(), context, args...)
+                                                 , std::forward_as_tuple (file_key, context, args...)
                                                  ).first->second;
                      }()
                    );

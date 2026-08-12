@@ -78,7 +78,7 @@ namespace Noggit::Rendering
     t1 = 1,
     t2 = 2,
     none = 3,
-    //! World XZ mapped UV for M2 batches flagged as projected (see ModelRenderPass::initUVTypes).
+    //! Formerly used for projected batches; kept for shader enum stability (m2_vert lookup 4).
     ground = 4,
   };
 

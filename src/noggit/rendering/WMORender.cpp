@@ -152,7 +152,13 @@ bool WMORender::drawSkybox(const glm::mat4x4& model_view, const glm::vec3& camer
       continue;
     }
 
-    auto& extent(group_extents.at(i));
+    auto const extent_it = group_extents.find(i);
+    if (extent_it == group_extents.end())
+    {
+      continue;
+    }
+
+    auto const& extent = extent_it->second;
 
     if (math::is_inside_of_aabb(camera_pos, extent.first, extent.second))
     {

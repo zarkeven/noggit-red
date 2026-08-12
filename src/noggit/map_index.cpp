@@ -217,6 +217,18 @@ namespace
     if (!cd)
       return;
 
+    auto* listfile = cd->listfile()
+      ? const_cast<BlizzardArchive::Listfile::Listfile*>(cd->listfile())
+      : nullptr;
+
+    std::uint32_t resolved_fdid = lgt_file_data_id;
+    if (resolved_fdid == 0u && listfile)
+    {
+      resolved_fdid = listfile->getFileDataID(rel_disk);
+      if (resolved_fdid == 0u)
+        resolved_fdid = listfile->getFileDataID(rel_win);
+    }
+
     std::string open_key = rel_disk;
     if (!cd->exists (open_key) && cd->exists (rel_win))
       open_key = rel_win;
@@ -226,11 +238,9 @@ namespace
 
     if (!cd->exists (open_key))
     {
-      if (lgt_file_data_id != 0u && cd->listfile())
+      if (resolved_fdid != 0u && listfile)
       {
-        fdid_key = BlizzardArchive::Listfile::FileKey(
-          lgt_file_data_id,
-          const_cast<BlizzardArchive::Listfile::Listfile*>(cd->listfile()));
+        fdid_key = BlizzardArchive::Listfile::FileKey(resolved_fdid, listfile);
         if (cd->exists (fdid_key))
           use_fdid_key = true;
       }
@@ -490,8 +500,26 @@ namespace
         light.cookie_file_data_id = mtex_ids[static_cast<std::size_t>(rec.texture_index)];
       light.texture_index = -1;
 
+      world->ensureSpotLightDefaults(light);
       world->pointLights().push_back (light);
     }
+
+    // Ownership tiles follow world position after transform (disk tiles can be stale/wrong).
+    for (auto& light : world->pointLights())
+      world->syncPointLightTileFromPosition(light);
+
+    std::size_t n_point = 0;
+    std::size_t n_spot = 0;
+    for (auto const& light : world->pointLights())
+    {
+      if (light.light_type == World::MapLightType::Spot)
+        ++n_spot;
+      else
+        ++n_point;
+    }
+    Log << "Loaded " << world->pointLights().size() << " map lights from "
+        << (use_fdid_key ? ("FDID " + std::to_string(resolved_fdid)) : open_key)
+        << " (" << n_point << " point, " << n_spot << " spot)." << std::endl;
   }
 
   [[nodiscard]] bool savePointLightsToLgtWdt(std::string const& basename, World* world)
@@ -666,8 +694,8 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
 
   assert(fourcc == 'MPHD');
 
-  // Retail ≥8.1: MPHD is flags, lgtFileDataID, occ, … (wowdev WDT). WotLK: flags, something, …
-  if (client_uses_modern_wdt_mphd() && size >= 32)
+  // Retail ≥8.1: MPHD is flags, lgtFileDataID, occ, …, pd4 (wowlib SMMapHeader). WotLK: flags, something, …
+  if (client_uses_modern_wdt_mphd() && size >= MPHD_ON_DISK_SIZE)
   {
     std::uint32_t w[8];
     theFile.read (w, sizeof (w));
@@ -679,13 +707,14 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
     mphd.mpvFileDataID = w[4];
     mphd.texFileDataID = w[5];
     mphd.wdlFileDataID = w[6];
+    mphd.pd4FileDataID = w[7];
     if (size > sizeof (w))
       theFile.seekRelative (size - sizeof (w));
   }
   else
   {
     std::memset (&mphd, 0, sizeof (mphd));
-    std::uint32_t const to_read = std::min (size, static_cast<std::uint32_t>(sizeof (MPHD)));
+    std::uint32_t const to_read = std::min (size, MPHD_ON_DISK_SIZE);
     if (to_read)
       theFile.read (reinterpret_cast<char*>(&mphd), to_read);
     if (size > to_read)
@@ -694,6 +723,14 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
 
   mHasAGlobalWMO = mphd.flags & FLAG_GLOBAL_OBJECT;
   mBigAlpha = mphd.flags & FLAG_BIG_ALPHA;
+  // Outside WotLK 3.3.5, ADTs use 8-bit (big) alphamaps. Retail WDTs often omit
+  // FLAG_BIG_ALPHA; trusting the bit alone decodes MCAL as 4-bit and blacks out textures.
+  if (Noggit::Application::NoggitApplication::instance()->hasClientData()
+      && Noggit::Application::NoggitApplication::instance()->clientData()->version()
+           != BlizzardArchive::ClientVersion::WOTLK)
+  {
+    mBigAlpha = true;
+  }
   _sort_models_by_size_class = mphd.flags & FLAG_DOODADS_SORT;
 
   if (!(mphd.flags & FLAG_SHADING))
@@ -709,7 +746,9 @@ MapIndex::MapIndex (const std::string &pBasename, int map_id, World* world,
     bool const try_load = mphd.fogsFileDataID != 0u
       || (Noggit::Application::NoggitApplication::instance()->hasClientData()
           && Noggit::Application::NoggitApplication::instance()->clientData()->exists(fogs_path));
-    _world->setVolumetricFogs(try_load ? load_volumetric_fogs_from_client(basename) : std::vector<VolumetricFogEntry>{});
+    _world->setVolumetricFogs(try_load
+      ? load_volumetric_fogs_from_client(basename, mphd.fogsFileDataID)
+      : std::vector<VolumetricFogEntry>{});
   }
 
   // - MAIN ----------------------------------------------
@@ -823,10 +862,10 @@ void MapIndex::save()
   curPos += 8 + 0x4;
   //  }
 
-  // MPHD
+  // MPHD (32 bytes on disk for both WotLK and retail; see MPHD_ON_DISK_SIZE / wowlib SMMapHeader)
   //  {
   wdtFile.Extend(8);
-  SetChunkHeader(wdtFile, curPos, 'MPHD', sizeof(MPHD));
+  SetChunkHeader(wdtFile, curPos, 'MPHD', MPHD_ON_DISK_SIZE);
   curPos += 8;
 
   mphd.flags = 0;
@@ -875,15 +914,16 @@ void MapIndex::save()
       mphd.mpvFileDataID,
       mphd.texFileDataID,
       mphd.wdlFileDataID,
-      0u, // pd4FileDataID
+      mphd.pd4FileDataID,
     };
     wdtFile.Insert (curPos, sizeof (pack), reinterpret_cast<char const*>(pack));
     curPos += sizeof (pack);
   }
   else
   {
-    wdtFile.Insert (curPos, sizeof (MPHD), reinterpret_cast<char*>(&mphd));
-    curPos += sizeof (MPHD);
+    // WotLK: only the first 32 bytes (flags + something + unused tail). Do not write pd4FileDataID.
+    wdtFile.Insert (curPos, MPHD_ON_DISK_SIZE, reinterpret_cast<char*>(&mphd));
+    curPos += MPHD_ON_DISK_SIZE;
   }
 
   // MAIN

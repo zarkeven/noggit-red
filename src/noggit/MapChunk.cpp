@@ -14,6 +14,7 @@
 #include <noggit/MapHeaders.h>
 #include <noggit/MapTile.h> // MapTile
 #include <noggit/Misc.h>
+#include <noggit/adt/AdtCommon.hpp>
 #include <noggit/ModelInstance.h>
 #include <noggit/texture_set.hpp>
 #include <noggit/TileWater.hpp>
@@ -26,6 +27,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <optional>
 #include <QImage>
 
 namespace
@@ -182,6 +184,7 @@ MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAl
   hasMCCV = false;
 
   MapChunkHeader tmp_chunk_header;
+  std::uint32_t mcnk_payload_size = 0;
 
   // - MCNK ----------------------------------------------
   {
@@ -190,7 +193,7 @@ MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAl
 
     assert(fourcc == 'MCNK');
 
-
+    mcnk_payload_size = size;
 
     f->read(&tmp_chunk_header, sizeof(MapChunkHeader));
 
@@ -204,7 +207,20 @@ MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAl
     px = tmp_chunk_header.ix;
     py = tmp_chunk_header.iy;
 
-    holes = tmp_chunk_header.holes;
+    holes = static_cast<int>(tmp_chunk_header.holes);
+
+    // MoP+: high_res_holes reuses ofsHeight/ofsNormal as a 64-bit hole mask.
+    // MCVT/MCNR must be found by scanning sub-chunks (wowlib/SMChunk).
+    _holes_high_res = 0;
+    if (header_flags.flags.high_res_holes)
+    {
+      _holes_high_res = (static_cast<std::uint64_t>(tmp_chunk_header.ofsNormal) << 32)
+                      | tmp_chunk_header.ofsHeight;
+      holes = static_cast<int>(Noggit::Adt::read_holes_from_header(
+        header_flags
+      , _holes_high_res
+      , static_cast<std::uint16_t>(tmp_chunk_header.holes & 0xFFFFu)));
+    }
 
     // correct the x and z values ^_^
     zbase = zbase*-1.0f + ZEROPOINT;
@@ -212,6 +228,27 @@ MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAl
 
 
   }
+
+  auto find_mcnk_subchunk = [&](std::uint32_t magic) -> std::optional<std::size_t>
+  {
+    // `base` is the file offset of the MCNK fourcc; payload size includes SMChunk.
+    std::size_t pos = base + 8 + sizeof(MapChunkHeader);
+    std::size_t const end = base + 8 + mcnk_payload_size;
+    while (pos + 8 <= end)
+    {
+      f->seek(pos);
+      std::uint32_t cc = 0;
+      std::uint32_t sz = 0;
+      f->read(&cc, 4);
+      f->read(&sz, 4);
+      if (cc == magic)
+        return pos - base;
+      if (sz > end - (pos + 8))
+        break;
+      pos += 8u + static_cast<std::size_t>(sz);
+    }
+    return std::nullopt;
+  };
 
   if (!load_textures)
   {
@@ -223,29 +260,68 @@ MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAl
 
   // - MCVT ----------------------------------------------
   {
-    f->seek(base + tmp_chunk_header.ofsHeight);
+    std::size_t mcvt_ofs = tmp_chunk_header.ofsHeight;
+    if (header_flags.flags.high_res_holes)
+    {
+      if (auto found = find_mcnk_subchunk('MCVT'))
+        mcvt_ofs = *found;
+      else
+      {
+        LogError << "MCNK high_res_holes set but MCVT sub-chunk not found at ["
+                 << px << ", " << py << "]" << std::endl;
+        mcvt_ofs = 0;
+      }
+    }
+
+    f->seek(base + mcvt_ofs);
     f->read(&fourcc, 4);
     f->read(&size, 4);
 
-    assert(fourcc == 'MCVT');
-
-    glm::vec3 *ttv = mVertices;
-
-    // vertices
-    for (int j = 0; j < 17; ++j) {
-      for (int i = 0; i < ((j % 2) ? 8 : 9); ++i) {
-        float h, xpos, zpos;
-        f->read(&h, 4);
-        xpos = i * UNITSIZE;
-        zpos = j * 0.5f * UNITSIZE;
-        if (j % 2) {
-          xpos += UNITSIZE*0.5f;
-        }
-        glm::vec3 v = glm::vec3(xbase + xpos, ybase + h, zbase + zpos);
-        *ttv++ = v;
-        vmin.y = std::min(vmin.y, v.y);
-        vmax.y = std::max(vmax.y, v.y);
+    // Offset may be garbage (or high_res mask mis-detected); scan as fallback.
+    if (fourcc != 'MCVT')
+    {
+      if (auto found = find_mcnk_subchunk('MCVT'))
+      {
+        mcvt_ofs = *found;
+        f->seek(base + mcvt_ofs);
+        f->read(&fourcc, 4);
+        f->read(&size, 4);
       }
+    }
+
+    if (fourcc == 'MCVT')
+    {
+      glm::vec3 *ttv = mVertices;
+
+      // vertices
+      for (int j = 0; j < 17; ++j) {
+        for (int i = 0; i < ((j % 2) ? 8 : 9); ++i) {
+          float h, xpos, zpos;
+          f->read(&h, 4);
+          xpos = i * UNITSIZE;
+          zpos = j * 0.5f * UNITSIZE;
+          if (j % 2) {
+            xpos += UNITSIZE*0.5f;
+          }
+          glm::vec3 v = glm::vec3(xbase + xpos, ybase + h, zbase + zpos);
+          *ttv++ = v;
+          vmin.y = std::min(vmin.y, v.y);
+          vmax.y = std::max(vmax.y, v.y);
+        }
+      }
+    }
+    else
+    {
+      LogError << "MCVT missing for chunk [" << px << ", " << py
+               << "]; heights left flat" << std::endl;
+      for (int i = 0; i < mapbufsize; ++i)
+      {
+        mVertices[i] = glm::vec3(
+          xbase + (i % 9) * UNITSIZE
+        , ybase
+        , zbase + (i / 9) * UNITSIZE * 0.5f);
+      }
+      vmin.y = vmax.y = ybase;
     }
 
     vmin.x = xbase;
@@ -261,23 +337,58 @@ MapChunk::MapChunk(MapTile* maintile, BlizzardArchive::ClientFile* f, bool bigAl
   }
   // - MCNR ----------------------------------------------
   {
-    f->seek(base + tmp_chunk_header.ofsNormal);
+    std::size_t mcnr_ofs = tmp_chunk_header.ofsNormal;
+    if (header_flags.flags.high_res_holes)
+    {
+      if (auto found = find_mcnk_subchunk('MCNR'))
+        mcnr_ofs = *found;
+      else
+      {
+        LogError << "MCNK high_res_holes set but MCNR sub-chunk not found at ["
+                 << px << ", " << py << "]" << std::endl;
+        mcnr_ofs = 0;
+      }
+    }
+
+    f->seek(base + mcnr_ofs);
     f->read(&fourcc, 4);
     f->read(&size, 4);
 
-    assert(fourcc == 'MCNR');
+    if (fourcc != 'MCNR')
+    {
+      if (auto found = find_mcnk_subchunk('MCNR'))
+      {
+        mcnr_ofs = *found;
+        f->seek(base + mcnr_ofs);
+        f->read(&fourcc, 4);
+        f->read(&size, 4);
+      }
+    }
 
     auto& tile_buffer = mt->getChunkHeightmapBuffer();
     int chunk_start = (px * 16 + py) * mapbufsize * 4;
 
-    char nor[3];
-    for (int i = 0; i < mapbufsize; ++i)
+    if (fourcc == 'MCNR')
     {
-      f->read(nor, 3);
-      int pixel_start = chunk_start + i * 4;
-      tile_buffer[pixel_start] = nor[0] / 127.0f;
-      tile_buffer[pixel_start + 1] = nor[2] / 127.0f;
-      tile_buffer[pixel_start + 2] = nor[1] / 127.0f;
+      char nor[3];
+      for (int i = 0; i < mapbufsize; ++i)
+      {
+        f->read(nor, 3);
+        int pixel_start = chunk_start + i * 4;
+        tile_buffer[pixel_start] = nor[0] / 127.0f;
+        tile_buffer[pixel_start + 1] = nor[2] / 127.0f;
+        tile_buffer[pixel_start + 2] = nor[1] / 127.0f;
+      }
+    }
+    else
+    {
+      for (int i = 0; i < mapbufsize; ++i)
+      {
+        int pixel_start = chunk_start + i * 4;
+        tile_buffer[pixel_start] = 0.0f;
+        tile_buffer[pixel_start + 1] = 1.0f;
+        tile_buffer[pixel_start + 2] = 0.0f;
+      }
     }
   }
   // - MCSH ----------------------------------------------
@@ -1855,6 +1966,22 @@ void MapChunk::paintDetailDoodadsExclusion(glm::vec3 const& pos, float radius, b
 
 bool MapChunk::isHole(int i, int j)
 {
+  if (header_flags.flags.high_res_holes)
+  {
+    // i,j are classic 4×4 cell coords; true if any of the 2×2 high-res units are holes.
+    auto const* holes_bytes = reinterpret_cast<std::uint8_t const*>(&_holes_high_res);
+    for (int y = 0; y < 2; ++y)
+    {
+      for (int x = 0; x < 2; ++x)
+      {
+        int const row = j * 2 + y;
+        int const col = i * 2 + x;
+        if ((holes_bytes[row] >> col) & 1)
+          return true;
+      }
+    }
+    return false;
+  }
   return (holes & ((1 << ((j * 4) + i)))) != 0;
 }
 
@@ -1931,6 +2058,8 @@ void MapChunk::save(util::sExtendableArray& lADTFile
   auto const lMCNK_header = lADTFile.GetPointer<MapChunkHeader>(lCurrentPosition + 8);
 
   header_flags.flags.do_not_fix_alpha_map = use_mclq_liquids ? 0 : 1;
+  // Editor always writes classic MCVT/MCNR offsets; clear MoP+ hole-mask flag.
+  header_flags.flags.high_res_holes = 0;
 
   lMCNK_header->flags = header_flags;
   lMCNK_header->ix = px;

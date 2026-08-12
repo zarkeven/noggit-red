@@ -36,8 +36,10 @@ layout (std140) uniform modern_fog
   vec4 end_fog_color;
   vec4 fog_height_color_density;
   vec4 height_coeff_01;
+  vec4 height_coeff_23;
   vec4 vfog_pos_radius[8];
   vec4 vfog_color_intensity[8];
+  vec4 vfog_radius_xyz[8];
 };
 
 uniform vec3 camera;
@@ -365,12 +367,24 @@ void main()
       float endT = clamp(dist_from_camera / fog_density_end_height.y, 0.0, 1.0);
       fogged = mix(fogged, end_fog_color.rgb, endT * fogFactor);
     }
+    out_color.rgb = fogged;
+  }
+
+  if (mf_meta.y > 0 && !bool(flags & eWMOBatch_Unfogged))
+  {
+    vec3 fogged = out_color.rgb;
     for (int i = 0; i < mf_meta.y; ++i)
     {
-      float d = distance(vfog_pos_radius[i].xyz, f_position);
-      float r = max(vfog_pos_radius[i].w, 1.0);
-      float vf = clamp(1.0 - d / r, 0.0, 1.0) * vfog_color_intensity[i].w;
-      fogged = mix(fogged, vfog_color_intensity[i].rgb, vf * fogFactor);
+      vec3 center = vfog_pos_radius[i].xyz;
+      if (f_position.y < center.y)
+        continue;
+      vec3 radii = max(vfog_radius_xyz[i].xyz, vec3(0.05));
+      vec3 dn = (f_position - center) / radii;
+      float t = length(dn);
+      float vf = clamp(1.0 - t, 0.0, 1.0);
+      vf = vf * vf * (3.0 - 2.0 * vf);
+      vf = min(vf * vfog_color_intensity[i].w, 1.0);
+      fogged = mix(fogged, vfog_color_intensity[i].rgb, vf);
     }
     out_color.rgb = fogged;
   }

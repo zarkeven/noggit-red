@@ -1,0 +1,10 @@
+﻿wowlib SL layout oracle (headers vs noggit static_asserts)
+MPL2/MapPointLight: wowlib 0x34 / noggit 0x34
+MPL3/MapPointLight3: wowlib 0x38 / noggit 0x38
+MSLT/MapSpotLight: wowlib 0x40 / noggit 0x40
+MLTA/LightAnimation: wowlib 12 / noggit MltaRow 12 (3x float/int)
+MPHD on-disk: wowlib 32 / noggit MPHD_ON_DISK_SIZE 32 (+ pd4 in memory)
+WMO MVER: 17 (unchanged)
+M2 SL: version 274 / MD21
+Client available: D:\WoWBuildArchive\9.x\9.2.7.45338 (build 45338; DBD pin 45745 shares LAYOUT)
+wowlib C++26 tests: skipped (no gcc>=16 on this host); clone at Desktop\wowlib
