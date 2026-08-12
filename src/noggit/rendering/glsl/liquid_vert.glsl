@@ -55,6 +55,8 @@ flat out uint tex_array;
 flat out uint type;
 flat out vec2 anim_uv;
 flat out int tex_frame;
+// 1 = static modern albedo (tint); 0 = classic animated strip (additive).
+flat out int use_albedo_tint;
 
 bool hasSubchunk(uint x, uint z, uint subchunks_first, uint subchunks_second)
 {
@@ -107,6 +109,7 @@ void main()
   type = params.type;
   tex_frame = get_texture_frame(int(params.n_tex_frames));
   anim_uv = vec2(params.anim_u, params.anim_v);
+  use_albedo_tint = int(params.n_tex_frames <= 1u);
 
   if(use_transform == 1)
   {

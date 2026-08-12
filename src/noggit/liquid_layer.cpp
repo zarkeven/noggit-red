@@ -15,9 +15,49 @@
 
 namespace
 {
+  // wowlib UVMapEntry: stored u16s are divided by 8 in shaders (not 255).
+  constexpr float kMh2oUvShaderScale = 8.f;
+
   inline glm::vec2 default_uv(int px, int pz)
   {
+    // Synthesized UVs when the instance has no UV map (height_depth / depth_only).
     return {static_cast<float>(px) / 4.f, static_cast<float>(pz) / 4.f};
+  }
+
+  inline glm::vec2 mh2o_uv_to_shader(std::uint16_t x, std::uint16_t y)
+  {
+    return {static_cast<float>(x) / kMh2oUvShaderScale
+          , static_cast<float>(y) / kMh2oUvShaderScale};
+  }
+
+  inline mh2o_uv shader_uv_to_mh2o(glm::vec2 const& uv)
+  {
+    auto const encode = [](float v) -> std::uint16_t {
+      float const s = std::max(0.f, v) * kMh2oUvShaderScale;
+      return static_cast<std::uint16_t>(std::min(s, 65535.f));
+    };
+    return mh2o_uv(encode(uv.x), encode(uv.y));
+  }
+
+  // wowlib::formats::adt::detail::resolve_vertex_format — exact bytes/vertex only.
+  inline int resolve_mh2o_vertex_format(std::uint16_t stored
+    , std::size_t total_bytes
+    , std::size_t vertex_count)
+  {
+    if (vertex_count != 0 && total_bytes % vertex_count == 0)
+    {
+      switch (total_bytes / vertex_count)
+      {
+        case 5: return LVF_HEIGHT_DEPTH;     // float + byte
+        case 8: return LVF_HEIGHT_UV;        // float + 2 u16
+        case 1: return LVF_DEPTH;            // byte
+        case 9: return LVF_HEIGHT_DEPTH_UV;  // float + 2 u16 + byte
+        default: break;
+      }
+    }
+    if (stored <= 3)
+      return static_cast<int>(stored);
+    return LVF_DEPTH; // LiquidObject id with no usable vertex block → flat depth
   }
 }
 
@@ -30,7 +70,8 @@ liquid_layer::liquid_layer(ChunkWater* chunk, glm::vec3 const& base, float heigh
   , pos(base)
   , _chunk(chunk)
 {
-  if (!gLiquidTypeDB.CheckIfIdExists(_liquid_id))
+  // Only remap against classic LiquidType.dbc — empty on Shadowlands/DB2 projects.
+  if (gLiquidTypeDB.getRecordCount() > 0 && !gLiquidTypeDB.CheckIfIdExists(_liquid_id))
     _liquid_id = LIQUID_WATER;
 
   create_vertices(height);
@@ -48,7 +89,8 @@ liquid_layer::liquid_layer(ChunkWater* chunk, glm::vec3 const& base, mclq& liqui
   , pos(base)
   , _chunk(chunk)
 {
-  if (!gLiquidTypeDB.CheckIfIdExists(_liquid_id))
+  // Only remap against classic LiquidType.dbc — empty on Shadowlands/DB2 projects.
+  if (gLiquidTypeDB.getRecordCount() > 0 && !gLiquidTypeDB.CheckIfIdExists(_liquid_id))
     _liquid_id = LIQUID_WATER;
 
   changeLiquidID(_liquid_id);
@@ -97,7 +139,8 @@ liquid_layer::liquid_layer(ChunkWater* chunk
                            , std::size_t base_pos
                            , glm::vec3 const& base
                            , MH2O_Information const& info
-                           , std::uint64_t infomask)
+                           , std::uint64_t infomask
+                           , std::size_t vertex_block_bytes)
   : _liquid_id(info.liquid_id)
   , _liquid_vertex_format(info.liquid_vertex_format)
   , _minimum(info.minHeight)
@@ -107,8 +150,21 @@ liquid_layer::liquid_layer(ChunkWater* chunk
   , _chunk(chunk)
 {
   // check if liquid id is valid or some downported maps will crash
-  if (!gLiquidTypeDB.CheckIfIdExists(_liquid_id))
+  // Only remap against classic LiquidType.dbc — empty on Shadowlands/DB2 projects.
+  if (gLiquidTypeDB.getRecordCount() > 0 && !gLiquidTypeDB.CheckIfIdExists(_liquid_id))
     _liquid_id = LIQUID_WATER;
+
+  // Modern MH2O stores a LiquidObject id (>= 42) in the LVF field. Resolve via
+  // wowlib's bytes-per-vertex method (exact 1/5/8/9 only — never rest-of-file).
+  {
+    std::uint16_t const stored = info.liquid_vertex_format;
+    std::size_t const n = static_cast<std::size_t>(info.width + 1) * static_cast<std::size_t>(info.height + 1);
+    if (stored > 3)
+    {
+      std::size_t const total_bytes = info.ofsHeightMap ? vertex_block_bytes : 0;
+      _liquid_vertex_format = resolve_mh2o_vertex_format(stored, total_bytes, n);
+    }
+  }
 
   int offset = 0;
   for (int z = 0; z < info.height; ++z)
@@ -127,22 +183,29 @@ liquid_layer::liquid_layer(ChunkWater* chunk
   {
     f.seek(base_pos + info.ofsHeightMap);
 
-    if (_liquid_vertex_format == LVF_HEIGHT_DEPTH || _liquid_vertex_format == LVF_HEIGHT_UV)
-    {
+    auto const write_vertex = [&](int x, int z, auto&& fn) {
+      if (x < 0 || z < 0 || x > 8 || z > 8)
+        return;
+      fn(_vertices[z * 9 + x]);
+    };
 
+    if (_liquid_vertex_format == LVF_HEIGHT_DEPTH || _liquid_vertex_format == LVF_HEIGHT_UV
+        || _liquid_vertex_format == LVF_HEIGHT_DEPTH_UV)
+    {
       for (int z = info.yOffset; z <= info.yOffset + info.height; ++z)
       {
         for (int x = info.xOffset; x <= info.xOffset + info.width; ++x)
         {
             float h;
             f.read(&h, sizeof(float));
-
-            _vertices[z * 9 + x].position.y = std::clamp(h, _minimum, _maximum);
+            write_vertex(x, z, [&](liquid_vertex& v) {
+              v.position.y = std::clamp(h, _minimum, _maximum);
+            });
         }
       }
     }
 
-    if (_liquid_vertex_format == LVF_HEIGHT_UV)
+    if (_liquid_vertex_format == LVF_HEIGHT_UV || _liquid_vertex_format == LVF_HEIGHT_DEPTH_UV)
     {
       for (int z = info.yOffset; z <= info.yOffset + info.height; ++z)
       {
@@ -150,15 +213,15 @@ liquid_layer::liquid_layer(ChunkWater* chunk
         {
           mh2o_uv uv;
           f.read(&uv, sizeof(mh2o_uv));
-          _vertices[z * 9 + x].uv =
-            { static_cast<float>(uv.x) / 255.f
-            , static_cast<float>(uv.y) / 255.f
-            };
+          write_vertex(x, z, [&](liquid_vertex& v) {
+            v.uv = mh2o_uv_to_shader(uv.x, uv.y);
+          });
         }
       }
     }
 
-    if (_liquid_vertex_format == LVF_HEIGHT_DEPTH || _liquid_vertex_format == LVF_DEPTH)
+    if (_liquid_vertex_format == LVF_HEIGHT_DEPTH || _liquid_vertex_format == LVF_DEPTH
+        || _liquid_vertex_format == LVF_HEIGHT_DEPTH_UV)
     {
       for (int z = info.yOffset; z <= info.yOffset + info.height; ++z)
       {
@@ -166,7 +229,9 @@ liquid_layer::liquid_layer(ChunkWater* chunk
         {
           std::uint8_t depth;
           f.read(&depth, sizeof(std::uint8_t));
-          _vertices[z * 9 + x].depth = static_cast<float>(depth) / 255.f;
+          write_vertex(x, z, [&](liquid_vertex& v) {
+            v.depth = static_cast<float>(depth) / 255.f;
+          });
         }
       }
     }
@@ -329,7 +394,16 @@ void liquid_layer::save(util::sExtendableArray& adt, int base_pos, int& info_pos
   int vertices_count = (info.width + 1) * (info.height + 1);
   info.ofsHeightMap = current_pos - base_pos;
 
-  if (_liquid_vertex_format == LVF_HEIGHT_DEPTH || _liquid_vertex_format == LVF_HEIGHT_UV)
+  bool const has_height = _liquid_vertex_format == LVF_HEIGHT_DEPTH
+                       || _liquid_vertex_format == LVF_HEIGHT_UV
+                       || _liquid_vertex_format == LVF_HEIGHT_DEPTH_UV;
+  bool const has_uv = _liquid_vertex_format == LVF_HEIGHT_UV
+                   || _liquid_vertex_format == LVF_HEIGHT_DEPTH_UV;
+  bool const has_depth = _liquid_vertex_format == LVF_HEIGHT_DEPTH
+                      || _liquid_vertex_format == LVF_HEIGHT_DEPTH_UV
+                      || (_liquid_vertex_format == LVF_DEPTH && !_fatigue_enabled);
+
+  if (has_height)
   {
     adt.Extend(vertices_count * sizeof(float));
 
@@ -348,7 +422,7 @@ void liquid_layer::save(util::sExtendableArray& adt, int base_pos, int& info_pos
       info.ofsHeightMap = 0;
   }
 
-  if (_liquid_vertex_format == LVF_HEIGHT_UV)
+  if (has_uv)
   {
     adt.Extend(vertices_count * sizeof(mh2o_uv));
 
@@ -356,9 +430,7 @@ void liquid_layer::save(util::sExtendableArray& adt, int base_pos, int& info_pos
     {
       for (int x = info.xOffset; x <= info.xOffset + info.width; ++x)
       {
-        mh2o_uv uv;
-        uv.x = static_cast<std::uint16_t>(std::min(_vertices[z * 9 + x].uv.x * 255.f, 65535.f));
-        uv.y = static_cast<std::uint16_t>(std::min(_vertices[z * 9 + x].uv.y * 255.f, 65535.f));
+        mh2o_uv uv = shader_uv_to_mh2o(_vertices[z * 9 + x].uv);
 
         memcpy(adt.GetPointer<char>(current_pos).get(), &uv, sizeof(mh2o_uv));
         current_pos += sizeof(mh2o_uv);
@@ -366,7 +438,7 @@ void liquid_layer::save(util::sExtendableArray& adt, int base_pos, int& info_pos
     }
   }
 
-  if (_liquid_vertex_format == LVF_HEIGHT_DEPTH || (_liquid_vertex_format == LVF_DEPTH && !_fatigue_enabled))
+  if (has_depth)
   {
     adt.Extend(vertices_count * sizeof(std::uint8_t));
 
@@ -418,8 +490,14 @@ void liquid_layer::changeLiquidID(int id)
   }
   catch (LiquidTypeDB::NotFound)
   {
-      assert(false);
-      LogError << "Liquid type id " << _liquid_type << " not found in LiquidType dbc" << std::endl;
+    // Shadowlands has no classic DBC; keep MH2O liquid id so LiquidTextureManager can resolve DB2 textures.
+    if (gLiquidTypeDB.getRecordCount() > 0)
+    {
+      LogError << "Liquid type id " << _liquid_id << " not found in LiquidType dbc" << std::endl;
+    }
+    _liquid_type = liquid_basic_types_water;
+    _mclq_liquid_type = mclq_liquid_river;
+    _liquid_vertex_format = LVF_HEIGHT_DEPTH;
   }
 }
 
@@ -821,4 +899,7 @@ bool liquid_layer::subchunk_at_max_depth(int x, int z) const
     return true;
 }
 
-liquid_layer::liquid_vertex::liquid_vertex(glm::vec3 const& pos, glm::vec2 const& uv, float depth) : position(pos), uv(uv), depth(depth) {}
+liquid_layer::liquid_vertex::liquid_vertex(glm::vec3 const& pos, glm::vec2 const& uv, float depth)
+  : position(pos), uv(uv), depth(depth)
+{
+}

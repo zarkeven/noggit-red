@@ -6,6 +6,7 @@
 #include <noggit/tool_enums.hpp>
 
 #include <vector>
+#include <cstddef>
 
 class MapChunk;
 class TileWater;
@@ -32,7 +33,12 @@ public:
   ChunkWater& operator= (ChunkWater&&) = delete;
 
   void from_mclq(std::vector<mclq>& layers);
-  void fromFile(BlizzardArchive::ClientFile& f, size_t basePos);
+  // mh2o_size = MH2O payload length; block_starts = sorted relative offsets of
+  // every attributes / exists-mask / vertex block in the payload (wowlib block_end).
+  void fromFile(BlizzardArchive::ClientFile& f
+               , size_t basePos
+               , size_t mh2o_size
+               , std::vector<std::size_t> const& block_starts);
   void save(util::sExtendableArray& adt, int base_pos, int& header_pos, int& current_pos);
   void save_mclq(util::sExtendableArray& adt, int mcnk_pos, int& current_pos);
 

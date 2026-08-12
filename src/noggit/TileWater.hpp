@@ -26,7 +26,8 @@ public:
 
   ChunkWater* getChunk(int x, int z);
 
-  void readFromFile(BlizzardArchive::ClientFile& theFile, size_t basePos);
+  // basePos = start of MH2O payload (after fourcc+size); mh2o_size = payload bytes.
+  void readFromFile(BlizzardArchive::ClientFile& theFile, size_t basePos, size_t mh2o_size);
   void saveToFile(util::sExtendableArray& lADTFile, int& lMHDR_Position, int& lCurrentPosition);
 
   // void draw ( math::frustum const& frustum

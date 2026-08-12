@@ -3,6 +3,8 @@
 #pragma once
 #include <opengl/scoped.hpp>
 
+#include <cstddef>
+#include <cstdint>
 
 namespace BlizzardArchive
 {
@@ -32,7 +34,8 @@ struct SMOLTile
   uint8_t shared : 1;
 };
 
-struct WMOMaterial 
+//! On-disk MOMT entry (wowlib SMOMaterial) — exactly 64 bytes.
+struct WMOMaterialDisk
 {
   union
   {
@@ -42,30 +45,93 @@ struct WMOMaterial
       uint32_t unlit :  1;
       uint32_t unfogged : 1;
       uint32_t unculled : 1;
-      uint32_t ext_light: 1; // darkened used for the intern face of windows
-      uint32_t sidn :  1; // night glow
-      uint32_t window :  1; // lighting related(flag checked in CMapObj::UpdateSceneMaterials)
+      uint32_t ext_light: 1;
+      uint32_t sidn :  1;
+      uint32_t window :  1;
       uint32_t clamp_s :  1;
       uint32_t clamp_t : 1;
       uint32_t unused : 24;
     };
   } flags;
   uint32_t shader;
-  uint32_t blend_mode; // Blending: 0 for opaque, 1 for transparent
-  uint32_t texture_offset_1; // Start position for the first texture filename in the MOTX data block
-  CImVector sidn_color; // emissive color
-  CImVector frame_sidn_color; // runtime value
-  uint32_t texture_offset_2; // Start position for the second texture filename in the MOTX data block
+  uint32_t blend_mode;
+  uint32_t texture_offset_1;
+  CImVector sidn_color;
+  CImVector frame_sidn_color;
+  uint32_t texture_offset_2;
   CArgb diffuse_color;
   uint32_t ground_type;
-  uint32_t texture_offset_3; 
+  uint32_t texture_offset_3;
   uint32_t color_2;
   uint32_t flag_2;
-  uint32_t runtime_data[2];
-  // also runtime data
-  uint32_t texture1; // this is the first texture object.
-  uint32_t texture2; // this is the second texture object.
+  //! wowlib SMOMaterial::run_time_data[4] — last 16 bytes of the 0x40 disk entry.
+  uint32_t runtime_data[4];
 };
+static_assert(sizeof(WMOMaterialDisk) == 0x40, "MOMT disk entry must be 64 bytes");
+
+struct WMOMaterial : WMOMaterialDisk
+{
+  // Runtime-only indices into WMO::textures — never read from the MOMT chunk.
+  uint32_t texture1 = 0;
+  uint32_t texture2 = 0;
+};
+
+inline bool wmo_material_uses_second_texture(std::uint32_t shader)
+{
+  switch (shader)
+  {
+  case 3:  // Env
+  case 5:  // EnvMetal
+  case 6:  // TwoLayerDiffuse
+  case 7:  // TwoLayerEnvMetal
+  case 8:  // TwoLayerTerrain
+  case 9:  // DiffuseEmissive
+  case 11: // MaskedEnvMetal
+  case 12: // EnvMetalEmissive
+  case 13: // TwoLayerDiffuseOpaque
+  case 15: // TwoLayerDiffuseEmissive
+  case 17: // AdditiveMaskedEnvMetal
+  case 18: // TwoLayerDiffuseMod2x
+  case 19: // TwoLayerDiffuseMod2xNA
+  case 20: // TwoLayerDiffuseAlpha
+  case 21: // Lod
+  case 23: // UnkDFShader (MapObjDiffuse_T1 + extra FDIDs)
+    return true;
+  default:
+    return false;
+  }
+}
+
+//! Pick diffuse / secondary FDIDs for modern UnkDFShader materials (wowdev shader ≥23).
+inline void wmo_resolve_shader23_texture_keys(WMOMaterialDisk const& mat
+                                            , std::uint32_t& out_tex1_key
+                                            , std::uint32_t& out_tex2_key)
+{
+  // wowdev: additional texture file IDs live in color_2, flags_2, runTimeData, texture_3.
+  // Prefer those for the visible atlas layer (sampled as tex_2 with MOTV1+ UVs), keep
+  // texture_1 as the first slot when present.
+  auto pick = [](std::initializer_list<std::uint32_t> keys) -> std::uint32_t
+  {
+    for (std::uint32_t k : keys)
+    {
+      if (k != 0)
+        return k;
+    }
+    return 0;
+  };
+
+  out_tex1_key = mat.texture_offset_1 != 0 ? mat.texture_offset_1
+                                          : pick({mat.color_2, mat.flag_2, mat.texture_offset_3
+                                                , mat.texture_offset_2, mat.runtime_data[0]});
+
+  out_tex2_key = pick({mat.color_2, mat.flag_2, mat.texture_offset_3, mat.texture_offset_2
+                     , mat.runtime_data[0], mat.runtime_data[1], mat.texture_offset_1});
+  if (out_tex2_key == out_tex1_key)
+  {
+    out_tex2_key = pick({mat.flag_2, mat.texture_offset_3, mat.texture_offset_2
+                       , mat.runtime_data[0], mat.runtime_data[1], mat.runtime_data[2]});
+  }
+}
 
 struct WMOLiquidHeader {
   int32_t X, Y, A, B;

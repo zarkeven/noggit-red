@@ -2,11 +2,16 @@
 
 #include <noggit/DBC.h>
 #include <noggit/MapHeaders.h>
+#include <noggit/application/Utils.hpp>
+#include <noggit/project/CurrentProject.hpp>
 #include <noggit/ui/Checkbox.hpp>
 #include <noggit/ui/pushbutton.hpp>
 #include <noggit/ui/Water.h>
 #include <noggit/unsigned_int_property.hpp>
 #include <noggit/World.h>
+
+#include <blizzard-database-library/include/BlizzardDatabase.h>
+#include <blizzard-database-library/include/BlizzardDatabaseTable.h>
 
 #include <QtWidgets/QButtonGroup>
 #include <QtWidgets/QComboBox>
@@ -15,6 +20,70 @@
 #include <QtWidgets/QGroupBox>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QRadioButton>
+
+#include <cctype>
+#include <sstream>
+
+namespace
+{
+  bool is_wmo_only_liquid_id(int liquid_id)
+  {
+    return liquid_id == LIQUID_WMO_Water || liquid_id == LIQUID_WMO_Ocean
+        || liquid_id == LIQUID_WMO_Water_Interior
+        || liquid_id == LIQUID_WMO_Magma || liquid_id == LIQUID_WMO_Slime;
+  }
+
+  std::string to_lower_ascii(std::string s)
+  {
+    for (auto& ch : s)
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return s;
+  }
+
+  liquid_basic_types liquid_type_from_modern_row(BlizzardDatabaseLib::Structures::BlizzardDatabaseRow const& row)
+  {
+    auto sbit = row.Columns.find("SoundBank");
+    if (sbit != row.Columns.end() && !sbit->second.Value.empty())
+    {
+      try
+      {
+        int const bank = std::stoi(sbit->second.Value);
+        if (bank >= 0 && bank <= 3)
+          return static_cast<liquid_basic_types>(bank);
+      }
+      catch (...)
+      {
+      }
+    }
+
+    std::string name;
+    auto nit = row.Columns.find("Name");
+    if (nit != row.Columns.end())
+      name = to_lower_ascii(nit->second.Value);
+
+    if (name.find("ocean") != std::string::npos)
+      return liquid_basic_types_ocean;
+    if (name.find("magma") != std::string::npos || name.find("lava") != std::string::npos)
+      return liquid_basic_types_magma;
+    if (name.find("slime") != std::string::npos || name.find("ooze") != std::string::npos
+        || name.find("plague") != std::string::npos)
+      return liquid_basic_types_slime;
+    return liquid_basic_types_water;
+  }
+
+  unsigned liquid_id_from_modern_row(BlizzardDatabaseLib::Structures::BlizzardDatabaseRow const& row)
+  {
+    if (row.RecordId > 0)
+      return static_cast<unsigned>(row.RecordId);
+    auto it = row.Columns.find("ID");
+    if (it != row.Columns.end() && !it->second.Value.empty())
+    {
+      try { return static_cast<unsigned>(std::stoul(it->second.Value)); }
+      catch (...) {}
+    }
+    return 0;
+  }
+}
 
 namespace Noggit
 {
@@ -57,19 +126,67 @@ namespace Noggit
 
       waterType = new QComboBox(this);
 
-      for (DBCFile::Iterator i = gLiquidTypeDB.begin(); i != gLiquidTypeDB.end(); ++i)
+      auto add_liquid_item = [&](int liquid_id, std::string const& name, liquid_basic_types type)
       {
-        int liquid_id = i->getInt(LiquidTypeDB::ID);
+        if (is_wmo_only_liquid_id(liquid_id))
+          return;
 
-        // filter WMO liquids
-        if (liquid_id == LIQUID_WMO_Water || liquid_id == LIQUID_WMO_Ocean || liquid_id == LIQUID_WMO_Water_Interior
-            || liquid_id == LIQUID_WMO_Magma || liquid_id == LIQUID_WMO_Slime)
-            continue;
+        _liquid_names[liquid_id] = name;
+        _liquid_types[liquid_id] = type;
 
         std::stringstream ss;
-        ss << liquid_id << "-" << LiquidTypeDB::getLiquidName(liquid_id);
+        ss << liquid_id << "-" << name;
         waterType->addItem (QString::fromUtf8(ss.str().c_str()), QVariant (liquid_id));
+      };
 
+      if (gLiquidTypeDB.getRecordCount() > 0)
+      {
+        for (DBCFile::Iterator i = gLiquidTypeDB.begin(); i != gLiquidTypeDB.end(); ++i)
+        {
+          int liquid_id = i->getInt(LiquidTypeDB::ID);
+          add_liquid_item(liquid_id
+                         , LiquidTypeDB::getLiquidName(liquid_id)
+                         , static_cast<liquid_basic_types>(LiquidTypeDB::getLiquidType(liquid_id)));
+        }
+      }
+      else if (auto* project = Noggit::Project::CurrentProject::get();
+               project && project->ClientDatabase)
+      {
+        // Shadowlands: LiquidType.dbc is not opened; enumerate LiquidType.db2.
+        try
+        {
+          auto& table = const_cast<BlizzardDatabaseLib::BlizzardDatabaseTable&>(
+            project->ClientDatabase->LoadTable("LiquidType", readFileAsIMemStream));
+          auto iterator = table.Records();
+          while (iterator.HasRecords())
+          {
+            auto const& row = iterator.Next();
+            unsigned const liquid_id = liquid_id_from_modern_row(row);
+            if (!liquid_id)
+              continue;
+
+            std::string name = "Liquid";
+            auto nit = row.Columns.find("Name");
+            if (nit != row.Columns.end() && !nit->second.Value.empty())
+              name = nit->second.Value;
+
+            add_liquid_item(static_cast<int>(liquid_id), name, liquid_type_from_modern_row(row));
+          }
+          project->ClientDatabase->UnloadTable("LiquidType");
+        }
+        catch (...)
+        {
+        }
+      }
+
+      if (waterType->count() == 0)
+      {
+        // Minimal fallbacks so the tool remains usable without DB tables.
+        add_liquid_item(1, "Water", liquid_basic_types_water);
+        add_liquid_item(2, "Ocean", liquid_basic_types_ocean);
+        add_liquid_item(3, "Magma", liquid_basic_types_magma);
+        add_liquid_item(4, "Slime", liquid_basic_types_slime);
+        add_liquid_item(5, "Slow Water", liquid_basic_types_water);
       }
 
       connect (waterType, qOverload<int> (&QComboBox::currentIndexChanged)
@@ -82,7 +199,12 @@ namespace Noggit
                       return;
 
                   // other liquid types shouldn't use opacity(depth)
-                  int liquid_type = LiquidTypeDB::getLiquidType(_liquid_id);
+                  int liquid_type = static_cast<int>(_liquid_type);
+                  if (auto it = _liquid_types.find(_liquid_id); it != _liquid_types.end())
+                    liquid_type = static_cast<int>(it->second);
+                  else
+                    liquid_type = LiquidTypeDB::getLiquidType(_liquid_id);
+
                   if (liquid_type == liquid_basic_types_ocean) // ocean
                   {
                       ocean_button->setChecked(true);
@@ -272,10 +394,18 @@ namespace Noggit
 
     void water::updateData()
     {
+      std::string name = LiquidTypeDB::getLiquidName(_liquid_id);
+      if (auto it = _liquid_names.find(_liquid_id); it != _liquid_names.end())
+        name = it->second;
+
       std::stringstream mt;
-      mt << _liquid_id << " - " << LiquidTypeDB::getLiquidName(_liquid_id);
+      mt << _liquid_id << " - " << name;
       waterType->setCurrentText (QString::fromStdString (mt.str()));
-      _liquid_type = static_cast<liquid_basic_types>(LiquidTypeDB::getLiquidType(_liquid_id));
+
+      if (auto it = _liquid_types.find(_liquid_id); it != _liquid_types.end())
+        _liquid_type = it->second;
+      else
+        _liquid_type = static_cast<liquid_basic_types>(LiquidTypeDB::getLiquidType(_liquid_id));
     }
 
     void water::changeWaterType(int waterint)

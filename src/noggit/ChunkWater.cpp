@@ -6,10 +6,13 @@
 #include <noggit/liquid_layer.hpp>
 #include <noggit/MapChunk.h>
 #include <noggit/Misc.h>
+#include <noggit/Log.h>
 #include <ClientFile.hpp>
 #include <util/sExtendableArray.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 
 ChunkWater::ChunkWater(MapChunk* chunk, TileWater* water_tile, float x, float z, bool use_mclq_green_lava)
   : xbase(x)
@@ -71,7 +74,10 @@ void ChunkWater::from_mclq(std::vector<mclq>& layers)
   update_layers();
 }
 
-void ChunkWater::fromFile(BlizzardArchive::ClientFile &f, size_t basePos)
+void ChunkWater::fromFile(BlizzardArchive::ClientFile &f
+                         , size_t basePos
+                         , size_t mh2o_size
+                         , std::vector<std::size_t> const& block_starts)
 {
   MH2O_Header header;
   f.read(&header, sizeof(MH2O_Header));
@@ -81,9 +87,36 @@ void ChunkWater::fromFile(BlizzardArchive::ClientFile &f, size_t basePos)
     return;
   }
 
+  // Absurd layer counts usually mean a misaligned / truncated MH2O payload.
+  if (header.nLayers > 32)
+  {
+    LogError << "MH2O nLayers=" << header.nLayers << " looks corrupt; skipping chunk liquid." << std::endl;
+    return;
+  }
+
+  auto const mh2o_end = basePos + mh2o_size;
+
+  auto const vertex_block_bytes = [&](std::uint32_t ofs_height_map) -> std::size_t {
+    if (!ofs_height_map)
+      return 0;
+    // wowlib block_end: next later start, else end of MH2O payload (not ADT EOF).
+    std::size_t end = mh2o_size;
+    for (std::size_t s : block_starts)
+    {
+      if (s > ofs_height_map && s < end)
+        end = s;
+    }
+    return end - ofs_height_map;
+  };
+
   //render
   if (header.ofsAttributes)
   {
+    if (basePos + header.ofsAttributes + sizeof(MH2O_Attributes) > mh2o_end)
+    {
+      LogError << "MH2O attributes out of range; skipping chunk liquid." << std::endl;
+      return;
+    }
     f.seek(basePos + header.ofsAttributes);
     f.read(&attributes, sizeof(MH2O_Attributes));
   }
@@ -99,14 +132,34 @@ void ChunkWater::fromFile(BlizzardArchive::ClientFile &f, size_t basePos)
     MH2O_Information info;
     uint64_t infoMask = 0xFFFFFFFFFFFFFFFF; // default = all water. InfoMask + HeightMap combined
 
-    //info
-    f.seek(basePos + header.ofsInformation + sizeof(MH2O_Information)* k);
+    std::size_t const info_off = basePos + header.ofsInformation + sizeof(MH2O_Information) * k;
+    if (info_off + sizeof(MH2O_Information) > mh2o_end)
+    {
+      LogError << "MH2O information out of range for layer " << k << "; stopping." << std::endl;
+      break;
+    }
+
+    f.seek(info_off);
     f.read(&info, sizeof(MH2O_Information));
+
+    if (info.width == 0 || info.height == 0
+        || info.xOffset > 7 || info.yOffset > 7
+        || info.xOffset + info.width > 8 || info.yOffset + info.height > 8)
+    {
+      LogError << "MH2O layer " << k << " has invalid rect; skipping." << std::endl;
+      continue;
+    }
 
     //mask
     if (info.ofsInfoMask > 0 && info.height > 0)
     {
       size_t bitmask_size = static_cast<size_t>(std::ceil(info.height * info.width / 8.0f));
+
+      if (basePos + info.ofsInfoMask + bitmask_size > mh2o_end)
+      {
+        LogError << "MH2O exists-mask out of range for layer " << k << "; skipping." << std::endl;
+        continue;
+      }
 
       f.seek(info.ofsInfoMask + basePos);
       // only read the relevant data
@@ -115,14 +168,18 @@ void ChunkWater::fromFile(BlizzardArchive::ClientFile &f, size_t basePos)
 
     glm::vec3 pos(xbase, 0.0f, zbase);
     _water_tile->tagUpdate();
-    // liquid_layer(ChunkWater* chunk, BlizzardArchive::ClientFile& f, std::size_t base_pos, glm::vec3 const& base
-    //              ,MH2O_Information const& info, std::uint64_t infomask);
-    _layers.emplace_back(this, f, basePos, pos, info, infoMask);
+    try
+    {
+      _layers.emplace_back(this, f, basePos, pos, info, infoMask, vertex_block_bytes(info.ofsHeightMap));
+    }
+    catch (std::exception const& e)
+    {
+      LogError << "MH2O layer " << k << " failed: " << e.what() << std::endl;
+    }
   }
 
   update_layers();
 }
-
 
 void ChunkWater::save(util::sExtendableArray& adt, int base_pos, int& header_pos, int& current_pos)
 {

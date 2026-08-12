@@ -8,7 +8,10 @@
 #include <noggit/TileWater.hpp>
 #include <ClientFile.hpp>
 
+#include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <vector>
 
 TileWater::TileWater(MapTile *pTile, float pXbase, float pZbase, bool use_mclq_green_lava)
   : tile(pTile)
@@ -27,14 +30,54 @@ TileWater::TileWater(MapTile *pTile, float pXbase, float pZbase, bool use_mclq_g
   }
 }
 
-void TileWater::readFromFile(BlizzardArchive::ClientFile &theFile, size_t basePos)
+void TileWater::readFromFile(BlizzardArchive::ClientFile &theFile, size_t basePos, size_t mh2o_size)
 {
+  // wowlib MH2OData::read — collect every data-block start so vertex-block size
+  // is the gap to the next start (needed for LiquidObject LVF resolve).
+  std::vector<std::size_t> block_starts;
+  block_starts.reserve(512);
+
   for (int z = 0; z < 16; ++z)
   {
     for (int x = 0; x < 16; ++x)
     {
       theFile.seek(basePos + (z * 16 + x) * sizeof(MH2O_Header));
-      chunks[z][x]->fromFile(theFile, basePos);
+      MH2O_Header header;
+      theFile.read(&header, sizeof(MH2O_Header));
+
+      if (header.ofsAttributes)
+        block_starts.push_back(header.ofsAttributes);
+
+      if (!header.nLayers || header.nLayers > 32)
+        continue;
+
+      for (std::uint32_t k = 0; k < header.nLayers; ++k)
+      {
+        std::size_t const info_off = basePos + header.ofsInformation + sizeof(MH2O_Information) * k;
+        if (info_off + sizeof(MH2O_Information) > basePos + mh2o_size)
+          break;
+
+        theFile.seek(info_off);
+        MH2O_Information info;
+        theFile.read(&info, sizeof(MH2O_Information));
+
+        if (info.ofsInfoMask)
+          block_starts.push_back(info.ofsInfoMask);
+        if (info.ofsHeightMap)
+          block_starts.push_back(info.ofsHeightMap);
+      }
+    }
+  }
+
+  std::sort(block_starts.begin(), block_starts.end());
+  block_starts.erase(std::unique(block_starts.begin(), block_starts.end()), block_starts.end());
+
+  for (int z = 0; z < 16; ++z)
+  {
+    for (int x = 0; x < 16; ++x)
+    {
+      theFile.seek(basePos + (z * 16 + x) * sizeof(MH2O_Header));
+      chunks[z][x]->fromFile(theFile, basePos, mh2o_size, block_starts);
     }
   }
 

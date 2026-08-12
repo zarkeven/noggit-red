@@ -3,7 +3,11 @@
 #pragma once
 
 #include <noggit/BoolToggleProperty.hpp>
+#include <noggit/MapHeaders.h>
 #include <noggit/TileIndex.hpp>
+
+#include <string>
+#include <unordered_map>
 
 class QDoubleSpinBox;
 class QGroupBox;
@@ -100,6 +104,10 @@ namespace Noggit
 
       QComboBox* waterType;
       QSpinBox* waterLayer;
+
+      //! Name / basic type for liquid IDs when classic LiquidType.dbc is empty (SL DB2).
+      std::unordered_map<int, std::string> _liquid_names;
+      std::unordered_map<int, liquid_basic_types> _liquid_types;
 
       TileIndex tile;
     };

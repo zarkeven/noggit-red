@@ -193,7 +193,7 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
             for (int x_v = 0; x_v < 9; ++x_v)
             {
               const unsigned v_index = z_v * 9 + x_v;
-              glm::vec2& tex_coord = vertices[v_index].uv;
+              glm::vec2 const& tex_coord = vertices[v_index].uv;
               layer_params.vertex_data[n_chunks][v_index] = glm::vec4(
                 vertices[v_index].position.y,
                 vertices[v_index].depth,

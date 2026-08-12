@@ -54,7 +54,13 @@ public:
   liquid_layer() = delete;
   liquid_layer(ChunkWater* chunk, glm::vec3 const& base, float height, int liquid_id);
   liquid_layer(ChunkWater* chunk, glm::vec3 const& base, mclq& liquid, int liquid_id);
-  liquid_layer(ChunkWater* chunk, BlizzardArchive::ClientFile& f, std::size_t base_pos, glm::vec3 const& base, MH2O_Information const& info, std::uint64_t infomask);
+  liquid_layer(ChunkWater* chunk
+              , BlizzardArchive::ClientFile& f
+              , std::size_t base_pos
+              , glm::vec3 const& base
+              , MH2O_Information const& info
+              , std::uint64_t infomask
+              , std::size_t vertex_block_bytes);
 
   liquid_layer(liquid_layer const& other);
   liquid_layer(liquid_layer&&) noexcept;

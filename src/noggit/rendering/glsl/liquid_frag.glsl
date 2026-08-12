@@ -23,6 +23,8 @@ flat in uint tex_array;
 flat in uint type;
 flat in vec2 anim_uv;
 flat in int tex_frame;
+// 1 = static modern albedo (tint); 0 = classic animated strip (additive).
+flat in int use_albedo_tint;
 
 out vec4 out_color;
 
@@ -111,20 +113,41 @@ void main()
               ? mix(OceanColorLight, OceanColorDark, depth_)
               : mix(RiverColorLight, RiverColorDark, depth_);
 
-    float alpha = 1.0;
+    float alpha;
     if (type == 1u)
     {
-      alpha = 1.0;
+      // Classic noggit treated ocean as opaque; keep that for strip oceans.
+      // Modern static albedos still need depth-based alpha or coasts look solid.
+      if (use_albedo_tint != 0)
+      {
+        alpha = mix(OceanColorLight.a, OceanColorDark.a, depth_);
+        alpha = max(alpha, 0.65);
+      }
+      else
+      {
+        alpha = 1.0;
+      }
     }
     else
     {
-      float shallow_a = RiverColorLight.a;
-      float deep_a = RiverColorDark.a;
-      alpha = mix(shallow_a, deep_a, depth_);
+      alpha = mix(RiverColorLight.a, RiverColorDark.a, depth_);
       alpha = max(alpha, 0.55);
     }
 
-    out_color = vec4(clamp(texel.rgb + lerp.rgb, 0.0, 1.0), alpha);
+    if (use_albedo_tint != 0)
+    {
+      // Modern static diffuse: tint albedo. Additive `texel+lerp` is for classic
+      // grayscale lake_a / ocean_h strips and washes out SL color albedos.
+      vec3 tint = mix(vec3(1.0), lerp.rgb * 1.8, 0.45);
+      out_color = vec4(clamp(texel.rgb * tint, 0.0, 1.0), alpha);
+    }
+    else
+    {
+      // Classic strips: additive lighting with depth-based strip weight.
+      float shore = clamp(1.0 - depth_, 0.0, 1.0);
+      float tex_w = mix(0.20, 1.0, shore * shore);
+      out_color = vec4(clamp(texel.rgb * tex_w + lerp.rgb, 0.0, 1.0), alpha);
+    }
   }
 
   if (FogColor_FogOn.w != 0)
