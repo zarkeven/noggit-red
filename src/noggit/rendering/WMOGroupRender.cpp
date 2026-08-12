@@ -7,8 +7,12 @@
 #include <noggit/TextureManager.h>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
+#include <noggit/scoped_blp_texture_reference.hpp>
+
+#include <ClientData.hpp>
 
 #include <algorithm>
+#include <cstring>
 #include <string>
 
 #include <math/frustum.hpp>
@@ -18,6 +22,59 @@
 #include <QSettings>
 
 using namespace Noggit::Rendering;
+
+namespace
+{
+  // wowlib SMOBatch (Legion+): flags bit 0x2 selects material_id_large (bytes 10-11 of
+  // the old culling-box prelude), otherwise material_id (uint8 texture field).
+  // This is a format layout rule for post-WotLK clients — not the UI "modern_features" toggle.
+  bool wmo_uses_large_material_id()
+  {
+    auto* app = Noggit::Application::NoggitApplication::instance();
+    if (!app || !app->hasClientData())
+      return false;
+    return app->clientData()->version() != BlizzardArchive::ClientVersion::WOTLK;
+  }
+
+  std::uint16_t resolve_wmo_batch_material(wmo_batch const& batch
+                                          , bool use_large_material
+                                          , std::size_t material_count)
+  {
+    std::uint16_t material_id = batch.texture;
+    if (use_large_material && (batch.flags & 0x2))
+    {
+      std::uint16_t large = 0;
+      std::memcpy(&large, &batch.unused[5], sizeof(large));
+      material_id = large;
+    }
+
+    if (material_count == 0)
+    {
+      return 0;
+    }
+
+    if (material_id >= material_count)
+    {
+      LogError << "WMO batch material id " << material_id
+               << " out of range (materials=" << material_count << ")" << std::endl;
+      return 0;
+    }
+
+    return material_id;
+  }
+
+  scoped_blp_texture_reference* safe_wmo_texture(
+    std::vector<scoped_blp_texture_reference>& textures, std::uint32_t index)
+  {
+    if (index >= textures.size())
+    {
+      LogError << "WMO texture index " << index << " out of range (textures="
+               << textures.size() << ")" << std::endl;
+      return textures.empty() ? nullptr : &textures.front();
+    }
+    return &textures[index];
+  }
+}
 
 WMOGroupRender::WMOGroupRender(WMOGroup* wmo_group)
 : _wmo_group(wmo_group)
@@ -30,17 +87,26 @@ void WMOGroupRender::upload()
   // render batches
 
   bool texture_not_uploaded = false;
+  bool const use_large_material = wmo_uses_large_material_id();
+  std::size_t const material_count = _wmo_group->wmo->materials.size();
+  auto& textures = _wmo_group->wmo->textures;
 
   std::size_t batch_counter = 0;
   for (auto& batch : _wmo_group->_batches)
   {
-    std::uint16_t material_to_use = batch.texture;
-    if (batch.flags == 2)
-        material_to_use = batch.unused[5];
+    std::uint16_t const material_to_use =
+      resolve_wmo_batch_material(batch, use_large_material, material_count);
 
     WMOMaterial const& mat(_wmo_group->wmo->materials.at(material_to_use));
 
-    auto& tex1 = _wmo_group->wmo->textures.at(mat.texture1);
+    auto* tex1_ptr = safe_wmo_texture(textures, mat.texture1);
+    if (!tex1_ptr)
+    {
+      texture_not_uploaded = true;
+      batch_counter++;
+      continue;
+    }
+    auto& tex1 = *tex1_ptr;
 
     tex1->wait_until_loaded();
     tex1->upload();
@@ -51,16 +117,19 @@ void WMOGroupRender::upload()
     std::uint32_t tex_array1 = 0;
     std::uint32_t array_index1 = 0;
 
-    bool use_tex2 = mat.shader == 8 || mat.shader == 6 || mat.shader == 5 || mat.shader == 3 || mat.shader == 21 || mat.shader == 23;
+    bool use_tex2 = wmo_material_uses_second_texture(mat.shader);
 
     if (use_tex2)
     {
-      auto& tex2 = _wmo_group->wmo->textures.at(mat.texture2);
-      tex2->wait_until_loaded();
-      tex2->upload();
+      if (auto* tex2_ptr = safe_wmo_texture(textures, mat.texture2))
+      {
+        auto& tex2 = *tex2_ptr;
+        tex2->wait_until_loaded();
+        tex2->upload();
 
-      tex_array1 = tex2->texture_array();
-      array_index1 = tex2->array_index();
+        tex_array1 = tex2->texture_array();
+        array_index1 = tex2->array_index();
+      }
     }
 
     _render_batches[batch_counter].tex_array0 = tex_array0;
@@ -79,19 +148,17 @@ void WMOGroupRender::upload()
   _draw_calls.clear();
   WMOCombinedDrawCall* draw_call = nullptr;
   std::vector<WMORenderBatch*> _used_batches;
-  bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
 
   batch_counter = 0;
   for (auto& batch : _wmo_group->_batches)
   {
-    std::uint16_t material_to_use = batch.texture;
-    if (modern_features && batch.flags & 2)
-        material_to_use = batch.unused[5];
+    std::uint16_t const material_to_use =
+      resolve_wmo_batch_material(batch, use_large_material, material_count);
 
     WMOMaterial& mat(_wmo_group->wmo->materials.at(material_to_use));
 
     bool backface_cull = !mat.flags.unculled;
-    bool use_tex2 = mat.shader == 8 || mat.shader == 6 || mat.shader == 5 || mat.shader == 3 || mat.shader == 21 || mat.shader == 23;
+    bool use_tex2 = wmo_material_uses_second_texture(mat.shader);
 
     bool create_draw_call = false;
     if (draw_call && draw_call->backface_cull == backface_cull && batch.index_start == draw_call->index_start + draw_call->index_count)
@@ -222,9 +289,12 @@ void WMOGroupRender::upload()
   gl.bindTexture(GL_TEXTURE_BUFFER, _render_batch_tex);
   gl.texBuffer(GL_TEXTURE_BUFFER,  GL_RGBA32UI, _render_batch_tex_buffer);
 
-  gl.bufferData<GL_ELEMENT_ARRAY_BUFFER, std::uint16_t>(_indices_buffer, _wmo_group->_indices, GL_STATIC_DRAW);
+  gl.bufferData<GL_ELEMENT_ARRAY_BUFFER, std::uint32_t>(_indices_buffer, _wmo_group->_indices, GL_STATIC_DRAW);
 
-  if (_wmo_group->header.flags.has_two_motv)
+  // Modern groups often ship 2–4 MOTV chunks even when MOGP.has_two_motv is clear.
+  // Shader 23 (and other dual-UV paths) sample texcoord_2 — upload whenever present.
+  _has_texcoords_2 = !_wmo_group->_texcoords_2.empty();
+  if (_has_texcoords_2)
   {
     gl.bufferData<GL_ARRAY_BUFFER, glm::vec2> ( _texcoords_buffer_2
         , _wmo_group->_texcoords_2
@@ -259,6 +329,7 @@ void WMOGroupRender::unload()
   _uploaded = false;
   _vao_is_setup = false;
   _shadow_vao_is_setup = false;
+  _has_texcoords_2 = false;
 }
 
 void WMOGroupRender::setupVao(OpenGL::Scoped::use_program& wmo_shader)
@@ -272,7 +343,7 @@ void WMOGroupRender::setupVao(OpenGL::Scoped::use_program& wmo_shader)
     wmo_shader.attrib("texcoord", _texcoords_buffer, 2, GL_FLOAT, GL_FALSE, 0, 0);
     wmo_shader.attribi("batch_mapping", _render_batch_mapping_buffer, 1, GL_UNSIGNED_INT, 0, 0);
 
-    if (_wmo_group->header.flags.has_two_motv)
+    if (_has_texcoords_2)
     {
       wmo_shader.attrib("texcoord_2", _texcoords_buffer_2, 2, GL_FLOAT, GL_FALSE, 0, 0);
     }
@@ -346,7 +417,7 @@ void WMOGroupRender::draw(OpenGL::Scoped::use_program& wmo_shader
 
     for (auto& draw_call : _draw_calls)
     {
-      gl.drawElements (GL_TRIANGLES, draw_call.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(sizeof(std::uint16_t)*draw_call.index_start));
+      gl.drawElements (GL_TRIANGLES, draw_call.index_count, GL_UNSIGNED_INT, reinterpret_cast<void*>(sizeof(std::uint32_t)*draw_call.index_start));
     }
 
     return;
@@ -383,7 +454,7 @@ void WMOGroupRender::draw(OpenGL::Scoped::use_program& wmo_shader
       gl.bindTexture(GL_TEXTURE_2D_ARRAY, draw_call.samplers[i]);
     }
 
-    gl.drawElements (GL_TRIANGLES, draw_call.index_count, GL_UNSIGNED_SHORT, reinterpret_cast<void*>(sizeof(std::uint16_t)*draw_call.index_start));
+    gl.drawElements (GL_TRIANGLES, draw_call.index_count, GL_UNSIGNED_INT, reinterpret_cast<void*>(sizeof(std::uint32_t)*draw_call.index_start));
   }
 }
 
@@ -395,43 +466,56 @@ void WMOGroupRender::initRenderBatches()
   _render_batches.resize(_wmo_group->_batches.size());
 
   QSettings settings;
-  bool modern_features = settings.value("modern_features", false).toBool();
+  bool const use_large_material = wmo_uses_large_material_id();
   bool log_wmo_terrain_blend = settings.value("log_wmo_terrain_blend", false).toBool();
+  std::size_t const material_count = _wmo_group->wmo->materials.size();
 
   std::size_t batch_counter = 0;
   for (auto& batch : _wmo_group->_batches)
   {
     // some custom models have bugged batch.vertex_end as 0, avoid crash
-    if (batch.vertex_end >= batch.vertex_start)
+    if (batch.vertex_end >= batch.vertex_start
+        && static_cast<std::size_t>(batch.vertex_start) < _render_batch_mapping.size())
     {
-        for (std::size_t i = 0; i < (batch.vertex_end - batch.vertex_start + 1); ++i)
+        std::size_t const last = std::min<std::size_t>(batch.vertex_end
+                                                      , _render_batch_mapping.size() - 1);
+        for (std::size_t i = batch.vertex_start; i <= last; ++i)
         {
-          _render_batch_mapping[batch.vertex_start + i] = static_cast<unsigned>(batch_counter + 1);
+          _render_batch_mapping[i] = static_cast<unsigned>(batch_counter + 1);
         }
     }
-    else
+    else if (batch.vertex_end < batch.vertex_start)
         LogError << "WMO has incorrect render batch data. batch.vertex_end < batch.vertex_start" << std::endl;
+
+    std::uint16_t const material_to_use =
+      resolve_wmo_batch_material(batch, use_large_material, material_count);
+
+    WMOMaterial const& mat (_wmo_group->wmo->materials.at (material_to_use));
 
     std::uint32_t flags = 0;
 
-    if (_wmo_group->header.flags.exterior_lit || _wmo_group->header.flags.exterior)
-    {
-      flags |= WMORenderBatchFlags::eWMOBatch_ExteriorLit;
-    }
     if (_wmo_group->header.flags.has_vertex_color || _wmo_group->header.flags.use_mocv2_for_texture_blending)
     {
       flags |= WMORenderBatchFlags::eWMOBatch_HasMOCV;
     }
 
-    std::uint16_t material_to_use = batch.texture;
-    if (modern_features && batch.flags == 2)
-        material_to_use = batch.unused[5];
-
-    WMOMaterial const& mat (_wmo_group->wmo->materials.at (material_to_use));
-
+    // Portal culling is disabled in the editor, so INTERIOR groups are still drawn
+    // from outside. Using only MOHD ambient for those makes facades look "unlit"
+    // (black) at night while EXTERIOR groups look fine. Prefer exterior lighting
+    // for every lit batch; material Unlit (SIDN windows, etc.) stays on the unlit path.
     if (mat.flags.unlit)
     {
       flags |= WMORenderBatchFlags::eWMOBatch_Unlit;
+    }
+    else
+    {
+      flags |= WMORenderBatchFlags::eWMOBatch_ExteriorLit;
+    }
+
+    if (_wmo_group->header.flags.exterior_lit || _wmo_group->header.flags.exterior
+        || mat.flags.ext_light)
+    {
+      flags |= WMORenderBatchFlags::eWMOBatch_ExteriorLit;
     }
 
     if (mat.flags.unfogged)

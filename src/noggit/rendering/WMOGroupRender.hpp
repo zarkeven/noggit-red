@@ -101,6 +101,8 @@ namespace Noggit::Rendering
     bool _uploaded = false;
     bool _vao_is_setup = false;
     bool _shadow_vao_is_setup = false;
+    //! Survives clearing `_wmo_group->_texcoords_2` after upload (VAO setup is deferred).
+    bool _has_texcoords_2 = false;
 
   };
 }
